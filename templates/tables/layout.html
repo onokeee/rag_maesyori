@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}表の範囲と見出しを確認{% endblock %}
+{% block container_class %}wide{% endblock %}
+{% block content %}
+{{ ui.steps(steps, step) }}
+<div class="page-head">
+  <div>
+    <h1>表の範囲と見出しを確認</h1>
+    <p class="page-lead">ファイル: {{ imp.file_name }}{% if imp.source.kind == 'excel' %}／シート: {{ sheet }}{% endif %}。
+      色分けで、見出し・データ・小計・注記・除外される行を確かめてください。行番号をクリックすると見出し行やデータの終わりを指定できます。</p>
+  </div>
+</div>
+
+<div data-layout-page data-detect-url="{{ url_for('tables.layout_detect', import_id=imp.id) }}">
+<form method="post" action="{{ url_for('tables.save_layout', import_id=imp.id) }}" class="stack">
+  {% call ui.card("範囲") %}
+    <div class="grid-3">
+      <label>見出し行（2段なら「6,7」）
+        <input type="text" name="header_rows" class="input" value="{{ layout.header_rows | join(',') }}" data-header-input>
+      </label>
+      <label>データの終わりの行（空欄＝自動）
+        <input type="text" name="data_end_row" class="input" value="{{ data_end_saved }}" placeholder="自動（{{ layout.data_end }}行目）" data-end-input>
+      </label>
+      <div class="field">
+        <span>行番号をクリックしたとき</span>
+        <label class="check"><input type="radio" name="pick" value="header" checked> 見出し行にする（Shift で2段）</label>
+        <label class="check"><input type="radio" name="pick" value="end"> データの終わりにする</label>
+      </div>
+    </div>
+    <dl class="tbl-summary">
+      <div><dt>表の形</dt><dd data-kind>{{ info.table_kind_label }}</dd></div>
+      <div><dt>データの範囲</dt><dd data-range>{{ layout.data_start }}〜{{ layout.data_end }}行目</dd></div>
+      <div><dt>行の内訳</dt><dd data-counts style="font-size:.9rem">{% for k, v in info.counts.items() %}{{ k }} {{ v }}{% if not loop.last %}／{% endif %}{% endfor %}</dd></div>
+    </dl>
+    <div data-crosstab class="flash flash-error" role="alert" {% if layout.table_kind != 'crosstab' %}hidden{% endif %}>月別集計のようなクロス集計の表には対応していません。1行＝1件の一覧表を選んでください。</div>
+    <ul class="list-plain warn" data-warnings>{% for w in layout.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+    <p class="hint">見出し: <span data-headers>{{ layout.headers | join('、') }}</span></p>
+  {% endcall %}
+
+  {% call ui.card("先頭" ~ rows|length ~ "行") %}
+    {{ ui.grid_legend() }}
+    {{ ui.data_grid(rows, max_cols=width, caption="元の表の先頭") }}
+  {% endcall %}
+
+  <div class="form-actions">
+    <a class="btn ghost" href="{{ url_for('tables.source', import_id=imp.id) }}">取り込み設定の選択に戻る</a>
+    <button type="submit" class="btn primary" data-layout-submit {{ 'disabled' if layout.table_kind == 'crosstab' }}>この範囲で次へ</button>
+  </div>
+</form>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='tables.js') }}"></script>{% endblock %}

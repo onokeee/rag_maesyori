@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}取り込み履歴{% endblock %}
+{% macro pager() -%}
+{%- if pages > 1 %}
+<nav class="pagination" aria-label="ページ">
+  {%- if page > 1 %}<a class="btn small" href="{{ url_for('history.index', tab=tab, page=page - 1, **query) }}">前へ</a>{% endif %}
+  <span class="muted">{{ page }} / {{ pages }}ページ（{{ total }}件）</span>
+  {%- if page < pages %}<a class="btn small" href="{{ url_for('history.index', tab=tab, page=page + 1, **query) }}">次へ</a>{% endif %}
+</nav>
+{%- endif %}
+{%- endmacro %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>取り込み履歴</h1>
+    <p class="page-lead">取り込んだ帳票と一覧表の一覧です。</p>
+  </div>
+</div>
+
+<nav class="tabs" aria-label="種類">
+  <a href="{{ url_for('history.index', tab='forms') }}" class="{{ 'active' if tab == 'forms' }}" {% if tab == 'forms' %}aria-current="page"{% endif %}>帳票<span class="tab-count">{{ form_count }}</span></a>
+  <a href="{{ url_for('history.index', tab='tables') }}" class="{{ 'active' if tab == 'tables' }}" {% if tab == 'tables' %}aria-current="page"{% endif %}>一覧表<span class="tab-count">{{ table_count }}</span></a>
+</nav>
+
+{% if tab == 'forms' %}
+<form method="get" class="filter-bar" role="search" aria-label="帳票の絞り込み">
+  <input type="hidden" name="tab" value="forms">
+  <label class="field"><span>帳票の種類</span>
+    <select name="pattern_id">
+      <option value="">すべて</option>
+      {% for p in patterns %}<option value="{{ p.id }}" {{ 'selected' if filters.pattern_id == p.id }}>{{ p.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>状態</span>
+    <select name="state">
+      <option value="">すべて</option>
+      {% for key, label in form_states.items() %}<option value="{{ key }}" {{ 'selected' if filters.state == key }}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>取り込み日（から）</span><input type="date" name="date_from" value="{{ filters.date_from }}"></label>
+  <label class="field"><span>取り込み日（まで）</span><input type="date" name="date_to" value="{{ filters.date_to }}"></label>
+  <label class="field grow"><span>キーワード</span><input type="search" name="q" value="{{ filters.q }}" placeholder="ファイル名・タイトル"></label>
+  <div class="btn-row">
+    <button type="submit" class="btn">絞り込む</button>
+    {% if query %}<a class="btn ghost" href="{{ url_for('history.index', tab='forms') }}">条件をクリア</a>{% endif %}
+  </div>
+</form>
+
+{% if rows %}
+<form method="post" action="{{ url_for('history.download_forms') }}">
+  <div class="bulkbar">
+    <button type="submit" class="btn primary" disabled>選択した<span data-count-of="ids">0</span>件をダウンロード（zip）</button>
+    <span class="hint">確定済みの帳票だけ選べます（修正中の帳票は確定済みの版が入ります）。</span>
+  </div>
+  <div class="card table-wrap" style="padding:0">
+    <table class="table">
+      <thead>
+        <tr>
+          <th class="col-check"><input type="checkbox" data-check-all="ids" aria-label="このページの確定済みをすべて選ぶ"></th>
+          <th class="num">No.</th><th>タイトル</th><th>帳票の種類</th><th>状態</th><th>取り込み日時</th><th class="actions">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in rows %}
+        <tr>
+          <td class="col-check">
+            <input type="checkbox" name="ids" value="{{ d.id }}" {{ 'disabled' if d.state not in ('confirmed', 'modified') }} aria-label="{{ d.title or d.file_name }} を選ぶ">
+          </td>
+          <td class="num">{{ d.id }}</td>
+          <td><a href="{{ d.href }}">{{ d.title or d.file_name }}</a>{% if d.title and d.title != d.file_name %}<div class="small muted">{{ d.file_name }}</div>{% endif %}</td>
+          <td>{{ d.pattern_name or "—" }}</td>
+          <td>{{ ui.badge(d.state) }}</td>
+          <td class="nowrap">{{ (d.created_at or "") | replace("T", " ") }}</td>
+          <td class="actions">
+            {% if d.state == 'confirmed' %}
+              <a class="btn small" href="{{ url_for('forms.download_md', doc_id=d.id) }}">Markdownをダウンロード</a>
+            {% else %}
+              <a class="btn small" href="{{ d.href }}">続きを確認</a>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</form>
+{{ pager() }}
+{% elif query %}
+  {{ ui.empty_state("条件に合う帳票はありません", "絞り込みの条件を変えてください。", url_for('history.index', tab='forms'), "条件をクリア", icon="search") }}
+{% else %}
+  {{ ui.empty_state("取り込んだ帳票はまだありません", "報告書などの Excel を取り込むと、ここに表示されます。", url_for('forms.new'), "帳票を取り込む") }}
+{% endif %}
+
+{% else %}
+<form method="get" class="filter-bar" role="search" aria-label="一覧表の絞り込み">
+  <input type="hidden" name="tab" value="tables">
+  <label class="field"><span>一覧表の取り込み設定</span>
+    <select name="template_id">
+      <option value="">すべて</option>
+      {% for t in templates %}<option value="{{ t.id }}" {{ 'selected' if filters.template_id == t.id }}>{{ t.name }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field"><span>状態</span>
+    <select name="status">
+      <option value="">すべて</option>
+      {% for key, label in import_states.items() %}<option value="{{ key }}" {{ 'selected' if filters.status == key }}>{{ label }}</option>{% endfor %}
+    </select>
+  </label>
+  <label class="field grow"><span>キーワード</span><input type="search" name="q" value="{{ filters.q }}" placeholder="ファイル名・設定名"></label>
+  <div class="btn-row">
+    <button type="submit" class="btn">絞り込む</button>
+    {% if query %}<a class="btn ghost" href="{{ url_for('history.index', tab='tables') }}">条件をクリア</a>{% endif %}
+  </div>
+</form>
+
+{% if rows %}
+<div class="card table-wrap" style="padding:0">
+  <table class="table">
+    <thead>
+      <tr><th class="num">No.</th><th>一覧表の取り込み設定</th><th>ファイル名</th><th class="num">件数</th><th>状態</th><th>取り込み日時</th><th class="actions">操作</th></tr>
+    </thead>
+    <tbody>
+      {% for t in rows %}
+      <tr>
+        <td class="num">{{ t.id }}</td>
+        <td>{{ t.template_name or "—" }}</td>
+        <td>{{ t.file_name }}</td>
+        <td class="num">{{ t.record_count if t.record_count is not none else "—" }}</td>
+        <td>{{ ui.badge(t.status) }}</td>
+        <td class="nowrap">{{ (t.created_at or "") | replace("T", " ") }}</td>
+        <td class="actions">
+          <a class="btn small" href="{{ t.href }}">{{ '開く' if t.status in ('confirmed', 'failed') else '続きを確認' }}</a>
+          {% if t.status == 'confirmed' %}<a class="btn small" href="{{ url_for('tables.download_zip', import_id=t.id) }}">zipをダウンロード</a>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{{ pager() }}
+{% elif query %}
+  {{ ui.empty_state("条件に合う取り込みはありません", "絞り込みの条件を変えてください。", url_for('history.index', tab='tables'), "条件をクリア", icon="search") }}
+{% else %}
+  {{ ui.empty_state("取り込んだ一覧表はまだありません", "Excel/CSV の一覧を取り込むと、ここに表示されます。", url_for('tables.new'), "一覧表を取り込む") }}
+{% endif %}
+{% endif %}
+{% endblock %}

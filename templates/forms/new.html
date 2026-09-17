@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}帳票を取り込む{% endblock %}
+{% block content %}
+{{ ui.steps(steps, 1) }}
+<div class="page-head">
+  <div>
+    <h1>ファイルを選ぶ</h1>
+    <p class="page-lead">1ファイル＝1件の報告書・記録票（例：設備修理報告書）を取り込みます。一覧・台帳のように1行＝1件の表は<a href="{{ url_for('tables.new') }}">一覧表を取り込む</a>から。</p>
+  </div>
+</div>
+
+{% if active_pattern_count == 0 %}
+<div class="notice" role="note">
+  {% if pattern_count == 0 %}
+    帳票の種類がまだありません。先に見本ファイルから
+    <a href="{{ url_for('form_types.new') }}">帳票の種類を作る</a>と、項目を自動で読み取れます。
+  {% else %}
+    使用中の帳票の種類がありません。<a href="{{ url_for('form_types.index') }}">帳票の種類</a>で読み取りテストをして [使用開始] を押してください。
+  {% endif %}
+</div>
+{% endif %}
+
+{% call ui.card() %}
+<form method="post" action="{{ url_for('forms.upload') }}" enctype="multipart/form-data" class="stack">
+  {{ ui.file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ", hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）") }}
+  <div class="form-actions">
+    <button type="submit" class="btn primary">ファイルを選んで次へ</button>
+  </div>
+</form>
+{% endcall %}
+{% endblock %}

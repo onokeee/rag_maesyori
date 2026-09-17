@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}帳票の種類とシートを確認{% endblock %}
+{% block content %}
+{{ ui.steps(steps, 2) }}
+<div class="page-head">
+  <div>
+    <h1>帳票の種類とシートを確認</h1>
+    <p class="page-lead">ファイル: {{ doc.file_name }} {{ ui.badge(doc.state) }}</p>
+  </div>
+  <div class="btn-row">
+    <a class="btn ghost" href="{{ url_for('history.index') }}">取り込み履歴に戻る</a>
+  </div>
+</div>
+
+{% if duplicate %}
+<div class="notice" role="note">同じ内容のファイルがすでに確定済みです:
+  <a href="{{ url_for('forms.detail', doc_id=duplicate.id) }}">{{ duplicate.title or duplicate.file_name }}（No.{{ duplicate.id }}）</a></div>
+{% endif %}
+
+{% if table_sheets %}
+<div class="notice info" role="note" data-table-suggest>
+  <strong>一覧表のようです。</strong>
+  シート「{{ table_sheets | join('」「') }}」は、見出し行の下に同じ形の行が10行以上続いています。1行＝1件の表なら
+  <a href="{{ url_for('tables.new') }}">一覧表の取り込みへ</a>進むと、行ごとの Markdown を作れます。
+</div>
+{% endif %}
+
+{% if info_missing %}
+  {{ ui.empty_state("元のファイルを読み込めませんでした", "ファイルが削除されたか壊れている可能性があります。", url_for('forms.new'), "ファイルを選び直す") }}
+{% elif not matches %}
+  {% call ui.card() %}
+  {{ ui.empty_state("使用中の帳票の種類がありません", "見本ファイルから帳票の種類を作り、読み取りテストの後に [使用開始] を押すと、ここで選べるようになります。", url_for('form_types.new'), "帳票の種類を作る") }}
+  {% endcall %}
+{% else %}
+<form method="post" action="{{ url_for('forms.reread' if lost_work else 'forms.read', doc_id=doc.id) }}" data-type-select data-suggested='{{ suggested | tojson }}'>
+  {% call ui.card("帳票の種類") %}
+    {% if ai_result %}
+    <div class="ai-box">
+      <strong>AIの推定（{{ ai_result.model }}）:</strong>
+      {% if ai_result.pattern_id %}{{ pattern_names[ai_result.pattern_id] }}{% else %}当てはまる帳票の種類はありません{% endif %}
+      {% if ai_result.sheets %}<br>読み取るシート: {{ ai_result.sheets | join('、') }}{% endif %}
+      {% if ai_result.reason %}<br><span class="muted">{{ ai_result.reason }}</span>{% endif %}
+      {% if ai_result.pattern_id %}<br><small class="muted">AIの推定を選んだ状態にしました。確認してから読み取ってください。</small>{% endif %}
+    </div>
+    {% endif %}
+    <div class="stack" role="radiogroup" aria-label="帳票の種類">
+      {% for m in matches %}
+      <label class="check">
+        <input type="radio" name="pattern_id" value="{{ m.pattern.id }}" {{ 'checked' if m.pattern.id == selected_id }} required>
+        <span><strong>{{ m.pattern.name }}</strong> <span class="muted">{{ m.pattern.version }}</span></span>
+        <small>{{ m.total_fields }}項目中{{ m.found_fields }}項目が見つかりました{% if m.sheet_names %}（シート: {{ m.sheet_names | join('、') }}）{% endif %}</small>
+      </label>
+      {% endfor %}
+    </div>
+    {% if matches[0].total_fields and matches[0].found_fields * 2 < matches[0].total_fields and not ai_result %}
+      <p class="hint">どの種類とも見つかった項目が少なめです。別の帳票かもしれません。
+        <a href="{{ url_for('form_types.new') }}">帳票の種類を作る</a>こともできます。</p>
+    {% endif %}
+    {% if llm_ready %}
+      <button type="submit" class="btn small" formaction="{{ url_for('forms.ai_classify', doc_id=doc.id) }}" formnovalidate>AIで種類を推定（{{ model_picker.current }}）</button>
+      <small class="muted">シートのセル内容をAIに送ります。</small>
+    {% endif %}
+  {% endcall %}
+
+  {% call ui.card("読み取るシート") %}
+    <div class="sheet-list">
+      {% for s in sheets %}
+      <label class="check">
+        <input type="checkbox" name="sheets" value="{{ s.name }}" {{ 'checked' if s.name in selected_sheets }}>
+        <span>{{ s.name }}{% if s.hidden %} <small class="muted">（非表示のシート）</small>{% endif %}</span>
+        <small>値のあるセル {{ s.cells }}{% if s.images %} / 画像 {{ s.images }}件{% endif %}{% if s.name in table_sheets %} / 一覧表らしい{% endif %}</small>
+      </label>
+      {% endfor %}
+    </div>
+  {% endcall %}
+
+  {% if lost_work %}
+  <div class="notice" role="alert">
+    <p>この帳票は{{ '確定済み' if doc.state == 'confirmed' else '修正中' }}です。読み取り直すと、手で修正した値とAIが入力した値は失われます（確定済みの版は、確定し直すまで残ります）。</p>
+    <label class="check"><input type="checkbox" name="acknowledge" required> 手修正とAI入力が失われることを確認しました</label>
+  </div>
+  {% elif doc.state == 'reviewing' %}
+  <p class="hint">確認中の帳票です。読み取り直すと、確認画面で修正した値は読み取り結果に置き換わります。</p>
+  {% endif %}
+
+  <div class="form-actions">
+    {% if lost_work %}<a class="btn ghost" href="{{ url_for('forms.detail', doc_id=doc.id) }}">やめる</a>{% endif %}
+    <button type="submit" class="btn primary">{{ '読み取り直す' if lost_work or doc.state == 'reviewing' else '読み取る' }}</button>
+  </div>
+</form>
+{% endif %}
+
+<p class="hint">間違ったファイルを選んだときは、<a href="{{ url_for('forms.detail', doc_id=doc.id) }}">この帳票の詳細</a>から削除できます。</p>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='review.js') }}"></script>{% endblock %}

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}読み取りテスト{% endblock %}
+{% block container_class %}wide{% endblock %}
+{% block content %}
+{% set current = 'form_types' %}{% include 'settings/_tabs.html' %}
+{{ ui.steps(steps, 4 if pattern.status == 'active' else 3) }}
+<div class="page-head">
+  <div>
+    <h1>読み取りテスト: {{ pattern.name }} {{ ui.badge(pattern.status) }}</h1>
+    <p class="page-lead">見本ファイル全件をこの設定で読み取った結果です。取れていない項目は「探す見出し」や「値の位置」を見直してください。</p>
+  </div>
+  <div class="btn-row">
+    <a class="btn" href="{{ url_for('form_types.edit', pattern_id=pattern.id) }}">項目を直す</a>
+    {% if pattern.status != 'active' %}
+    <form method="post" action="{{ url_for('form_types.change_status', pattern_id=pattern.id) }}" class="inline">
+      <button name="status" value="active" class="btn primary" {{ 'disabled' if not pattern.fields }}>使用開始</button>
+    </form>
+    {% else %}
+    <form method="post" action="{{ url_for('form_types.change_status', pattern_id=pattern.id) }}" class="inline">
+      <input type="hidden" name="next" value="{{ request.path }}">
+      <button name="status" value="inactive" class="btn">使用を停止</button>
+    </form>
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票を取り込む</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if pattern.status == 'draft' %}
+<div class="notice info" role="note">この種類はまだ使用中ではありません。結果に問題がなければ[使用開始]を押すと、帳票を取り込むときの候補に出ます。</div>
+{% elif pattern.status == 'inactive' %}
+<div class="notice" role="note">この種類は停止中です。[使用開始]を押すと、また候補に出ます。</div>
+{% endif %}
+
+{% if not results %}
+  {% call ui.card() %}
+  {{ ui.empty_state("見本ファイルがありません", "編集画面で見本ファイルを追加すると、ここで読み取り結果を確認できます。", url_for('form_types.edit', pattern_id=pattern.id), "見本ファイルを追加") }}
+  {% endcall %}
+{% else %}
+{% call ui.card("項目ごとの値") %}
+  <div class="table-wrap">
+  <table class="table test-table">
+    <thead>
+      <tr>
+        <th>項目</th>
+        {% for r in results %}
+          <th>{{ r.sample.file_name }}<br><small class="muted">{{ r.match.total_fields }}項目中{{ r.found }}項目が見つかりました ／ シート: {{ r.sheets | join('、') }}</small></th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+    {% for fd in pattern.fields %}
+      <tr>
+        <th scope="row">{{ fd.display_name }}{% if fd.required %}<span class="req">*</span>{% endif %}{% if fd.rag_output == 'omit' %}<br><small class="muted">RAGに出さない</small>{% endif %}</th>
+        {% for r in results %}
+          {% set f = r.fields[fd.field_name] %}
+          <td class="{{ 'missing' if f.value in (none, '') and fd.required else ('empty-value' if f.value in (none, '')) }}">
+            {% if f.value in (none, '') %}<span class="muted">—（見つかりません）</span>{% else %}<span class="pre">{{ f.value | string | truncate(80) }}</span>{% if f.unit %} {{ f.unit }}{% endif %}{% endif %}
+            {% if f.value_cell %}<small class="muted">{{ f.value_cell }}</small>{% endif %}
+            {% if f.warning %}<div class="warn">{{ f.warning }}</div>{% endif %}
+          </td>
+        {% endfor %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endcall %}
+
+{% for r in results %}
+{% call ui.card("Markdown: " ~ r.sample.file_name, subtitle=r.file_name) %}
+  {% if r.missing_required %}<p class="notice">必須の項目が空欄です: {{ r.missing_required | join('、') }}</p>{% endif %}
+  <details {{ 'open' if loop.first }}>
+    <summary>Markdownを表示</summary>
+    <pre class="code md-preview">{{ r.markdown }}</pre>
+  </details>
+{% endcall %}
+{% endfor %}
+{% endif %}
+{% endblock %}

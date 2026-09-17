@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}LightRAGへの入れ方{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>LightRAGへの入れ方</h1>
+    <p class="page-lead">このアプリで作った Markdown(.md) を LightRAG に手作業で入れるときの手順と、サーバー側の推奨設定です。LightRAG 1.5.7 を主な対象にし、1.4.x との違いを注記しています。</p>
+  </div>
+  <a class="btn primary" href="{{ url_for('settings.entity_types_yaml') }}">エンティティ種別YAMLをダウンロード</a>
+</div>
+{% set current = "lightrag" %}{% include "settings/_tabs.html" %}
+
+<div class="doc-body">
+{% call ui.card("1. サーバーのバージョンを確認する") %}
+  <p><code>GET /health</code> の応答でバージョンを確認します。バージョンによってファイルの扱いが違います。</p>
+  <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>項目</th><th>1.5.x（主な対象）</th><th>1.4.x</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">文書ID（doc_id）</th><td>ファイル名の MD5</td><td>内容の MD5</td></tr>
+        <tr><th scope="row">同じ名前のファイル</th><td>HTTP 409 で断られる。変更したファイルは<strong>先に削除してから</strong>入れ直す</td><td>内容が変われば別の文書として入る（古い方は手で削除）</td></tr>
+        <tr><th scope="row">エンティティ種別</th><td><code>ENTITY_TYPE_PROMPT_FILE</code>（YAML）。<code>ENTITY_TYPES</code> を書くと起動に失敗する</td><td><code>ENTITY_TYPES</code> 環境変数（リスト）</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="hint">このアプリのファイル名は、同じ帳票・同じ期間なら毎回同じになります（入れ替えの手順が単純になります）。</p>
+{% endcall %}
+
+{% call ui.card("2. サーバーの .env を設定する（最初に1回）") %}
+  <pre class="code"><code>SUMMARY_LANGUAGE=Japanese
+ENTITY_TYPE_PROMPT_FILE={{ download_name }}</code></pre>
+  <ul>
+    <li><code>SUMMARY_LANGUAGE=Japanese</code>: 既定は English。英語のままだとエンティティの説明や検索キーワードが英語になります。</li>
+    <li><code>ENTITY_TYPE_PROMPT_FILE</code>（1.5.x）: 下の「設備保全向けのエンティティ種別」YAML を <code>PROMPT_DIR/entity_type/</code> に置き、ファイル名を指定します。既定の種別には 設備・部品・原因・処置 がありません。</li>
+    <li>埋め込みモデルは日本語に強いものを<strong>最初に決めて固定</strong>します。途中で変えると全件の入れ直しになります。</li>
+    <li>数万件を入れる場合は、PostgreSQL などのストレージを使います（既定のファイル保存は小規模向け）。</li>
+  </ul>
+{% endcall %}
+
+{% call ui.card("3. 分割（チャンク）の設定") %}
+  <ul>
+    <li><code>LIGHTRAG_PARSER</code> を設定しない場合、1,200トークンの固定幅で分割され、日本語の文や記録の途中で切れることがあります。</li>
+    <li><strong>帳票</strong>: 1件がほぼ1チャンクに収まるので、既定のままで構いません。</li>
+    <li><strong>一覧表の記録ファイル</strong>: 一覧表の取り込み設定で「ファイル名にLightRAG用のヒントを付ける」をオンにする（<code>.[legacy-R(chunk_ts=800,chunk_ol=0)]</code> が付きます）か、サーバー側で <code>LIGHTRAG_PARSER</code> を legacy-R にします。</li>
+    <li>投入後、文書の状態（doc_status）の <code>parse_engine</code> / <code>chunk_opts</code> で、実際にどう分割されたかを確認できます。</li>
+  </ul>
+{% endcall %}
+
+{% call ui.card("4. 件数・ランキング・推移は集計ファイルで答える") %}
+  <p>LightRAG は質問ごとに数十件程度の記録しか読みません。「今年いちばん止まった設備は？」「月ごとの件数は？」のような質問は、記録ファイルだけでは正しく数えられません。</p>
+  <p>一覧表の取り込みで作られる <strong>集計ファイル</strong>（<code>…_集計_月次_…</code>、<code>…_集計_設備別_…</code>）と <strong>データセット説明</strong>（<code>…_00_データセット説明.md</code>）も一緒に入れてください。数値はアプリで計算済みです。</p>
+{% endcall %}
+
+{% call ui.card("5. 更新するときの手順") %}
+  <p>このアプリは投入済みのファイルとの差分を管理しません。取り込みごとに、その取り込みの全ファイルを zip で渡します。</p>
+  <ol>
+    <li>一覧表の完了画面で <strong>Markdownをまとめてダウンロード（zip）</strong> を押します。</li>
+    <li>同じファイル名のものが LightRAG に入っていれば、LightRAG で先に<strong>削除</strong>します（1.5.x は同じ名前だと 409 になり、入れ直せません）。</li>
+    <li>LightRAG の処理が終わる（idle になる）のを待ちます。</li>
+    <li>zip の <code>RAG投入用/</code> のファイルを LightRAG に入れます。<code>管理用_RAGには入れない/</code> は入れません。</li>
+  </ol>
+  <p class="hint">帳票は、確定し直したものだけを「削除してから入れ直す」で更新します。</p>
+{% endcall %}
+
+{% call ui.card("設備保全向けのエンティティ種別（YAML）", id="entity-types") %}
+  <p>種別: 設備 / 部品 / 不具合現象 / 原因 / 処置 / 工程/ライン / 部署 / アラーム（当てはまらないものは その他）。<code>ENTITY_EXTRACTION_USE_JSON</code> が true でも false でも使えるよう、両方の例を入れています。</p>
+  <div class="btn-row" style="margin-bottom:.5rem">
+    <a class="btn primary" href="{{ url_for('settings.entity_types_yaml') }}">YAMLをダウンロード（{{ download_name }}）</a>
+    <button type="button" class="btn" data-copy="#entityYaml">コピー</button>
+  </div>
+  <pre class="code" id="entityYaml">{{ entity_yaml }}</pre>
+  <p class="hint">書式はサーバーのバージョンで変わることがあります。お使いの版の <code>prompts/samples/entity_type_prompt.sample.yml</code> と見比べてから使ってください。</p>
+{% endcall %}
+</div>
+{% endblock %}

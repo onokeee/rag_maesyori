@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+.pytest_cache/
+/instance/
+/uploads/
+/output/
+# 生成サンプル（python scripts/generate_samples.py で再生成できる）
+/samples/
+# APIキー・セッション鍵を含む
+/env
+/data/
+/.flask_secret

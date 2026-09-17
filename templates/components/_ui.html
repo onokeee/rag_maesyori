@@ -1,0 +1,173 @@
+{#- 画面共通の部品。使い方: {% import "components/_ui.html" as ui %} -#}
+
+{#- 状態 → (表示語, 色) 。帳票・帳票の種類・一覧表の取り込み・ジョブ・AI整形の行 -#}
+{% set STATE_LABELS = {
+  "unread": ("読み取り前", "gray"), "reviewing": ("確認中", "amber"), "modified": ("修正中", "violet"),
+  "confirmed": ("確定済み", "green"),
+  "draft": ("作成中", "amber"), "active": ("使用中", "green"), "inactive": ("停止中", "gray"),
+  "uploaded": ("読み込み前", "gray"), "reading": ("読み込み中", "blue"), "preview": ("確認中", "amber"),
+  "confirming": ("確定処理中", "blue"), "failed": ("失敗", "red"),
+  "queued": ("待ち", "gray"), "running": ("実行中", "blue"), "paused": ("一時停止", "amber"), "done": ("完了", "green"),
+  "cancelled": ("中止", "gray"), "interrupted": ("中断", "red"),
+  "ok": ("OK", "green"), "flagged": ("要確認", "amber"), "rule_only": ("ルールのみ", "gray"), "error": ("エラー", "red"),
+  "skipped": ("対象外", "gray"), "outdated": ("古い結果", "amber"), "excluded": ("除外", "gray"),
+  "auto": ("自動で読み取り", "blue"), "ai": ("AIが入力（要確認）", "violet"), "manual": ("手で修正", "teal"),
+  "required": ("要確認", "amber"),
+} %}
+
+{#- 手順の表示。items: 見出しの配列、current: 1始まりの現在位置 -#}
+{% macro steps(items, current) -%}
+<ol class="steps" aria-label="手順">
+  {%- for label in items %}
+  {%- set n = loop.index %}
+  <li class="{{ 'done' if n < current else ('current' if n == current else '') }}" {% if n == current %}aria-current="step"{% endif %}>
+    <span class="step-no" aria-hidden="true">{% if n < current %}&#10003;{% else %}{{ n }}{% endif %}</span>
+    <span class="step-label">{{ label }}</span>
+  </li>
+  {%- endfor %}
+</ol>
+{%- endmacro %}
+
+{#- カード。{% call ui.card("見出し", actions=...) %}本文{% endcall %} -#}
+{% macro card(title=None, subtitle=None, class="", id=None, level=2) -%}
+<section class="card {{ class }}" {% if id %}id="{{ id }}"{% endif %}>
+  {%- if title %}
+  <div class="card-head">
+    <div>
+      <h{{ level }} class="card-title">{{ title }}</h{{ level }}>
+      {%- if subtitle %}<p class="card-subtitle">{{ subtitle }}</p>{% endif %}
+    </div>
+    {%- if kwargs.actions %}<div class="btn-row">{{ kwargs.actions }}</div>{% endif %}
+  </div>
+  {%- endif %}
+  {{ caller() if caller else "" }}
+</section>
+{%- endmacro %}
+
+{#- 状態タグ。label を渡すとその語で表示 -#}
+{% macro badge(state, label=None) -%}
+{%- set info = STATE_LABELS.get(state, (state, "gray")) -%}
+<span class="badge badge-{{ info[1] }} badge-{{ state }}">{{ label or info[0] }}</span>
+{%- endmacro %}
+
+{#- チップ列。items: [{"label","count","kind","href"(任意)}] または (label, count, kind) -#}
+{% macro chips(items, label="内訳") -%}
+<ul class="chips" aria-label="{{ label }}">
+  {%- for item in items %}
+  {%- if item is mapping %}{% set lb, cnt, kind, href = item.label, item.count, item.kind, item.href %}
+  {%- else %}{% set lb, cnt, kind, href = item[0], item[1], (item[2] if item|length > 2 else ''), None %}{% endif %}
+  <li>
+    {%- if href %}<a class="chip chip-{{ kind or 'plain' }}{{ ' is-zero' if cnt == 0 }}" href="{{ href }}">{% else %}<span class="chip chip-{{ kind or 'plain' }}{{ ' is-zero' if cnt == 0 }}">{% endif %}
+      {{ lb }}{% if cnt is not none %} <strong>{{ cnt }}</strong>{% endif %}
+    {%- if href %}</a>{% else %}</span>{% endif %}
+  </li>
+  {%- endfor %}
+</ul>
+{%- endmacro %}
+
+{#- 何もないときの表示 -#}
+{% macro empty_state(title, text=None, action_url=None, action_label=None, icon="inbox") -%}
+<div class="empty-state">
+  <svg class="empty-icon" viewBox="0 0 48 48" aria-hidden="true">
+    {%- if icon == "search" %}
+    <circle cx="21" cy="21" r="11" fill="none" stroke="currentColor" stroke-width="3"/><path d="m29 29 9 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+    {%- else %}
+    <path d="M8 26 13 10h22l5 16v12H8z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/><path d="M8 26h10l2 4h8l2-4h10" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+    {%- endif %}
+  </svg>
+  <p class="empty-title">{{ title }}</p>
+  {%- if text %}<p class="empty-text">{{ text }}</p>{% endif %}
+  {%- if action_url %}<a class="btn primary" href="{{ action_url }}">{{ action_label }}</a>{% endif %}
+  {{ caller() if caller else "" }}
+</div>
+{%- endmacro %}
+
+{#- 削除フォーム（送信前に確認ダイアログ）。message は「何が消えるか・元に戻せるか」を書く -#}
+{% macro confirm_delete_form(action, message, label="削除", next=None, small=True, fields=None) -%}
+<form method="post" action="{{ action }}" class="inline" data-confirm="{{ message }}" data-confirm-ok="{{ label }}">
+  {%- if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+  {%- for k, v in (fields or {}).items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+  <button type="submit" class="btn danger-outline{{ ' small' if small }}">{{ label }}</button>
+</form>
+{%- endmacro %}
+
+{#- ジョブの進捗。job: {"id","status","progress" or "progress_json", "message"}、url を渡すと app.js が自動で更新 -#}
+{% macro progress(job, url=None, label="進み具合") -%}
+{%- set prog = job.progress if job.progress is defined and job.progress is mapping else (job.progress_json if job.progress_json is mapping else {}) -%}
+{%- set done = prog.get("done", 0) or 0 -%}
+{%- set total = prog.get("total", 0) or 0 -%}
+{%- set pct = ((done * 100 / total) | round(0, 'floor') | int) if total else 0 -%}
+<div class="progress-box" {% if url %}data-job-url="{{ url }}"{% endif %} data-job-status="{{ job.status }}">
+  <div class="progress-head">
+    <span class="progress-label">{{ label }}</span>
+    <span class="progress-state">{{ badge(job.status) }}</span>
+  </div>
+  <div class="progress" role="progressbar" aria-label="{{ label }}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ pct }}">
+    <div class="progress-bar{{ ' indeterminate' if not total and job.status == 'running' }}" style="width: {{ pct }}%"></div>
+  </div>
+  <p class="progress-text"><span data-job-count>{% if total %}{{ done }} / {{ total }}件{% endif %}</span> <span data-job-message>{{ job.message or "" }}</span></p>
+</div>
+{%- endmacro %}
+
+{#- セルグリッド（元のシートのプレビュー）。
+    rows: [{"index": 行番号, "cells": [文字列...], "kind": "header|data|subtotal|note|continuation|excluded|title|blank",
+            "hidden": bool, "strike": bool, "reason": str}] または 文字列の二重配列 -#}
+{% macro data_grid(rows, max_cols=None, caption=None, show_letters=True, cell_ids=False, class="") -%}
+{%- set ncols = max_cols or (rows | map(attribute="cells") | map("length") | max if rows and rows[0] is mapping else (rows | map("length") | max if rows else 0)) -%}
+<div class="grid-wrap {{ class }}" tabindex="0" {% if caption %}aria-label="{{ caption }}"{% endif %}>
+  <table class="data-grid">
+    {%- if caption %}<caption class="sr-only">{{ caption }}</caption>{% endif %}
+    {%- if show_letters %}
+    <thead><tr><th class="corner" scope="col"></th>
+      {%- for c in range(ncols) %}<th scope="col">{{ col_letter(c + 1) }}</th>{% endfor %}
+    </tr></thead>
+    {%- endif %}
+    <tbody>
+    {%- for row in rows %}
+      {%- if row is mapping %}{% set idx, cells = row.index, row.cells %}{% else %}{% set idx, cells = loop.index, row %}{% endif %}
+      <tr class="row-{{ row.kind if row is mapping and row.kind else 'data' }}{{ ' row-hidden' if row is mapping and row.hidden }}{{ ' row-strike' if row is mapping and row.strike }}" data-row="{{ idx }}" {% if row is mapping and row.reason %}title="{{ row.reason }}"{% endif %}>
+        <th scope="row" class="rownum">{{ idx }}</th>
+        {%- for c in range(ncols) %}
+        {%- set v = cells[c] if c < cells|length else "" %}
+        <td {% if cell_ids %}data-cell="{{ col_letter(c + 1) }}{{ idx }}"{% endif %}>{{ v if v is not none else "" }}</td>
+        {%- endfor %}
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+</div>
+{%- endmacro %}
+
+{#- 行の色の凡例（一覧表の範囲確認） -#}
+{% macro grid_legend() -%}
+<ul class="grid-legend" aria-label="色の意味">
+  <li><span class="swatch row-header"></span>見出し</li>
+  <li><span class="swatch row-data"></span>データ</li>
+  <li><span class="swatch row-subtotal"></span>小計・合計</li>
+  <li><span class="swatch row-note"></span>注記</li>
+  <li><span class="swatch row-continuation"></span>継続行</li>
+  <li><span class="swatch row-excluded"></span>除外</li>
+  <li><span class="swatch row-hidden"></span>非表示・取り消し線</li>
+</ul>
+{%- endmacro %}
+
+{#- 列番号 → A, B, …, AA -#}
+{% macro col_letter(n) -%}
+{%- set letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" -%}
+{%- if n > 26 %}{{ letters[((n - 1) // 26) - 1] }}{{ letters[(n - 1) % 26] }}{% else %}{{ letters[n - 1] }}{% endif -%}
+{%- endmacro %}
+
+{#- ファイル選択（ドラッグ＆ドロップ可）。accept: ".xlsx,.xlsm" -#}
+{% macro file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False, required=True, id=None) -%}
+{%- set fid = id or ("drop-" ~ name) -%}
+<div class="file-drop" data-file-drop>
+  <input type="file" id="{{ fid }}" name="{{ name }}" {% if accept %}accept="{{ accept }}"{% endif %} {{ 'multiple' if multiple }} {{ 'required' if required }} class="file-drop-input">
+  <label for="{{ fid }}" class="file-drop-zone">
+    <svg class="file-drop-icon" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 31V11m0 0-8 8m8-8 8 8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 29v8a3 3 0 0 0 3 3h24a3 3 0 0 0 3-3v-8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+    <span class="file-drop-label">{{ label }}</span>
+    <span class="file-drop-or">または <span class="link-like">クリックしてファイルを選ぶ</span></span>
+    {%- if hint %}<span class="file-drop-hint">{{ hint }}</span>{% endif %}
+    <span class="file-drop-name" data-file-name aria-live="polite"></span>
+  </label>
+</div>
+{%- endmacro %}

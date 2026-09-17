@@ -1,0 +1,334 @@
+"""集計（月次・設備別年度）。数値はすべてコードで計算する（AI は使わない）。
+
+並び順と数値の書き方を固定して、同じデータから同じ結果が出るようにする:
+桁区切りあり、平均は四捨五入（整数の列は整数、小数の列は小数1桁）、内訳は件数の多い順→名前順。
+"""
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from decimal import ROUND_HALF_UP, Decimal
+
+from tables.spec import SummarySpec, TableSpec
+
+MAX_COVERAGE_MONTHS = 600  # 取り込み範囲がこれより長ければ、記録のある月だけを使う
+
+
+# ---- 書式 -----------------------------------------------------------------------------
+
+def round_half_up(value: float, digits: int = 0) -> float | int:
+    q = Decimal(1).scaleb(-digits)
+    d = Decimal(str(value)).quantize(q, rounding=ROUND_HALF_UP)
+    return int(d) if digits == 0 else float(d)
+
+
+def fmt_number(value, max_decimals: int = 2) -> str:
+    """桁区切り付き。小数は最大2桁（末尾の0は削る）。"""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, int):
+        return f"{value:,}"
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if f.is_integer():
+        return f"{int(f):,}"
+    r = round_half_up(f, max_decimals)
+    text = f"{r:,.{max_decimals}f}".rstrip("0").rstrip(".")
+    return text
+
+
+def unit_label(unit: str) -> str:
+    u = (unit or "").strip()
+    return {"h": "時間", "H": "時間", "hr": "時間", "min": "分"}.get(u, u)
+
+
+def fmt_measure(value, unit: str, with_hours: bool = False) -> str:
+    """「2,460分（41.0時間）」のような書き方。"""
+    label = unit_label(unit)
+    text = f"{fmt_number(value)}{label}"
+    if with_hours and label == "分" and isinstance(value, (int, float)) and abs(value) >= 60:
+        hours = round_half_up(float(value) / 60, 1)
+        text += f"（{hours:,.1f}時間）"
+    return text
+
+
+def fmt_average(total: float, count: int, integer_values: bool) -> int | float:
+    if not count:
+        return 0
+    avg = total / count
+    return round_half_up(avg, 0) if integer_values else round_half_up(avg, 1)
+
+
+def month_label(month: str) -> str:
+    return f"{int(month[:4])}年{int(month[5:7])}月"
+
+
+def month_add(month: str, n: int) -> str:
+    y, m = int(month[:4]), int(month[5:7])
+    total = y * 12 + (m - 1) + n
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def month_range(start: str, end: str) -> list[str]:
+    out = []
+    cur = start
+    while cur <= end and len(out) <= MAX_COVERAGE_MONTHS:
+        out.append(cur)
+        cur = month_add(cur, 1)
+    return out
+
+
+def month_first_day(month: str) -> str:
+    return f"{month}-01"
+
+
+def month_last_day(month: str) -> str:
+    nxt = month_add(month, 1)
+    from datetime import date, timedelta
+
+    d = date(int(nxt[:4]), int(nxt[5:7]), 1) - timedelta(days=1)
+    return d.isoformat()
+
+
+def fiscal_year_of(month: str, start_month: int) -> int:
+    y, m = int(month[:4]), int(month[5:7])
+    return y if m >= start_month else y - 1
+
+
+def is_month(text) -> bool:
+    s = str(text or "")
+    return len(s) >= 7 and s[4] == "-" and s[:4].isdigit() and s[5:7].isdigit() and 1 <= int(s[5:7]) <= 12
+
+
+# ---- 列の役割 ---------------------------------------------------------------------------
+
+def measure_columns(spec: TableSpec) -> list[tuple[str, str, str]]:
+    """集計する数値列 (キー, 表示名, 単位)。単価は合計しても意味がないので除く。"""
+    out = []
+    for col in spec.columns:
+        if col.type == "number" and col.role == "measure" and "単価" not in col.display and not col.key.startswith("unit_price"):
+            out.append((col.key, col.display, col.unit))
+    return out
+
+
+def resolve_metrics(summary: SummarySpec, spec: TableSpec) -> dict:
+    """{"count": bool, "sum": [key], "avg": [key], "max": [key]}。count だけの指定は数値列の合計（年度は平均も）に広げる。"""
+    measures = [k for k, _d, _u in measure_columns(spec)]
+    out = {"count": False, "sum": [], "avg": [], "max": []}
+    for metric in summary.metrics or ["count"]:
+        if metric == "count":
+            out["count"] = True
+            continue
+        kind, _, key = metric.partition(":")
+        if kind in ("sum", "avg", "max") and key and key not in out[kind]:
+            out[kind].append(key)
+    if not out["sum"] and not out["avg"] and not out["max"]:
+        out["sum"] = list(measures)
+        if summary.id == "entity_fiscal_year":
+            out["avg"] = list(measures)
+    out["count"] = True
+    return out
+
+
+def entity_columns(spec: TableSpec):
+    entity = spec.first_role("entity")
+    label = spec.first_role("entity_label")
+    return entity, label
+
+
+def entity_display(values: dict, spec: TableSpec) -> tuple[str, str, str]:
+    """(設備番号, 設備名, 表示「設備名（設備番号）」)。"""
+    entity, label = entity_columns(spec)
+    eid = str(values.get(entity.key) or "") if entity else ""
+    name = str(values.get(label.key) or "") if label else ""
+    if eid and name and name != eid:
+        return eid, name, f"{name}（{eid}）"
+    return eid, name, eid or name
+
+
+def category_column(spec: TableSpec):
+    """内訳に使う区分の列。故障区分があればそれ、なければ最初の category 役割の列。"""
+    preferred = spec.column("failure_category")
+    if preferred is not None and preferred.role == "category":
+        return preferred
+    return spec.first_role("category")
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _month(values: dict, spec: TableSpec) -> str | None:
+    v = values.get(spec.date_key)
+    s = str(v or "")
+    return s[:7] if is_month(s) else None
+
+
+def coverage_months(coverage: dict | None, records: list[dict], spec: TableSpec) -> list[str]:
+    months = sorted({m for m in (_month(r.get("values", {}), spec) for r in records) if m})
+    start = (coverage or {}).get("start") or (months[0] if months else None)
+    end = (coverage or {}).get("end") or (months[-1] if months else None)
+    if not start or not end or not is_month(start) or not is_month(end) or start > end:
+        return months
+    rng = month_range(start, end)
+    if len(rng) > MAX_COVERAGE_MONTHS:
+        return months
+    return sorted(set(rng) | {m for m in months if start <= m <= end})
+
+
+def _breakdown(rows: list[dict], cat_key: str | None, sum_key: str | None) -> list[dict]:
+    if not cat_key:
+        return []
+    counts: Counter[str] = Counter()
+    sums: dict[str, float] = defaultdict(float)
+    for values in rows:
+        name = str(values.get(cat_key) or "（空欄）")
+        counts[name] += 1
+        if sum_key and _num(values.get(sum_key)) is not None:
+            sums[name] += values[sum_key]
+    items = sorted(counts.items(), key=lambda t: (-t[1], t[0]))
+    return [{"name": name, "count": n, "sum": _clean(sums.get(name, 0)) if sum_key else None} for name, n in items]
+
+
+def _clean(v):
+    if isinstance(v, float):
+        v = round(v, 9)
+        if v.is_integer():
+            return int(v)
+    return v
+
+
+def _integer_values(values_list: list) -> bool:
+    return all(isinstance(v, int) or (isinstance(v, float) and v.is_integer()) for v in values_list)
+
+
+# ---- 月次集計 ---------------------------------------------------------------------------
+
+def month_summaries(records: list[dict], spec: TableSpec, coverage: dict | None, summary: SummarySpec) -> list[dict]:
+    """月ごと（全設備）の件数・数値の合計・上位の設備・区分の内訳。取り込み範囲の月は0件でも作る。"""
+    metrics = resolve_metrics(summary, spec)
+    by_month: dict[str, list[dict]] = defaultdict(list)
+    for rec in records:
+        values = rec.get("values", {})
+        m = _month(values, spec)
+        if m:
+            by_month[m].append(values)
+    cat = category_column(spec)
+    entity, _label = entity_columns(spec)
+    sum_keys = metrics["sum"]
+    rank_key = sum_keys[0] if sum_keys else None
+    out = []
+    for month in coverage_months(coverage, records, spec):
+        rows = by_month.get(month, [])
+        sums = {k: _clean(sum(v[k] for v in rows if _num(v.get(k)) is not None)) for k in sum_keys}
+        top = []
+        if entity is not None and rows:
+            groups: dict[str, list[dict]] = defaultdict(list)
+            for v in rows:
+                eid = str(v.get(entity.key) or "")
+                if eid:
+                    groups[eid].append(v)
+            items = []
+            for eid, grows in groups.items():
+                total = _clean(sum(g[rank_key] for g in grows if _num(g.get(rank_key)) is not None)) if rank_key else None
+                main = ""
+                if cat is not None:
+                    cats = Counter(str(g.get(cat.key)) for g in grows if g.get(cat.key))
+                    if cats:
+                        main = sorted(cats.items(), key=lambda t: (-t[1], t[0]))[0][0]
+                _eid, _name, display = entity_display(grows[0], spec)
+                items.append({"entity": eid, "display": display, "count": len(grows), "sum": total, "main_category": main})
+            items.sort(key=lambda t: (-(t["sum"] or 0) if rank_key else 0, -t["count"], t["entity"]))
+            top = items[: max(1, int(summary.top_n or 5))]
+        out.append({
+            "month": month, "count": len(rows), "sums": sums, "rank_key": rank_key, "top": top,
+            "categories": _breakdown(rows, cat.key if cat else None, rank_key),
+        })
+    return out
+
+
+# ---- 設備別年度集計 ------------------------------------------------------------------------
+
+def entity_fiscal_year_summaries(records: list[dict], spec: TableSpec, coverage: dict | None,
+                                 summary: SummarySpec) -> list[dict]:
+    """設備×年度の件数・合計・平均・最大、月別（0件の月も）、区分の内訳。記録のある設備・年度だけ作る。"""
+    entity, label = entity_columns(spec)
+    if entity is None:
+        return []
+    metrics = resolve_metrics(summary, spec)
+    fs = int(spec.fiscal_year_start_month or 4)
+    cov_months = coverage_months(coverage, records, spec)
+    groups: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    for rec in records:
+        values = rec.get("values", {})
+        m = _month(values, spec)
+        eid = str(values.get(entity.key) or "")
+        if not m or not eid:
+            continue
+        groups[(eid, fiscal_year_of(m, fs))].append(values)
+    cat = category_column(spec)
+    keys = sorted(set(metrics["sum"]) | set(metrics["avg"]) | set(metrics["max"]),
+                  key=lambda k: [c[0] for c in measure_columns(spec)].index(k) if k in [c[0] for c in measure_columns(spec)] else 99)
+    out = []
+    for (eid, fy) in sorted(groups):
+        rows = groups[(eid, fy)]
+        fy_start = f"{fy:04d}-{fs:02d}"
+        fy_end = month_add(fy_start, 11)
+        months = [m for m in cov_months if fy_start <= m <= fy_end]
+        by_month: dict[str, list[dict]] = defaultdict(list)
+        for v in rows:
+            by_month[_month(v, spec)].append(v)
+        month_items = []
+        for m in months:
+            mrows = by_month.get(m, [])
+            month_items.append({
+                "month": m, "count": len(mrows),
+                "sums": {k: _clean(sum(v[k] for v in mrows if _num(v.get(k)) is not None)) for k in keys},
+                "has_value": {k: any(_num(v.get(k)) is not None for v in mrows) for k in keys},
+            })
+        stats = {}
+        for k in keys:
+            vals = [v[k] for v in rows if _num(v.get(k)) is not None]
+            total = _clean(sum(vals)) if vals else 0
+            max_item = None
+            if vals:
+                best_row = max((v for v in rows if _num(v.get(k)) is not None),
+                               key=lambda v: (v[k], -int((_month(v, spec) or "0000-00").replace("-", ""))))
+                max_item = {"month": _month(best_row, spec), "value": best_row[k]}
+            n = len(vals)
+            avg_base = len(rows)
+            stats[k] = {
+                "sum": total, "n": n,
+                "avg": fmt_average(float(total), avg_base, _integer_values(vals)) if avg_base else None,
+                "max": max_item,
+            }
+        first = rows[0]
+        _eid, name, display = entity_display(first, spec)
+        covered = list(months)
+        out.append({
+            "entity": eid, "name": name, "display": display, "fiscal_year": fy, "count": len(rows),
+            "months": month_items, "stats": stats, "metrics": metrics, "keys": keys,
+            "range": (covered[0], covered[-1]) if covered else (fy_start, fy_end),
+            "categories": _breakdown(rows, cat.key if cat else None, keys[0] if keys and metrics["sum"] else None),
+        })
+    return out
+
+
+def dataset_counts(records: list[dict], spec: TableSpec) -> dict:
+    """データセット説明用: 件数、日付の範囲、設備の数。"""
+    entity, _label = entity_columns(spec)
+    months = sorted({m for m in (_month(r.get("values", {}), spec) for r in records) if m})
+    dates = sorted(str(r.get("values", {}).get(spec.date_key))[:10] for r in records
+                   if is_month(r.get("values", {}).get(spec.date_key)))
+    entities = {str(r.get("values", {}).get(entity.key)) for r in records if entity and r.get("values", {}).get(entity.key)}
+    return {"records": len(records), "months": months, "date_min": dates[0] if dates else None,
+            "date_max": dates[-1] if dates else None, "entities": len(entities)}
+
+
+__all__ = [
+    "dataset_counts", "entity_display", "entity_fiscal_year_summaries", "fiscal_year_of", "fmt_measure",
+    "fmt_number", "measure_columns", "month_label", "month_range", "month_summaries", "resolve_metrics",
+]

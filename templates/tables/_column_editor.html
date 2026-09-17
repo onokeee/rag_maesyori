@@ -1,0 +1,70 @@
+{#- 列の対応づけ表と、設定名などの入力。保存は static/tables.js が JSON で送る。
+    必要な変数: rows, settings, types, roles, md_modes, save_url, show_stats(bool), header_rows_count -#}
+<div data-columns-editor data-save-url="{{ save_url }}" data-header-rows-count="{{ header_rows_count or 1 }}">
+  {% call ui.card("取り込み設定") %}
+    <div class="grid-2">
+      <label>設定名
+        <input type="text" class="input" data-setting="name" value="{{ settings.name }}" maxlength="80" required>
+      </label>
+      <label>ファイル名の先頭（空欄＝設定名）
+        <input type="text" class="input" data-setting="file_prefix" value="{{ settings.file_prefix }}" maxlength="60">
+      </label>
+    </div>
+    <label class="stack-label">説明（データセット説明のファイルに書きます）
+      <input type="text" class="input" data-setting="description" value="{{ settings.description }}" maxlength="300">
+    </label>
+    <div class="grid-3">
+      <label>記録ファイルのまとめ方
+        <select class="input" data-setting="group_by">
+          <option value="month" {{ 'selected' if settings.group_by == 'month' }}>発生年月ごと</option>
+          <option value="entity_month" {{ 'selected' if settings.group_by == 'entity_month' }}>設備×年月ごと</option>
+        </select>
+      </label>
+      <label>1ファイルの記録数の上限
+        <input type="number" min="1" max="5000" class="input" data-setting="max_records_per_file" value="{{ settings.max_records_per_file }}">
+      </label>
+      <div class="field">
+        <span>Markdown の出し方</span>
+        <label class="check"><input type="checkbox" data-setting="omit_person" {{ 'checked' if settings.omit_person }}> 人名の列を出さない</label>
+        <label class="check"><input type="checkbox" data-setting="lightrag_hint" {{ 'checked' if settings.lightrag_hint }}> ファイル名に LightRAG の分割ヒントを付ける</label>
+      </div>
+    </div>
+  {% endcall %}
+
+  {% call ui.card("列の対応づけ", "使わない列はチェックを外します。追記ログ（複数人が日付付きで書き足す文章）の列は「AI整形の対象」にすると、時系列に分けて出します。") %}
+    <div class="table-wrap">
+    <table class="table compact col-editor">
+      <thead>
+        <tr>
+          <th>使う</th><th>元の見出し</th>
+          {% if show_stats %}<th>値の例</th><th>型エラー・空欄</th>{% endif %}
+          <th>キー（半角英数字）</th><th>表示名</th><th>説明</th><th>型</th><th>単位</th><th>役割</th>
+          <th>空欄＝上と同じ</th><th>mdでの扱い</th><th>AI整形の対象</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr data-col data-index="{{ r.index }}" data-header="{{ r.header }}" class="{{ '' if r.use else 'is-unused' }}">
+          <td class="center"><input type="checkbox" data-field="use" {{ 'checked' if r.use }} aria-label="{{ r.header }} を使う"></td>
+          <td><strong>{{ r.header }}</strong>{% if r.matched_by %}<br><small class="muted">候補: {{ r.matched_by }}</small>{% endif %}</td>
+          {% if show_stats %}
+          <td class="examples">{{ r.examples | join('\n') }}</td>
+          <td class="nowrap"><small>{% if r.type_error_rate %}<span class="est">型エラー {{ (r.type_error_rate * 100) | round(1) }}%</span><br>{% endif %}空欄 {{ (r.blank_rate * 100) | round(0) | int }}%{% if r.inferred_type and r.inferred_type != r.type %}<br>値は「{{ r.inferred_type }}」らしい{% endif %}</small></td>
+          {% endif %}
+          <td><input type="text" data-field="key" value="{{ r.key }}" placeholder="自動" aria-label="キー"></td>
+          <td><input type="text" data-field="display" value="{{ r.display }}" aria-label="表示名"></td>
+          <td><input type="text" data-field="description" value="{{ r.description }}" aria-label="説明"></td>
+          <td><select data-field="type" aria-label="型">{% for v, label in types %}<option value="{{ v }}" {{ 'selected' if v == r.type }}>{{ label }}</option>{% endfor %}</select></td>
+          <td><input type="text" data-field="unit" value="{{ r.unit }}" style="min-width:4rem" aria-label="単位"></td>
+          <td><select data-field="role" aria-label="役割">{% for v, label in roles %}<option value="{{ v }}" {{ 'selected' if v == r.role }}>{{ label }}</option>{% endfor %}</select></td>
+          <td class="center"><input type="checkbox" data-field="fill_down_blank" {{ 'checked' if r.fill_down_blank }} aria-label="空欄は上と同じ"></td>
+          <td><select data-field="md" aria-label="mdでの扱い">{% for v, label in md_modes %}<option value="{{ v }}" {{ 'selected' if v == r.md }}>{{ label }}</option>{% endfor %}</select></td>
+          <td class="center"><input type="checkbox" data-field="ai" {{ 'checked' if r.ai }} aria-label="AI整形の対象"></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <ul class="list-plain warn" data-editor-errors aria-live="polite"></ul>
+  {% endcall %}
+</div>

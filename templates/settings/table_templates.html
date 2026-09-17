@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}一覧表の取り込み設定{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>一覧表の取り込み設定</h1>
+    <p class="page-lead">一覧表の見出しと列の対応づけ、Markdown の作り方を保存したものです。一覧表を取り込む途中で作ります。</p>
+  </div>
+  <a class="btn primary" href="{{ url_for('tables.new') }}">一覧表を取り込む</a>
+</div>
+{% set current = "table_templates" %}{% include "settings/_tabs.html" %}
+
+{% call ui.card("設定の一覧") %}
+  {% if templates %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>設定名</th><th class="num">確定した取り込み</th><th>更新日時</th><th class="actions">操作</th></tr></thead>
+      <tbody>
+        {% for t in templates %}
+        <tr>
+          <td><strong>{{ t.name }}</strong>{% if t.description %}<div class="small muted">{{ t.description }}</div>{% endif %}</td>
+          <td class="num">{{ t.import_count }}</td>
+          <td class="nowrap">{{ (t.updated_at or "") | replace("T", " ") }}</td>
+          <td class="actions">
+            <a class="btn small" href="{{ url_for('tables.template_edit', template_id=t.id) }}">編集</a>
+            {% if t.version %}<a class="btn small" href="{{ url_for('settings.export_table_template', template_id=t.id) }}">JSONで書き出す</a>{% endif %}
+            {{ ui.confirm_delete_form(url_for('tables.delete_template', template_id=t.id),
+                 "取り込み設定「%s」を削除します。作成済みの取り込み履歴とダウンロード済みのMarkdownは残ります。" % t.name) }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+    {{ ui.empty_state("一覧表の取り込み設定はまだありません", "一覧表を取り込むと、途中の「列の対応づけ」で設定を作れます。", url_for('tables.new'), "一覧表を取り込む") }}
+  {% endif %}
+{% endcall %}
+
+{% call ui.card("JSONから読み込む", subtitle="別のPCで書き出した設定を読み込みます。") %}
+  <form method="post" action="{{ url_for('settings.import_table_template') }}" enctype="multipart/form-data" class="stack">
+    {{ ui.file_drop("file", ".json", label="設定のJSONファイルをここにドラッグ＆ドロップ") }}
+    <label>設定名（空欄ならファイルに書かれた名前）
+      <input name="name" class="input" maxlength="100">
+    </label>
+    <div class="btn-row end"><button type="submit" class="btn">読み込む</button></div>
+  </form>
+{% endcall %}
+{% endblock %}

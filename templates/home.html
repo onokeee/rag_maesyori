@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}ホーム{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>RAG用Markdown作成</h1>
+    <p class="page-lead">Excel・CSV を読み取り、LightRAG に入れやすい Markdown(.md) を作ってダウンロードします。</p>
+  </div>
+</div>
+
+<div class="entry-grid">
+  <a class="entry-card" href="{{ url_for('forms.new') }}">
+    <svg viewBox="0 0 132 104" aria-hidden="true">
+      <rect x="30" y="6" width="72" height="92" rx="6" fill="#fff" stroke="#9fb6d6" stroke-width="2"/>
+      <rect x="40" y="16" width="52" height="8" rx="2" fill="#1f5fbf"/>
+      <rect x="40" y="32" width="18" height="7" rx="2" fill="#dbe8fb"/><rect x="62" y="32" width="30" height="7" rx="2" fill="#eef2f6"/>
+      <rect x="40" y="44" width="18" height="7" rx="2" fill="#dbe8fb"/><rect x="62" y="44" width="30" height="7" rx="2" fill="#eef2f6"/>
+      <rect x="40" y="56" width="18" height="7" rx="2" fill="#dbe8fb"/><rect x="62" y="56" width="30" height="7" rx="2" fill="#eef2f6"/>
+      <rect x="40" y="70" width="52" height="18" rx="2" fill="#f3f5f8" stroke="#d7dde4"/>
+      <circle cx="104" cy="80" r="16" fill="#e2f3ea" stroke="#1b7549" stroke-width="2"/>
+      <path d="m96 80 6 6 10-12" fill="none" stroke="#1b7549" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <div>
+      <h2>帳票を取り込む</h2>
+      <p>1ファイル＝1件の報告書・記録票（例：設備修理報告書）。項目を読み取り、確認・修正してから Markdown を作ります。</p>
+      <span class="entry-go">ファイルを選ぶ &rarr;</span>
+    </div>
+  </a>
+  <a class="entry-card" href="{{ url_for('tables.new') }}">
+    <svg viewBox="0 0 132 104" aria-hidden="true">
+      <rect x="10" y="10" width="112" height="84" rx="6" fill="#fff" stroke="#9fb6d6" stroke-width="2"/>
+      <rect x="11" y="11" width="110" height="14" rx="5" fill="#dbe8fb"/>
+      <path d="M11 25h110M11 39h110M11 53h110M11 67h110M11 81h110M42 11v82M78 11v82" stroke="#d7dde4" stroke-width="1.5"/>
+      <rect x="11" y="67" width="110" height="14" fill="#fde6c8"/>
+      <path d="M11 67h110M11 81h110M42 67v14M78 67v14" stroke="#d7dde4" stroke-width="1.5"/>
+      <rect x="16" y="30" width="20" height="4" rx="2" fill="#9fb6d6"/><rect x="48" y="30" width="24" height="4" rx="2" fill="#c7d0da"/><rect x="84" y="30" width="30" height="4" rx="2" fill="#c7d0da"/>
+      <rect x="16" y="44" width="20" height="4" rx="2" fill="#9fb6d6"/><rect x="48" y="44" width="18" height="4" rx="2" fill="#c7d0da"/><rect x="84" y="44" width="26" height="4" rx="2" fill="#c7d0da"/>
+      <rect x="16" y="58" width="20" height="4" rx="2" fill="#9fb6d6"/><rect x="48" y="58" width="22" height="4" rx="2" fill="#c7d0da"/><rect x="84" y="58" width="32" height="4" rx="2" fill="#c7d0da"/>
+      <text x="16" y="21" font-size="8" fill="#164a97" font-family="sans-serif">CSV</text>
+    </svg>
+    <div>
+      <h2>一覧表を取り込む</h2>
+      <p>Excel/CSV、1行＝1件の一覧・台帳・集計表（例：トラブル対応一覧、故障履歴CSV）。期間ごとに Markdown をまとめて作ります。</p>
+      <span class="entry-go">ファイルを選ぶ &rarr;</span>
+    </div>
+  </a>
+</div>
+
+{% if first_run %}
+<section class="card guide" aria-labelledby="guideTitle">
+  <h2 id="guideTitle" class="card-title">はじめに</h2>
+  <p class="hint">まだ帳票の種類も一覧表の取り込み設定もありません。次の3ステップで始めます。</p>
+  <ol class="guide-steps">
+    <li><strong>見本から種類/設定を作る</strong>
+      <p>見本ファイルを1つ選ぶと、項目や列の候補を出します。
+        <a href="{{ url_for('form_types.index') }}">帳票の種類</a> ／ 一覧表は取り込みの途中で作れます。</p></li>
+    <li><strong>取り込む</strong><p>ファイルを選び、読み取り結果を確認・修正します。</p></li>
+    <li><strong>Markdownをダウンロード</strong><p>確定すると .md をダウンロードできます。LightRAG へは手作業で入れます（<a href="{{ url_for('settings.lightrag') }}">入れ方</a>）。</p></li>
+  </ol>
+</section>
+{% endif %}
+
+<div class="grid-2">
+  {% call ui.card("作業中の帳票", subtitle="確認中・修正中のもの") %}
+    {% if forms_working %}
+    <ul class="list-plain list-rows">
+      {% for d in forms_working %}
+      <li>
+        <div class="item-main">
+          <span class="item-title">{{ d.title or d.file_name }}</span>
+          <span class="item-sub">{{ d.pattern_name or "種類未選択" }} ・ {{ d.created_at | replace("T", " ") }}</span>
+        </div>
+        <div class="cluster">{{ ui.badge(d.state) }}<a class="btn small" href="{{ d.href }}">続きを開く</a></div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+      {{ ui.empty_state("作業中の帳票はありません") }}
+    {% endif %}
+  {% endcall %}
+
+  {% call ui.card("作業中の一覧表", subtitle="読み込み中・確認中のもの") %}
+    {% if tables_working %}
+    <ul class="list-plain list-rows">
+      {% for t in tables_working %}
+      <li>
+        <div class="item-main">
+          <span class="item-title">{{ t.file_name }}</span>
+          <span class="item-sub">{{ t.template_name or "取り込み設定未選択" }} ・ {{ (t.updated_at or t.created_at or "") | replace("T", " ") }}</span>
+        </div>
+        <div class="cluster">{{ ui.badge(t.status) }}<a class="btn small" href="{{ t.href }}">続きを開く</a></div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+      {{ ui.empty_state("作業中の一覧表はありません") }}
+    {% endif %}
+  {% endcall %}
+
+  {% call ui.card("最近の確定（帳票）") %}
+    {% if forms_recent %}
+    <ul class="list-plain list-rows">
+      {% for d in forms_recent %}
+      <li>
+        <div class="item-main">
+          <a class="item-title" href="{{ d.href }}">{{ d.title or d.file_name }}</a>
+          <span class="item-sub">{{ d.pattern_name or "" }} ・ {{ (d.confirmed_at or "") | replace("T", " ") }}</span>
+        </div>
+        {{ ui.badge(d.state) }}
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="small"><a href="{{ url_for('history.index', tab='forms', state='confirmed') }}">取り込み履歴ですべて見る</a></p>
+    {% else %}
+      {{ ui.empty_state("確定した帳票はまだありません") }}
+    {% endif %}
+  {% endcall %}
+
+  {% call ui.card("最近の一覧表出力") %}
+    {% if tables_recent %}
+    <ul class="list-plain list-rows">
+      {% for t in tables_recent %}
+      <li>
+        <div class="item-main">
+          <a class="item-title" href="{{ t.href }}">{{ t.template_name or t.file_name }}</a>
+          <span class="item-sub">{{ t.file_name }} ・ {{ (t.confirmed_at or "") | replace("T", " ") }}</span>
+        </div>
+        <a class="btn small" href="{{ url_for('tables.download_zip', import_id=t.id) }}">zipをダウンロード</a>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="small"><a href="{{ url_for('history.index', tab='tables') }}">取り込み履歴ですべて見る</a></p>
+    {% else %}
+      {{ ui.empty_state("一覧表の出力はまだありません") }}
+    {% endif %}
+  {% endcall %}
+</div>
+{% endblock %}

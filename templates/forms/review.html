@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}読み取り結果の確認・修正{% endblock %}
+{% block container_class %}wide{% endblock %}
+{% block content %}
+{% set SOURCE_LABELS = {"auto": ("自動で読み取り", "blue"), "ai": ("AIが入力（要確認）", "violet"), "manual": ("手で修正", "teal"), "blank": ("空欄", "gray")} %}
+{{ ui.steps(steps, 3) }}
+<div class="page-head">
+  <div>
+    <h1>読み取り結果の確認・修正</h1>
+    <p class="page-lead">{{ doc.file_name }} ／ 帳票の種類: {{ extraction.pattern.name }} ／ シート: {{ extraction.sheets | join('、') }} {{ ui.badge(doc.state) }}</p>
+  </div>
+  <div class="btn-row">
+    <a class="btn ghost" href="{{ url_for('history.index') }}">取り込み履歴に戻る（作業内容は保存されています）</a>
+  </div>
+</div>
+
+{% if doc.state == 'modified' %}
+<div class="notice" role="note">
+  確定済みの帳票を修正中です。ダウンロードされる Markdown は、確定し直すまで確定済みの版のままです。
+  <form method="post" action="{{ url_for('forms.discard_changes', doc_id=doc.id) }}" class="inline" data-confirm="修正中の変更を破棄し、確定済みの版に戻します。よろしいですか？" data-confirm-ok="変更を破棄する">
+    <button type="submit" class="btn small">変更を破棄して確定済みの版に戻す</button>
+  </form>
+</div>
+{% endif %}
+
+<div class="review-toolbar cluster">
+  <ul class="chips" aria-label="項目の状態">
+    <li><button type="button" class="chip chip-warn{{ ' is-zero' if not summary.counts.issue }}" data-next-issue>要確認 <strong data-count="issue">{{ summary.counts.issue }}</strong></button></li>
+    <li><span class="chip chip-ai{{ ' is-zero' if not summary.counts.ai }}">AIが入力 <strong data-count="ai">{{ summary.counts.ai }}</strong></span></li>
+    <li><span class="chip chip-manual{{ ' is-zero' if not summary.counts.manual }}">手で修正 <strong data-count="manual">{{ summary.counts.manual }}</strong></span></li>
+  </ul>
+  <span class="muted small" data-save-status aria-live="polite"></span>
+  <span class="spacer"></span>
+  <a class="btn small ghost" href="{{ url_for('forms.type_select', doc_id=doc.id) }}">種類・シートを選び直す</a>
+  <a class="btn small ghost" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード</a>
+</div>
+
+<div class="split" id="review" data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}" data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}">
+  <section class="split-pane sticky" aria-label="元のシート">
+    <div class="split-pane-head">
+      <h2>元のシート</h2>
+      {% if grids | length > 1 %}
+      <div class="tabs" role="tablist" data-sheet-tabs>
+        {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    <div class="split-pane-body">
+      {% if info_missing %}
+        <p class="muted">元のファイルを読み込めませんでした。値の確認は右の項目だけで行ってください。</p>
+      {% endif %}
+      <p class="hint">項目の入力欄を選ぶと、見出しのセル（橙）と値のセル（青）が光ります。入力欄を選んだ状態でセルをクリックすると、そのセルの値を入れます。</p>
+      {% for g in grids %}
+      <div class="sheet-grid" data-sheet="{{ g.name }}" {% if not loop.first %}hidden{% endif %}>
+        {% if g.truncated %}<p class="hint">大きいシートのため、先頭の一部だけ表示しています。</p>{% endif %}
+        {% if g.images %}<p class="hint">このシートに画像が{{ g.images }}件あります。</p>{% endif %}
+        <div class="grid-wrap" tabindex="0" aria-label="シート {{ g.name }}">
+          <table class="data-grid">
+            <thead><tr><th class="corner"></th>{% for l in g.letters %}<th scope="col">{{ l }}</th>{% endfor %}</tr></thead>
+            <tbody>
+            {% for row in g.rows %}
+              <tr><th scope="row" class="rownum">{{ row.index }}</th>
+              {% for c in row.cells %}<td data-cell="{{ c.coord }}"{% if c.rowspan > 1 %} rowspan="{{ c.rowspan }}"{% endif %}{% if c.colspan > 1 %} colspan="{{ c.colspan }}"{% endif %}{% if c.label %} class="is-label"{% endif %}>{{ c.text }}</td>{% endfor %}
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="split-pane" aria-label="項目">
+    <div class="split-pane-head">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-pane-tab="fields" aria-selected="true">項目</button>
+        <button type="button" role="tab" data-pane-tab="markdown" aria-selected="false">Markdownプレビュー</button>
+      </div>
+    </div>
+    <div class="split-pane-body">
+      <form method="post" action="{{ url_for('forms.confirm', doc_id=doc.id) }}" id="reviewForm">
+        <div data-pane="fields">
+          {% for f in extraction.fields %}
+          {% set st = summary.fields[f.field_name] %}
+          {% set src = SOURCE_LABELS[st.source] %}
+          <div class="field review-field{{ ' is-issue' if st.issue }}" data-field="{{ f.field_name }}" data-issue="{{ 1 if st.issue else 0 }}"
+               data-sheet="{{ f.sheet or '' }}" data-label-cell="{{ f.label_cell or '' }}" data-value-cell="{{ f.value_cell or '' }}">
+            <div class="cluster">
+              <label class="field-label" for="value-{{ f.field_name }}">{{ f.display_name }}{% if f.required %}<span class="req" title="必須">*</span>{% endif %}{% if f.unit %} <small class="muted">（{{ f.unit }}）</small>{% endif %}</label>
+              <span class="badge badge-{{ src[1] }}" data-source-badge>{{ src[0] }}</span>
+              {% if f.rag_output == 'omit' %}<small class="muted">Markdownには出さない項目</small>{% endif %}
+              {% if f.value_cell %}<small class="muted">{{ f.sheet }}!{{ f.value_cell }}</small>{% endif %}
+            </div>
+            {% set text = '' if f.value is none else f.value %}
+            {% if f.data_type == 'text' or (text is string and '\n' in text) %}
+              <textarea class="input" rows="{{ [3, (text | string).count('\n') + 2] | max }}" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}">{{ text }}</textarea>
+            {% else %}
+              <input class="input" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}" value="{{ text }}" {% if f.data_type == 'date' %}placeholder="例: 2026-09-14"{% elif f.data_type == 'number' %}inputmode="decimal"{% endif %}>
+            {% endif %}
+            <p class="warn" data-warning {% if not st.warning and not st.missing_required %}hidden{% endif %}>{% if st.missing_required %}必須の項目が空欄です。{% endif %}{{ st.warning }}</p>
+          </div>
+          {% endfor %}
+          {% if extraction.attachments %}
+          <p class="hint">添付画像: {{ extraction.attachments | length }}枚（Markdownには枚数だけ書きます）</p>
+          {% endif %}
+        </div>
+
+        <div data-pane="markdown" hidden>
+          <p class="hint">入力中の値から作った Markdown です（ファイル名: <code data-md-name>{{ summary.file_name }}</code>）。</p>
+          <pre class="code md-preview" data-md-preview>{{ summary.markdown }}</pre>
+        </div>
+
+        <div class="card" id="confirm">
+          {% if llm_ready %}
+          <p>
+            <button type="submit" class="btn" formaction="{{ url_for('forms.ai_fill', doc_id=doc.id) }}" formnovalidate>AIで空欄を探す</button>
+            <small class="muted">シートのセル内容をAIに送ります。AIが入れた値は「AIが入力（要確認）」になります。</small>
+          </p>
+          {% endif %}
+          <div data-missing-box {% if not summary.missing_required %}hidden{% endif %}>
+            <p class="notice">必須の項目が空欄です: <span data-missing-list>{{ summary.missing_required | join('、') }}</span></p>
+            <label class="check"><input type="checkbox" name="allow_missing"> 空欄のまま確定する</label>
+          </div>
+          <div class="form-actions">
+            <button type="submit" class="btn primary">確定してMarkdownを作成</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='review.js') }}"></script>{% endblock %}

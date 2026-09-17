@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}完了（Markdownをダウンロード）{% endblock %}
+{% block content %}
+{{ ui.steps(steps, 4) }}
+<div class="page-head">
+  <div>
+    <h1>完了（Markdownをダウンロード）</h1>
+    <p class="page-lead">{{ doc.file_name }} を確定しました。 {{ ui.badge(doc.state) }}</p>
+  </div>
+</div>
+
+{% call ui.card() %}
+  <p>ファイル名: <code>{{ file_name }}</code></p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.download_md', doc_id=doc.id) }}">Markdownをダウンロード（.md）</a>
+    <a class="btn" href="{{ url_for('forms.new') }}">次の帳票を取り込む</a>
+    <a class="btn ghost" href="{{ url_for('history.index') }}">取り込み履歴へ</a>
+  </div>
+  <p class="hint">値を直したいときは<a href="{{ url_for('forms.detail', doc_id=doc.id) }}">この帳票の詳細</a>から[修正する]を押してください。</p>
+{% endcall %}
+
+{% call ui.card("Markdownの内容") %}
+  <div class="btn-row"><button type="button" class="btn small" data-copy="#mdText">コピー</button></div>
+  <pre class="code md-preview" id="mdText">{{ markdown }}</pre>
+{% endcall %}
+{% endblock %}

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+{{ ui.steps(steps, step) }}
+<div class="page-head">
+  <div>
+    <h1>{{ title }}</h1>
+    <p class="page-lead">ファイル: {{ imp.file_name }}。終わると自動で次の画面を表示します。この画面を閉じても処理は続きます。</p>
+  </div>
+</div>
+{% call ui.card() %}
+  <div data-reload-on-done class="progress-box-wrap">
+  {{ ui.progress(job, url=job_url) }}
+  </div>
+  <p class="hint">大きなファイル（数万行）は数十秒かかることがあります。</p>
+{% endcall %}
+{% endblock %}
+{% block scripts %}
+<script>
+  // 終わったら再読み込みして次の画面へ
+  document.addEventListener("job:finished", () => window.location.reload());
+</script>
+{% endblock %}

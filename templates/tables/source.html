@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}取り込み設定を選ぶ{% endblock %}
+{% block content %}
+{{ ui.steps(steps, step) }}
+<div class="page-head">
+  <div>
+    <h1>取り込み設定を選ぶ</h1>
+    <p class="page-lead">ファイル: {{ imp.file_name }}</p>
+  </div>
+</div>
+
+{% if error %}<div class="flash flash-error" role="alert">{{ error }}</div>{% endif %}
+
+<form method="post" action="{{ url_for('tables.save_source', import_id=imp.id) }}" class="stack">
+  {% if src.kind == "csv" %}
+  {% call ui.card("CSVの読み方", "自動で判定しました。文字化けしている場合は変えてください。") %}
+    {% if src.sniff_warnings %}<div class="notice" role="note">{% for w in src.sniff_warnings %}{{ w }}<br>{% endfor %}</div>{% endif %}
+    <div class="grid-3">
+      <label>文字コード
+        <select name="encoding" class="input">
+          {% set known = encodings | map('first') | list %}
+          {% for value, label in encodings %}<option value="{{ value }}" {{ 'selected' if value == src.encoding }}>{{ label }}</option>{% endfor %}
+          {% if src.encoding not in known %}<option value="{{ src.encoding }}" selected>{{ src.encoding }}</option>{% endif %}
+        </select>
+      </label>
+      <label>区切り文字
+        <select name="delimiter" class="input">
+          {% for value, label in delimiters %}<option value="{{ value }}" {{ 'selected' if value == src.delimiter }}>{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <div class="field"><span>前置き行</span><span class="muted">{{ src.preamble_rows or 0 }}行（見出しより上の行。次の画面で確認できます）</span></div>
+    </div>
+    <label class="check"><input type="checkbox" name="replace_errors" {{ 'checked' if src.errors == 'replace' }}> 読めない文字を「〓」に置き換えて読み込む</label>
+  {% endcall %}
+  {% elif sheets %}
+  {% call ui.card("シート") %}
+    <div class="stack" role="radiogroup" aria-label="シート">
+      {% for s in sheets %}
+      <label class="check">
+        <input type="radio" name="sheet" value="{{ s.name }}" {{ 'checked' if s.name == sheet }}>
+        <span><strong>{{ s.name }}</strong>
+          <small class="muted">{{ s.max_row }}行 × {{ s.max_col }}列{% if s.hidden %}・非表示のシート{% endif %}{% if list_like.get(s.name) %}・一覧表らしい{% endif %}</small></span>
+      </label>
+      {% endfor %}
+    </div>
+  {% endcall %}
+  {% endif %}
+
+  {% call ui.card("取り込み設定", "同じ形の表を前に取り込んだことがあれば、その設定を選びます。") %}
+    <div class="stack" role="radiogroup" aria-label="取り込み設定">
+      {% for c in candidates %}
+      <label class="check">
+        <input type="radio" name="template" value="{{ c.template.id }}" {{ 'checked' if c.template.id == selected }}>
+        <span><strong>{{ c.template.name }}</strong>
+          <small class="muted">必須列 {{ c.matched }}/{{ c.total }} 一致</small></span>
+      </label>
+      {% endfor %}
+      <label class="check">
+        <input type="radio" name="template" value="new" {{ 'checked' if selected == 'new' }}>
+        <span><strong>新しい取り込み設定を作る</strong></span>
+      </label>
+      <label>新しい設定の名前
+        <input type="text" name="new_template_name" class="input" value="{{ new_name }}" maxlength="80">
+        <small>Markdown のファイル名とタイトルに使います（例：トラブル対応一覧）。</small>
+      </label>
+    </div>
+    {% if headers %}<p class="hint">読み取った見出し: {{ headers[:20] | join('、') }}{% if headers|length > 20 %} ほか{{ headers|length - 20 }}列{% endif %}</p>{% endif %}
+  {% endcall %}
+
+  <div class="form-actions">
+    <a class="btn ghost" href="{{ url_for('tables.new') }}">ファイルを選び直す</a>
+    <button type="submit" class="btn primary">表の範囲と見出しを確認する</button>
+  </div>
+</form>
+{% endblock %}
