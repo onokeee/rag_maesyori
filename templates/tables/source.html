@@ -40,7 +40,9 @@
       <label class="check">
         <input type="radio" name="sheet" value="{{ s.name }}" {{ 'checked' if s.name == sheet }}>
         <span><strong>{{ s.name }}</strong>
-          <small class="muted">{{ s.max_row }}行 × {{ s.max_col }}列{% if s.hidden %}・非表示のシート{% endif %}{% if list_like.get(s.name) %}・一覧表らしい{% endif %}</small></span>
+          <small class="muted">{{ s.max_row }}行 × {{ s.max_col }}列{% if s.hidden %}・非表示のシート{% endif %}
+          {%- if list_like.get(s.name) == 'crosstab' %}・クロス集計らしい（対応していません）
+          {%- elif list_like.get(s.name) %}・一覧表らしい{% endif %}</small></span>
       </label>
       {% endfor %}
     </div>
@@ -61,8 +63,11 @@
         <span><strong>新しい取り込み設定を作る</strong></span>
       </label>
       <label>新しい設定の名前
-        <input type="text" name="new_template_name" class="input" value="{{ new_name }}" maxlength="80">
-        <small>Markdown のファイル名とタイトルに使います（例：トラブル対応一覧）。</small>
+        <input type="text" name="new_template_name" class="input" value="{{ new_name }}" maxlength="80"
+               placeholder="例: トラブル対応一覧">
+        <small>Markdown のファイル名とタイトルに使います（例：トラブル対応一覧）。
+          この名前は<strong>取り込み設定としてこのPCに残り続けます</strong>。取引先名や「社外秘」が入った
+          元のファイル名をそのまま使わないでください。</small>
       </label>
     </div>
     {% if headers %}<p class="hint">読み取った見出し: {{ headers[:20] | join('、') }}{% if headers|length > 20 %} ほか{{ headers|length - 20 }}列{% endif %}</p>{% endif %}

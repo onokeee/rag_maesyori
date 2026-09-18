@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -139,22 +140,74 @@ def entity_columns(spec: TableSpec):
     return entity, label
 
 
+_CODE_NAME_PAREN = re.compile(r"^([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]*[（(][ 　]*(.+?)[ 　]*[)）]$")
+_CODE_NAME_SPACE = re.compile(r"^([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]+(\S.*)$")
+# 「名前（番号）」の並び（「Oxideエッチャ 2号機（ETC-302）」）。番号が後ろにあっても同じ設備として扱う。
+_NAME_CODE_PAREN = re.compile(r"^(.+?)[ 　]*[（(][ 　]*([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]*[)）]$")
+_HAS_DIGIT = re.compile(r"\d")
+_HAS_ALPHA = re.compile(r"[A-Za-z]")
+_CODE_ONLY = re.compile(r"^[0-9A-Za-z][0-9A-Za-z\-_/.]*$")
+
+
+def split_entity_code(text) -> tuple[str, str]:
+    """「ETC-302(OXIDEエッチャ 2号機)」「CVD-203 W-CVD 3号機」「Oxideエッチャ 2号機（ETC-302）」→ (設備番号, 名前)。
+
+    分けられなければ (原文, "")。設備名の列がない台帳で、同じ設備が「番号だけ」「番号＋名前」「名前＋番号」と
+    揺れると集計とファイル分けが割れるため、番号にそろえる。
+    """
+    s = " ".join(str(text or "").split())
+    for pattern in (_CODE_NAME_PAREN, _CODE_NAME_SPACE, _NAME_CODE_PAREN):
+        m = pattern.match(s)
+        if not m:
+            continue
+        if pattern is _NAME_CODE_PAREN:
+            code, name = m.group(2), m.group(1).strip()
+        else:
+            code, name = m.group(1), m.group(2).strip()
+        if not name or not _HAS_DIGIT.search(code) or not _HAS_ALPHA.search(code):
+            continue
+        if all(_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
+            continue  # 名前の側も番号だけ（「CMP-101 / CMP-102」）なら分けない
+        return code, name
+    return s, ""
+
+
+def entity_value(values: dict, spec: TableSpec) -> tuple[str, str]:
+    """(設備番号, 設備名)。設備名の列がない code 列では「番号(名前)」を分ける（集計・ファイル分けの単位をそろえる）。"""
+    entity, label = entity_columns(spec)
+    if entity is None:
+        return "", ""
+    raw = " ".join(str(values.get(entity.key) or "").split())
+    if label is not None:
+        return raw, " ".join(str(values.get(label.key) or "").split())
+    if entity.type == "code" and raw:
+        code, name = split_entity_code(raw)
+        if name:
+            return code, name
+    return raw, ""
+
+
 def entity_display(values: dict, spec: TableSpec) -> tuple[str, str, str]:
     """(設備番号, 設備名, 表示「設備名（設備番号）」)。"""
-    entity, label = entity_columns(spec)
-    eid = str(values.get(entity.key) or "") if entity else ""
-    name = str(values.get(label.key) or "") if label else ""
+    eid, name = entity_value(values, spec)
     if eid and name and name != eid:
         return eid, name, f"{name}（{eid}）"
     return eid, name, eid or name
 
 
 def category_column(spec: TableSpec):
-    """内訳に使う区分の列。故障区分があればそれ、なければ最初の category 役割の列。"""
+    """内訳に使う区分の列。故障区分があればそれ、なければ最初の category 役割の列。
+
+    記録に出していない列（md=omit。意味の分からないコード値など）は内訳に使わない。
+    記録のどこにも出ていない値で「F01: 3件」と集計しても、資料群の中で意味を確かめられないため。
+    """
     preferred = spec.column("failure_category")
-    if preferred is not None and preferred.role == "category":
+    if preferred is not None and preferred.role == "category" and preferred.md != "omit":
         return preferred
-    return spec.first_role("category")
+    for col in spec.columns:
+        if col.role == "category" and col.md != "omit":
+            return col
+    return None
 
 
 def _num(v):
@@ -228,7 +281,7 @@ def month_summaries(records: list[dict], spec: TableSpec, coverage: dict | None,
         if entity is not None and rows:
             groups: dict[str, list[dict]] = defaultdict(list)
             for v in rows:
-                eid = str(v.get(entity.key) or "")
+                eid = entity_value(v, spec)[0]
                 if eid:
                     groups[eid].append(v)
             items = []
@@ -265,7 +318,7 @@ def entity_fiscal_year_summaries(records: list[dict], spec: TableSpec, coverage:
     for rec in records:
         values = rec.get("values", {})
         m = _month(values, spec)
-        eid = str(values.get(entity.key) or "")
+        eid = entity_value(values, spec)[0]
         if not m or not eid:
             continue
         groups[(eid, fiscal_year_of(m, fs))].append(values)
@@ -323,12 +376,13 @@ def dataset_counts(records: list[dict], spec: TableSpec) -> dict:
     months = sorted({m for m in (_month(r.get("values", {}), spec) for r in records) if m})
     dates = sorted(str(r.get("values", {}).get(spec.date_key))[:10] for r in records
                    if is_month(r.get("values", {}).get(spec.date_key)))
-    entities = {str(r.get("values", {}).get(entity.key)) for r in records if entity and r.get("values", {}).get(entity.key)}
+    entities = {entity_value(r.get("values", {}), spec)[0] for r in records} - {""} if entity is not None else set()
     return {"records": len(records), "months": months, "date_min": dates[0] if dates else None,
             "date_max": dates[-1] if dates else None, "entities": len(entities)}
 
 
 __all__ = [
-    "dataset_counts", "entity_display", "entity_fiscal_year_summaries", "fiscal_year_of", "fmt_measure",
+    "dataset_counts", "entity_display", "entity_fiscal_year_summaries", "entity_value", "fiscal_year_of", "fmt_measure",
     "fmt_number", "measure_columns", "month_label", "month_range", "month_summaries", "resolve_metrics",
+    "split_entity_code",
 ]

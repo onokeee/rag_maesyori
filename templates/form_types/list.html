@@ -19,7 +19,7 @@
 {% call ui.card() %}
 <div class="table-wrap">
 <table class="table">
-  <thead><tr><th>名前</th><th>状態</th><th>項目</th><th>見本ファイル</th><th>確定済みの帳票</th><th>操作</th></tr></thead>
+  <thead><tr><th>名前</th><th>状態</th><th>項目</th><th>見本ファイル</th><th>確定済みの帳票（件）</th><th>操作</th></tr></thead>
   <tbody>
   {% for p in patterns %}
     <tr>
@@ -28,7 +28,7 @@
       <td>{{ ui.badge(p.status) }}</td>
       <td>{{ p.field_count }}</td>
       <td>{{ p.sample_count }}</td>
-      <td>{{ p.document_count }}件</td>
+      <td>{{ p.document_count }}</td>
       <td>
         <div class="btn-row">
           <a class="btn small" href="{{ url_for('form_types.edit', pattern_id=p.id) }}">編集</a>

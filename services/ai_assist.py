@@ -10,6 +10,7 @@ import json
 
 from flask import current_app
 
+from excel.extractor import number_unit
 from excel.text import to_date, to_number
 from excel.workbook import WorkbookInfo
 from pattern.matcher import PatternMatch
@@ -77,7 +78,8 @@ def classify_pattern(info: WorkbookInfo, matches: list[PatternMatch]) -> dict:
 
 def fill_missing(info: WorkbookInfo, extraction: dict) -> list[str]:
     """値が空の項目をAIで補完し、補完できた項目名を返す。extraction はその場で更新する。"""
-    targets = [f for f in extraction["fields"] if f["value"] in (None, "")]
+    # 明細表は行と列の形があるので、ここでは補完しない（確認画面で人が入力する）
+    targets = [f for f in extraction["fields"] if f["value"] in (None, "") and f["data_type"] != "table"]
     if not targets:
         return []
     fields = [
@@ -101,7 +103,10 @@ def fill_missing(info: WorkbookInfo, extraction: dict) -> list[str]:
         if f["data_type"] == "date":
             value, warning = to_date(text, text, info.date1904)
         elif f["data_type"] == "number":
-            value, warning = to_number(text, text)
+            # 単位の決め方は読み取りと同じにする（種類の設定 → 書かれた値の順。勝手に補わない）
+            value, warning = to_number(text, text, f.get("unit") or "")
+            f["unit"], warning = number_unit(value, text, f.get("unit") or "", f["field_name"], f["display_name"],
+                                             warning)
         else:
             value, warning = text, None
         sheet = found.get("sheet") if found.get("sheet") in info.grids else None

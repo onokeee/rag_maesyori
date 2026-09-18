@@ -2,6 +2,7 @@
 import hashlib
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 from flask import Flask
@@ -123,3 +124,43 @@ def test_precheck_zip_limits(tmp_path, monkeypatch):
     monkeypatch.setattr(files, "ZIP_MAX_TOTAL", 8000)
     with pytest.raises(UploadError, match="合計"):
         precheck_excel(path)
+
+
+def test_remove_upload_empties_a_locked_file_and_reports_it(core_app, monkeypatch):
+    """他のプロセスに掴まれていて消せないときは、例外を出さずに中身を空にして False を返す。
+
+    「ダウンロードしたらこのPCから消えます」（design.md 3.3）と言い切っているので、ファイル名が残っても
+    元の Excel/CSV の中身は残さない（空になったファイルは次の起動時に片付く）。
+    """
+    with core_app.app_context():
+        stored = save_upload(_storage("社外秘の中身".encode("utf-8") * 10, "掴まれたブック.xlsx"),
+                             "documents", {".xlsx"}, 10_000)
+        path = upload_path(stored.stored_path)
+
+        def locked(self, missing_ok=False):
+            raise PermissionError(32, "別のプロセスが使用中です")
+
+        monkeypatch.setattr(Path, "unlink", locked)
+        monkeypatch.setattr(files, "REMOVE_RETRY_WAIT", 0)
+        assert remove_upload(stored.stored_path) is False   # 例外を出さず、消せなかったことを返す
+        assert path.exists() and path.read_bytes() == b""   # 中身は残さない
+
+        monkeypatch.undo()
+        assert remove_upload(stored.stored_path) is True
+        assert not path.exists()
+
+
+def test_remove_orphan_uploads(core_app):
+    """DB から参照されていない取り込み済みファイルだけを片付ける。"""
+    with core_app.app_context():
+        used = save_upload(_storage(b"a" * 100, "使用中.xlsx"), "documents", {".xlsx"}, 10_000)
+        orphan = save_upload(_storage(b"b" * 100, "残骸.xlsx"), "tables", {".xlsx"}, 10_000)
+        other = upload_path("documents/メモ.txt")
+        other.write_text("save_upload が作った名前ではないファイル", encoding="utf-8")
+
+        removed = files.remove_orphan_uploads(core_app.config["UPLOAD_DIR"], [used.stored_path])
+
+        assert removed == 1
+        assert upload_path(used.stored_path).exists()
+        assert not upload_path(orphan.stored_path).exists()
+        assert other.exists()

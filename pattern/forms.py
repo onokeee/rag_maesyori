@@ -22,6 +22,7 @@ def pattern_to_rows(pattern: PatternDef) -> tuple[list[dict], list[dict]]:
             "direction": f.direction,
             "unit": f.unit,
             "rag_output": f.rag_output,
+            "table_columns": "\n".join(f.table_columns),
         }
         for f in pattern.fields
     ]
@@ -85,6 +86,7 @@ def parse_pattern_form(form) -> tuple[dict, list[dict], list[dict], list[str]]:
             "direction": form.get(p + "direction", "auto"),
             "unit": form.get(p + "unit", "").strip(),
             "rag_output": form.get(p + "rag_output", "show"),
+            "table_columns": "\n".join(_split_candidates(form.get(p + "table_columns", ""))),
         }
         if not row["display_name"] and not row["candidates"]:
             continue
@@ -126,6 +128,7 @@ def rows_to_pattern(pattern_id: int, meta: dict, sheet_rows: list[dict], field_r
             direction=r["direction"],
             unit=r.get("unit", "") or "",
             rag_output=r.get("rag_output", "show") if r.get("rag_output") in RAG_OUTPUTS else "show",
+            table_columns=(r.get("table_columns") or "").splitlines() if r["data_type"] == "table" else [],
         )
         for r in field_rows
         if r["use"]

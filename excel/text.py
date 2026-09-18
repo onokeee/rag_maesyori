@@ -8,19 +8,36 @@ from datetime import date, datetime, time
 from openpyxl.utils.datetime import MAC_EPOCH, WINDOWS_EPOCH, from_excel
 
 _EDGE_CHARS = "[]()<>【】〈〉《》「」『』■□◆◇●○・*※:;."
+_BRACKETS = {"[": "]", "(": ")", "<": ">", "【": "】", "〈": "〉", "《": "》", "「": "」", "『": "』"}
+_CLOSERS = {close: open_ for open_, close in _BRACKETS.items()}
+_EDGE_MARKS = "".join(ch for ch in _EDGE_CHARS if ch not in _BRACKETS and ch not in _CLOSERS)
+# 見出しの先頭の項番: 「3.」「3)」「3、」「(3)」「D3」（8D の D1〜D8）「A.機構部」。丸数字は section_stripped で別に見る
+_SECTION_NO_RE = re.compile(r"^(?:\d{1,2}[.)、](?!\d)|\(\d{1,2}\)|d[1-8](?=\D)|[a-z][.)、](?=[^\x00-\x7f]))")
+_TRAILING_PAREN_RE = re.compile(r"\([^()]{1,12}\)$")
 _INLINE_SEP = re.compile(r"[:：]")
 _DATE_RE = re.compile(r"(\d{4})\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})")
+# 年の無い日付（「2/12」「2/12 3時17分」「2月12日 14:05」）。年は推測せず、原文のまま残して警告だけ出す。
+# 「24/8/25」のような2桁の年は、年の欄が空なのか2桁で書いたのか分からないのでこの形には含めない
+_NO_YEAR_RE = re.compile(r"^\s*(\d{1,2})\s*(?:/|月|-|\.)\s*(\d{1,2})\s*日?(?:\s|$|[^\d/\-.])")
 _ERA_RE = re.compile(r"(?:令和|R)\s*(\d{1,2}|元)\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})")
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*時間\s*(\d+(?:\.\d+)?)\s*分")
 _SPACES_RE = re.compile(r"[^\S\n]+")
 # 見出し末尾の単位: 「作業時間(h)」「停止時間（分）」「金額[円]」
 _HEADER_UNIT_RE = re.compile(r"^(.+?)\s*[(\[]\s*([^()\[\]\d]{1,6})\s*[)\]]$")
 # 値の末尾の単位: 「1.5時間」「95分」「120 min」
 _VALUE_UNIT_RE = re.compile(r"^-?\d+(?:\.\d+)?\s*([^\d\s.,\-]{1,4})$")
+# 見出しの括弧書きのうち単位とみなす和文（「発生原因（推定）」「担当（記入）」の括弧書きは単位でない）。
+# 英字・記号の単位（h, min, mm, %, ℃）と1文字の和文（分・円・枚・個）はこの一覧に無くても単位とみなす
+_JA_UNITS = {"時間", "千円", "万円", "百万円", "人日", "人時", "日間", "ヶ月", "か月", "カ月", "箇所", "ケ所"}
 UNIT_ALIASES = {"h": "時間", "hr": "時間", "hrs": "時間", "hour": "時間", "hours": "時間",
                 "min": "分", "mins": "分", "sec": "秒", "yen": "円", "¥": "円"}
 
 MAX_LABEL_LENGTH = 20
+
+# チェックボックス表記「■重大　□大　□中」「☑同型機　□類似設備」
+CHECKED_MARKS = "■☑☒✓✔"
+_CHECKBOX_RE = re.compile(r"([■□☑☐☒✓✔])\s*([^■□☑☐☒✓✔\s]+)")
 
 
 def normalize_label(text) -> str:
@@ -30,7 +47,114 @@ def normalize_label(text) -> str:
     """
     s = unicodedata.normalize("NFKC", str(text))
     s = re.sub(r"\s+", "", s)
-    return s.strip(_EDGE_CHARS).lower()
+    return _strip_edges(s).lower()
+
+
+def _strip_edges(s: str) -> str:
+    """前後の記号を除く。括弧は対になっているときだけ外す（「停止時間(分)」の「)」だけを消さない）。"""
+    prev = None
+    while s and s != prev:
+        prev = s
+        s = s.strip(_EDGE_MARKS)
+        if not s:
+            break
+        close = _BRACKETS.get(s[0])
+        if close and s.endswith(close) and len(s) > 1:
+            s = s[1:-1]
+            continue
+        if close and close not in s[1:]:
+            s = s[1:]
+        if s and s[-1] in _CLOSERS and _CLOSERS[s[-1]] not in s[:-1]:
+            s = s[:-1]
+    return s
+
+
+def section_stripped(text) -> str:
+    """見出しの先頭の項番を除いた正規化ラベル。「３．暫定対策」「①何が」「(2)原因」「D2 問題の記述」→ 項番なし。
+
+    項番が無い、または除くと文字が残らない（「1.5」など）ときは "" を返す。
+    「2号機」のような数字始まりの値は項番とみなさない（区切りの「.」「)」「、」か丸数字が必要）。
+    """
+    raw = str(text).strip()
+    if raw[:1] and "①" <= raw[0] <= "⑳":
+        rest = normalize_label(raw[1:])
+    else:
+        compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
+        m = _SECTION_NO_RE.match(compact)
+        rest = normalize_label(compact[m.end():]) if m else ""
+    return rest if any(ch.isalpha() for ch in rest) else ""
+
+
+def label_parts(text) -> tuple[str, ...]:
+    """「ライン／工程」のように「／」で2〜3個のラベルをまとめた見出しの、各部分の正規化ラベル。
+
+    各部分が2文字以上で文字を含むときだけ分ける（「L/min」は分けない）。
+    """
+    s = unicodedata.normalize("NFKC", str(text or "")).strip()
+    if "\n" in s or "/" not in s:
+        return ()
+    parts = [normalize_label(p) for p in s.split("/")]
+    if not 2 <= len(parts) <= 3 or any(len(p) < 2 or not any(ch.isalpha() for ch in p) for p in parts):
+        return ()
+    return tuple(parts)
+
+
+def split_combined_value(text, count: int) -> list[str] | None:
+    """「L6／STI-CMP」を count 個に分ける。区切りの数が合わなければ None。"""
+    parts = [p.strip() for p in re.split(r"[/／]", str(text or ""))]
+    return parts if len(parts) == count and all(parts) else None
+
+
+# 設備番号らしい記号: 英字と数字を両方含む空白なしの英数字（CMP-108, ROB-821, EQ001）
+_CODE_TOKEN = r"(?=[A-Za-z0-9\-_.#]*[A-Za-z])(?=[A-Za-z0-9\-_.#]*\d)[A-Za-z0-9][A-Za-z0-9\-_.#]{2,19}"
+_CODE_NAME_PATTERNS = (
+    (re.compile(rf"^({_CODE_TOKEN})\s*\((.+)\)$"), 1, 2),        # CVD-202（TEOS CVD 2号機）
+    (re.compile(rf"^(.+?)\s*\(({_CODE_TOKEN})\)$"), 2, 1),        # TEOS CVD 2号機（CVD-202）
+    (re.compile(rf"^({_CODE_TOKEN})(?:\s*[/:]\s*|\s+)(.+)$"), 1, 2),  # CMP-108　STI-CMP 8号機 / CMP-108：STI-CMP
+    (re.compile(rf"^(.+?)(?:\s*[/:]\s*|\s+)({_CODE_TOKEN})$"), 2, 1),  # W-CMP 3号機　CMP-103
+)
+_CODE_ONLY = re.compile(rf"^{_CODE_TOKEN}$")
+
+
+def split_code_name(text) -> tuple[str, str] | None:
+    """「CMP-108　STI-CMP 8号機」「ROB-821（ウェーハソーター 1号機）」→ (設備番号, 設備名)。分けられなければ None。
+
+    1つのセルに「対象設備」「使用設備」として番号と名前をまとめて書く帳票用。名前の側が番号だけ（「CMP-101 / CMP-102」）なら分けない。
+    """
+    s = unicodedata.normalize("NFKC", str(text or "")).strip()
+    if not s or "\n" in s:
+        return None
+    for pattern, code_group, name_group in _CODE_NAME_PATTERNS:
+        m = pattern.match(s)
+        if m:
+            code, name = m[code_group].strip(), m[name_group].strip()
+            if name and not _CODE_ONLY.match(name) and not all(_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
+                return code, name
+    return None
+
+
+def paren_stripped(norm: str) -> str:
+    """末尾の括弧書きを除いた正規化ラベル。「停止時間(分)」→「停止時間」。括弧が無ければ ""。"""
+    m = _TRAILING_PAREN_RE.search(norm)
+    if not m or m.start() == 0:
+        return ""
+    return norm[: m.start()]
+
+
+_LABEL_SUFFIXES = ("内容", "欄", "日時")
+
+
+def label_base(norm: str) -> str:
+    """表記の揺れを比べるための見出しの基本形。末尾の括弧書きと「内容」「欄」「日時」を除く。変わらなければ ""。
+
+    例: 「発生原因(なぜ起きたか)」→「発生原因」、「応急処置内容」→「応急処置」、「復旧完了日時」→「復旧完了」。
+    """
+    s = paren_stripped(norm) or norm
+    for suffix in _LABEL_SUFFIXES:
+        if s.endswith(suffix) and len(s) - len(suffix) >= 2:
+            s = s[: -len(suffix)]
+            break
+    return s if s != norm else ""
 
 
 def normalize_sheet_name(name) -> str:
@@ -62,14 +186,35 @@ def split_label_unit(label: str) -> tuple[str, str]:
     """「作業時間(h)」→ ("作業時間", "時間")。単位がなければ (label, "")。"""
     s = unicodedata.normalize("NFKC", str(label or "")).strip()
     m = _HEADER_UNIT_RE.match(s)
-    if not m or not m[1].strip():
+    if not m or not m[1].strip() or not _unit_like(m[2].strip()):
         return str(label or "").strip(), ""
     return m[1].strip(), normalize_unit(m[2])
+
+
+def _unit_like(text: str) -> bool:
+    if text.isascii() or text in _JA_UNITS or len(text) == 1:
+        return True
+    return normalize_unit(text) != text  # 別名の一覧にあるもの
 
 
 def value_unit(text) -> str:
     """「1.5時間」→ "時間"。数値＋単位の形でなければ ""。"""
     m = _VALUE_UNIT_RE.match(unicodedata.normalize("NFKC", str(text or "")).strip())
+    return normalize_unit(m[1]) if m else ""
+
+
+def numeric_unit(text, unit: str = "") -> str:
+    """数値項目の単位。帳票の種類の設定があればそれ、無ければ書かれた値（「390分」「1,032分」「3時間40分」）から。
+
+    どちらからも決まらなければ ""（単位不明）。単位を勝手に決めない（既定値は持たない）。
+    """
+    u = normalize_unit(unit)
+    if u:
+        return u
+    s = unicodedata.normalize("NFKC", str(text or "")).replace(",", "").strip()
+    if _DURATION_RE.search(s):
+        return "分"  # to_number が「3時間40分」を分に換算する
+    m = _VALUE_UNIT_RE.match(s)
     return normalize_unit(m[1]) if m else ""
 
 
@@ -83,10 +228,29 @@ def cell_text(value) -> str:
         return value.strftime("%Y-%m-%d %H:%M")
     if isinstance(value, date):
         return value.isoformat()
+    if isinstance(value, time):
+        return value.strftime("%H:%M" if value.second == 0 else "%H:%M:%S")
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     text = str(value).replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
     return text.strip()
+
+
+def pick_checked(text) -> tuple[str | None, str | None] | None:
+    """「□重大　■大　□中」→ ("大", None)。チェックボックス表記でなければ None。
+
+    1行に □/■ などの印が2つ以上あるときだけ解釈する。複数チェックは「、」でつなぐ。
+    どれにもチェックが無ければ (None, 警告)。
+    """
+    if not isinstance(text, str) or "\n" in text.strip():
+        return None
+    options = _CHECKBOX_RE.findall(text)
+    if len(options) < 2:
+        return None
+    picked = [option for mark, option in options if mark in CHECKED_MARKS]
+    if not picked:
+        return None, "チェックの入った選択肢がありません"
+    return "、".join(picked), None
 
 
 def split_inline(text: str) -> tuple[str, str] | None:
@@ -133,6 +297,10 @@ def to_date(raw, text: str, date1904: bool = False) -> tuple[str | None, str | N
         parsed = _safe_date(int(m[1]), int(m[2]), int(m[3]))
         if parsed:
             return parsed, None
+    m = _NO_YEAR_RE.match(s)
+    if m and 1 <= int(m[1]) <= 12 and 1 <= int(m[2]) <= 31:
+        # 年は補わない（同じ帳票の別の項目やファイル名から推すと、外れたときに誤った日付を Markdown に書くことになる）
+        return (text or None), "年が書かれていません。元のファイルを確かめて、2026-02-12 のように年から書いてください"
     return (text or None), "日付として解釈できません"
 
 
@@ -143,16 +311,27 @@ def _safe_date(y: int, m: int, d: int) -> str | None:
         return None
 
 
-def to_number(raw, text: str) -> tuple[int | float | str | None, str | None]:
-    """数値に変換する。「2.5時間」のような単位付きは数値部分を取り出して警告を付ける。"""
+def to_number(raw, text: str, unit: str = "") -> tuple[int | float | str | None, str | None]:
+    """数値に変換する。「2.5時間」のような単位付きは数値部分を取り出して警告を付ける。
+
+    値が「3時間40分」の形なら、unit（「分」「時間」）に換算する（220 / 3.67）。unit が空なら分にする。
+    """
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         return (int(raw) if float(raw).is_integer() else raw), None
 
     s = unicodedata.normalize("NFKC", text or "").replace(",", "").strip()
+    m = _DURATION_RE.search(s)
+    if m and normalize_unit(unit) in ("分", "時間", ""):
+        # 単位の決まっていない項目では分にする（「3時間40分」を 3 と読まない）
+        target = normalize_unit(unit) or "分"
+        minutes = float(m[1]) * 60 + float(m[2])
+        number = minutes if target == "分" else round(minutes / 60, 2)
+        value = int(number) if float(number).is_integer() else number
+        return value, f"「{text}」を{target}に換算しました"
     m = _NUM_RE.search(s)
     if not m:
-        return (text or None), "数値として解釈できません"
+        return (text or None), "数値として読み取れません"
     number = float(m[0])
     value = int(number) if number.is_integer() else number
-    warning = None if m[0] == s else f"「{text}」から数値部分を抽出しました"
+    warning = None if m[0] == s else f"「{text}」から数値の部分だけを読み取りました"
     return value, warning

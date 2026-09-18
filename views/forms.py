@@ -1,25 +1,33 @@
 """帳票を取り込む（1ファイル＝1件）: ファイル選択 → 種類とシート → 読み取り結果の確認・修正 → 完了。
 
 Markdown は常にデータから作る（確認画面のプレビュー＝作業中の値、ダウンロード＝確定済みの値）。
+複数ファイルをまとめて選ぶと「取り込みのまとまり（batch）」になり、1件ずつ確認したあと zip でまとめて渡す。
+ダウンロードしたデータはその場で消す（design.md 3.3）。消すのは Markdown を作り終え、本文を送り終えたあとだけ
+（途中で切れたときは消さない: core.purge.purge_after_send）。
 """
 from __future__ import annotations
 
 import io
 import json
+import zipfile
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from flask import (Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_file,
                    url_for)
 
+from core import purge
 from core.files import UploadError, precheck_excel, remove_upload, save_upload, upload_path
-from excel.extractor import apply_manual_values, extract_document, refresh_summary
+from excel.extractor import apply_manual_values, extract_document, is_blank_value, refresh_summary
+from excel.tables import clean_table_value, is_table_value, parse_table_text, table_text_lines
 from excel.workbook import WorkbookInfo, load_workbook_info
 from export.formats import build_json, build_markdown, markdown_filename
 from models import database as db
 from pattern.matcher import rank_patterns, table_like_sheets
 from pattern.model import DATA_TYPES
 from services import ai_assist, llm
-from views import safe_next
+from views import form_link, safe_next, set_download_name
 
 bp = Blueprint("forms", __name__, url_prefix="/forms")
 
@@ -29,6 +37,13 @@ GRID_MAX_ROWS = 300
 GRID_MAX_COLS = 60
 CONFIRMED_STATES = ("confirmed", "modified")
 LOST_WORK_MESSAGE = "読み取り直すと、手で修正した値とAIが入力した値は失われます"
+# ダウンロードでデータが消えることの案内（画面の文言・確認ダイアログで使う）
+DELETE_ON_DOWNLOAD_NOTE = ("ダウンロードすると、この帳票の元のファイルと読み取り結果はこのPCから消えます。"
+                           "同じものをもう一度ダウンロードすることはできません。")
+DELETE_ON_DOWNLOAD_CONFIRM = "ダウンロードすると、この帳票のデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
+BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳票のデータはこのPCからすべて消えます。"
+                        "もう一度ダウンロードすることはできません。")
+MAX_BATCH_FILES = 50
 
 
 # ---- 共通 -------------------------------------------------------------------------
@@ -64,13 +79,33 @@ def _dumps(extraction: dict) -> str:
 
 
 def _search_title(doc: dict, extraction: dict) -> str:
-    """取り込み履歴の検索用タイトル（Markdown の1行目の見出し）。"""
+    """一覧に出す見出し（Markdown の1行目）。"""
     first = build_markdown(doc, extraction).split("\n", 1)[0]
     return first[2:].strip() if first.startswith("# ") else first.strip()
 
 
 def _display_text(value) -> str:
+    if is_table_value(value):
+        return table_json(value)
     return "" if value is None else str(value)
+
+
+def table_json(value) -> str:
+    """明細表の値を確認画面の入力欄（hidden）に入れる JSON。"""
+    return json.dumps(value, ensure_ascii=False) if is_table_value(value) else ""
+
+
+@bp.app_template_filter("field_text")
+def field_text(value) -> str:
+    """一覧・読み取りテスト用の表示。明細表は1行1明細の「品番: X／品名: Y」。"""
+    if is_table_value(value):
+        return "\n".join(table_text_lines(value))
+    return "" if value is None else str(value)
+
+
+@bp.app_template_filter("table_json")
+def _table_json_filter(value) -> str:
+    return table_json(value)
 
 
 def _same_text(a: str, b: str) -> bool:
@@ -90,8 +125,12 @@ def _apply_values(extraction: dict, values: dict) -> bool:
         f = fields.get(name)
         if f is None or text is None:
             continue
-        text = str(text)
-        if _same_text(text, _display_text(f["value"])):
+        text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
+        if f["data_type"] == "table":
+            parsed, warning = parse_table_text(text)
+            if warning is None and parsed == clean_table_value(f["value"]):
+                continue
+        elif _same_text(text, _display_text(f["value"])):
             continue
         changed[f"value-{name}"] = text
     if changed:
@@ -106,7 +145,7 @@ def _form_values(form) -> dict:
 
 
 def _is_blank(value) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
+    return is_blank_value(value)
 
 
 def _field_status(f: dict) -> dict:
@@ -131,6 +170,8 @@ def _summary(doc: dict, extraction: dict) -> dict:
     return {
         "markdown": build_markdown(doc, extraction),
         "file_name": markdown_filename(doc, extraction),
+        # 途中保存で「確定済み」→「修正中」に変わるので、画面の状態タグも書き替えられるように返す
+        "state": doc["state"],
         "counts": {
             "issue": sum(1 for s in statuses.values() if s["issue"]),
             "ai": sum(1 for s in statuses.values() if s["source"] == "ai"),
@@ -194,18 +235,10 @@ def new():
                            pattern_count=len(db.list_patterns()))
 
 
-@bp.post("/upload")
-def upload():
-    storage = request.files.get("file")
-    if storage is None or not storage.filename:
-        flash("ファイルを選んでください", "error")
-        return redirect(url_for(".new"))
+def _store_document(storage, batch_id: str = "", order: int = 0) -> int:
+    """1ファイルを保存して帳票を作る。読めないファイルは保存先から消して UploadError。"""
     cfg = current_app.config
-    try:
-        stored = save_upload(storage, "documents", cfg["ALLOWED_EXTENSIONS"], cfg["MAX_CONTENT_LENGTH"])
-    except UploadError as exc:
-        flash(str(exc), "error")
-        return redirect(url_for(".new"))
+    stored = save_upload(storage, "documents", cfg["ALLOWED_EXTENSIONS"], cfg["MAX_CONTENT_LENGTH"])
     try:
         path = upload_path(stored.stored_path)
         precheck_excel(path)
@@ -213,12 +246,72 @@ def upload():
             load_workbook_info(path)
         except Exception as exc:
             raise UploadError(f"{stored.file_name}: Excelファイルとして読み込めませんでした（{exc.__class__.__name__}）") from exc
-    except UploadError as exc:
+    except UploadError:
         remove_upload(stored.stored_path)
-        flash(str(exc), "error")
+        raise
+    return db.create_document(stored.file_name, stored.file_hash, stored.stored_path,
+                              batch_id=batch_id, batch_order=order)
+
+
+@bp.post("/upload")
+def upload():
+    """1ファイルならそのまま確認へ。複数ファイルなら1つのまとまり（batch）にして先頭から確認する。"""
+    storages = [s for s in request.files.getlist("file") if s is not None and s.filename]
+    if not storages:
+        flash("ファイルを選んでください", "error")
         return redirect(url_for(".new"))
-    doc_id = db.create_document(stored.file_name, stored.file_hash, stored.stored_path)
-    return redirect(url_for(".type_select", doc_id=doc_id))
+    if len(storages) == 1:
+        try:
+            doc_id = _store_document(storages[0])
+        except UploadError as exc:
+            flash(str(exc), "error")
+            return redirect(url_for(".new"))
+        return redirect(url_for(".type_select", doc_id=doc_id))
+
+    if len(storages) > MAX_BATCH_FILES:
+        flash(f"一度に選べるのは{MAX_BATCH_FILES}ファイルまでです（選んだのは{len(storages)}ファイル）", "error")
+        return redirect(url_for(".new"))
+    batch_id = uuid4().hex
+    doc_ids, errors = [], []
+    for order, storage in enumerate(storages):
+        try:
+            doc_ids.append(_store_document(storage, batch_id=batch_id, order=order))
+        except UploadError as exc:
+            errors.append(str(exc))
+    for message in errors:
+        flash(message, "error")
+    if not doc_ids:
+        return redirect(url_for(".new"))
+    flash(f"{len(doc_ids)}件の帳票を取り込みます。1件ずつ確認したあと、まとめて zip でダウンロードします", "info")
+    return redirect(url_for(".type_select", doc_id=doc_ids[0]))
+
+
+# ---- 取り込みのまとまり（複数ファイル） -------------------------------------------------------
+
+def _batch_info(doc: dict) -> dict | None:
+    """まとめ取り込みの進み具合（3/12）と次の帳票。まとまりに属さない帳票なら None。"""
+    batch_id = doc.get("batch_id") or ""
+    if not batch_id:
+        return None
+    docs = db.list_batch_documents(batch_id)
+    if not docs:
+        return None
+    for d in docs:
+        d["href"] = form_link(d)
+    ids = [d["id"] for d in docs]
+    position = ids.index(doc["id"]) + 1 if doc["id"] in ids else 0
+    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
+    after = [d for d in docs if d["state"] not in CONFIRMED_STATES and ids.index(d["id"]) > position - 1]
+    return {
+        "id": batch_id,
+        "docs": docs,
+        "position": position,
+        "total": len(docs),
+        "confirmed": len(docs) - len(pending),
+        "pending": pending,
+        "all_confirmed": not pending,
+        "next": (after or pending or [None])[0],
+    }
 
 
 # ---- 2 帳票の種類とシートを確認 -------------------------------------------------------------
@@ -255,7 +348,7 @@ def _render_type(doc: dict, info: WorkbookInfo | None = None, matches=None, ai_r
         return render_template("forms/type.html", steps=STEPS, doc=doc, info_missing=True, matches=[], sheets=[],
                                suggested={}, selected_id=None, selected_sheets=[], table_sheets=[],
                                duplicate=None, ai_result=None, pattern_names={}, llm_ready=llm.is_configured(),
-                               lost_work=doc["state"] in CONFIRMED_STATES)
+                               lost_work=doc["state"] in CONFIRMED_STATES, batch=_batch_info(doc))
     matches = matches if matches is not None else rank_patterns(info, db.load_active_patterns())
     suggested = {str(m.pattern.id): m.sheet_names for m in matches}
     current = _data(doc)
@@ -289,6 +382,7 @@ def _render_type(doc: dict, info: WorkbookInfo | None = None, matches=None, ai_r
         pattern_names={m.pattern.id: m.pattern.name for m in matches},
         llm_ready=llm.is_configured(),
         lost_work=doc["state"] in CONFIRMED_STATES,
+        batch=_batch_info(doc),
     )
 
 
@@ -348,6 +442,7 @@ def review(doc_id: int):
         info_missing=info is None,
         data_types=DATA_TYPES,
         llm_ready=llm.is_configured(),
+        batch=_batch_info(doc),
     )
 
 
@@ -437,8 +532,14 @@ def done(doc_id: int):
     confirmed = _data(doc, "confirmed_json")
     if confirmed is None:
         return redirect(url_for(".review", doc_id=doc_id))
-    return render_template("forms/done.html", steps=STEPS, doc=doc, file_name=markdown_filename(doc, confirmed),
-                           markdown=build_markdown(doc, confirmed))
+    file_name = markdown_filename(doc, confirmed)
+    hash8 = str(doc.get("file_hash") or "")[:8]
+    return render_template("forms/done.html", steps=STEPS, doc=doc, file_name=file_name,
+                           # 識別番号が無くてファイル名の末尾に元ファイルの符号が付いたときだけ、その説明を出す
+                           hash_suffix=bool(hash8) and Path(file_name).stem.endswith(hash8),
+                           markdown=build_markdown(doc, confirmed), batch=_batch_info(doc),
+                           delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
+                           batch_confirm=BATCH_DELETE_CONFIRM)
 
 
 # ---- 詳細・修正・削除 --------------------------------------------------------------------
@@ -458,6 +559,9 @@ def detail(doc_id: int):
         file_name=markdown_filename(doc, confirmed) if confirmed else None,
         changed_fields=_changed_fields(confirmed, working) if confirmed and doc["state"] == "modified" else [],
         data_types=DATA_TYPES,
+        batch=_batch_info(doc),
+        delete_note=DELETE_ON_DOWNLOAD_NOTE,
+        delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
     )
 
 
@@ -489,13 +593,70 @@ def discard_changes(doc_id: int):
 
 @bp.get("/<int:doc_id>/download.md")
 def download_md(doc_id: int):
+    """Markdown を渡し、渡し終えた帳票のデータを消す（design.md 3.3）。
+
+    Markdown は全文をメモリに作ってから消すので、消す処理で中身が欠けることはない。作れなかったときは
+    何も消さない。消すのは応答を送り終えたあと（purge.purge_after_send）。
+    """
     doc = _get_document(doc_id)
     confirmed = _data(doc, "confirmed_json")
     if confirmed is None:
         abort(404)
     body = build_markdown(doc, confirmed).encode("utf-8")
-    return send_file(io.BytesIO(body), mimetype="text/markdown; charset=utf-8", as_attachment=True,
-                     download_name=markdown_filename(doc, confirmed))
+    name = markdown_filename(doc, confirmed)
+    # charset は Flask が text/* に付ける。ここで付けると「charset=utf-8」が二重になる
+    response = send_file(io.BytesIO(body), mimetype="text/markdown", as_attachment=True, download_name=name)
+    set_download_name(response, name, "form")
+    return purge.purge_after_send(response, purge.purge_documents, [doc_id])
+
+
+def _unique_name(name: str, used: set[str]) -> str:
+    stem, suffix = Path(name).stem, Path(name).suffix or ".md"
+    candidate, n = name, 2
+    while candidate in used:
+        candidate = f"{stem}_{n}{suffix}"
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
+@bp.get("/batches/<batch_id>/download.zip")
+def download_batch(batch_id: str):
+    """まとめ取り込み1回分の Markdown を zip で渡し、渡し終えた分のデータを消す。
+
+    ?confirmed_only=1 のときは、確定済みの帳票だけを zip にして、その分だけ消す（未確定の帳票は残す）。
+    読めない帳票が1件混ざっただけで、確定済みの帳票を取り出せなくならないようにするため。
+    """
+    docs = db.list_batch_documents(batch_id)
+    if not docs:
+        abort(404)
+    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
+    confirmed_ids = [d["id"] for d in docs if d["state"] in CONFIRMED_STATES]
+    confirmed_only = request.args.get("confirmed_only") == "1"
+    if pending and not confirmed_only:
+        flash(f"まだ確定していない帳票が{len(pending)}件あります。すべて確定するか、"
+              f"確定済みの{len(confirmed_ids)}件だけをダウンロードしてください", "error")
+        return redirect(url_for(".type_select", doc_id=pending[0]["id"]))
+    if not confirmed_ids:
+        flash("確定済みの帳票がありません", "error")
+        return redirect(url_for("home.index"))
+    buffer, used = io.BytesIO(), set()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for doc in db.list_confirmed_documents(confirmed_ids):
+            # 修正中の帳票も、確定済みの版で作る（Markdown は確定済みデータから毎回生成）
+            try:
+                extraction = json.loads(doc["confirmed_json"])
+            except (TypeError, ValueError):
+                continue
+            zf.writestr(_unique_name(markdown_filename(doc, extraction), used),
+                        build_markdown(doc, extraction).encode("utf-8"))
+    buffer.seek(0)
+    zip_name = f"帳票Markdown_{datetime.now():%Y%m%d_%H%M%S}.zip"
+    response = send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=zip_name)
+    set_download_name(response, zip_name, "forms_markdown")
+    if pending:
+        return purge.purge_after_send(response, purge.purge_documents, confirmed_ids)
+    return purge.purge_after_send(response, purge.purge_batch, batch_id)
 
 
 @bp.get("/<int:doc_id>/download.json")
@@ -506,7 +667,8 @@ def download_json(doc_id: int):
         abort(404)
     body = json.dumps(build_json(doc, confirmed), ensure_ascii=False, indent=2).encode("utf-8")
     name = str(Path(markdown_filename(doc, confirmed)).with_suffix(".json"))
-    return send_file(io.BytesIO(body), mimetype="application/json", as_attachment=True, download_name=name)
+    return set_download_name(
+        send_file(io.BytesIO(body), mimetype="application/json", as_attachment=True, download_name=name), name, "form")
 
 
 @bp.get("/<int:doc_id>/original")
@@ -523,11 +685,9 @@ def original(doc_id: int):
 
 @bp.post("/<int:doc_id>/delete")
 def delete(doc_id: int):
-    doc = _get_document(doc_id)
-    try:
-        remove_upload(doc["stored_path"])
-    except UploadError:
-        pass
-    db.delete_document(doc_id)
-    flash(f"{doc['file_name']} を削除しました", "info")
-    return redirect(safe_next(url_for("history.index")))
+    _get_document(doc_id)
+    purge.purge_documents([doc_id])
+    # ファイル名は出さない: flash はブラウザのセッションクッキーに載るので、取引先名や「社外秘」を
+    # 含みうる名前をサーバー側から消したあともブラウザに残ってしまう（design.md 3.3）
+    flash("帳票を削除しました（元のファイルと読み取り結果を消しました）", "info")
+    return redirect(safe_next(url_for("home.index")))

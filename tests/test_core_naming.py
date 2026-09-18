@@ -25,5 +25,5 @@ def test_md_filename():
     assert md_filename(["設備修理報告書", "R2026-00123", "CMP-101"]) == "設備修理報告書_R2026-00123_CMP-101.md"
     assert md_filename(["トラブル対応一覧", "", None, "2026-08"]) == "トラブル対応一覧_2026-08.md"
     assert md_filename(["故障履歴", "2026-08"], hint=LIGHTRAG_HINT_RECORDS) == \
-        "故障履歴_2026-08.[legacy-R(chunk_ts=800,chunk_ol=0)].md"
+        "故障履歴_2026-08.[legacy-R(chunk_ts=1500,chunk_ol=0)].md"
     assert md_filename([]) == "無題.md"

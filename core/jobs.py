@@ -43,6 +43,22 @@ class JobCancelled(Exception):
     """中止の要求を受けて fn の処理を打ち切るときに投げる。"""
 
 
+class JobError(Exception):
+    """利用者にそのまま見せてよい日本語メッセージを持つエラー。
+
+    これを継承した例外（aiproc.runner.AIJobError、tables.pipeline.PipelineError）は、そのメッセージを
+    画面にそのまま出す。それ以外の例外は Python の例外名が画面に出ないようにし、内容はログにだけ残す。
+    """
+
+
+def error_message(exc: Exception) -> str:
+    """ジョブの失敗を画面に出す日本語の文にする。詳しい内容（例外名）はログに残してあるので出さない。"""
+    text = " ".join(str(exc).split())
+    if isinstance(exc, JobError) and text:
+        return text
+    return "処理中にエラーが発生しました。もう一度実行してください（詳しい内容はアプリのログに記録しました）"
+
+
 def _now() -> str:
     return database.now()
 
@@ -223,7 +239,7 @@ def _run(app, job_id: int, fn: Callable[[JobContext], dict | None]) -> None:
             except Exception as exc:
                 app.logger.exception("ジョブ %s（%s）でエラー", job_id, row["kind"])
                 ctx._update("status = 'failed', pause_requested = 0, message = ?, updated_at = ?",
-                            (f"処理中にエラーが発生しました（{exc.__class__.__name__}: {exc}）", _now()))
+                            (error_message(exc), _now()))
                 return
             if result is not None:
                 ctx.progress(result=result)

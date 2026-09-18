@@ -4,7 +4,9 @@
       → AI整形（任意。追記ログ列がある時だけ） → 内容とファイルの確認 → 完了（ダウンロード）
 範囲の決まり（利用者の判断）: 期間の置き換え・投入済みとの差分・取り消しはしない。取り込みごとに
 その取り込みの記録だけから全 Markdown を作り、全ファイルを zip で渡す。クロス集計と名寄せ辞書は扱わない。
+ダウンロードした取り込みのデータは、zip を送り終えたあとに消す（design.md 3.3・core.purge.purge_after_send）。
 読み込み・Markdown 作成・AI整形は core.jobs のジョブ（tables.pipeline / aiproc.runner）で動かし、待ち画面で進み具合を出す。
+表の範囲・列の画面は取り込みの控え（tables.source_cache）を通して読み、開くたびにファイル全体を読み直さない。
 """
 from __future__ import annotations
 
@@ -15,19 +17,19 @@ from pathlib import Path
 
 from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, send_file, url_for
 
-from core import jobs
+from core import jobs, purge
 from core.files import UploadError, precheck_excel, remove_upload, save_upload, upload_path
 from core.naming import safe_filename_part
 from models import database
 from tables import outputs, pipeline, store
 from tables.checks import count_levels, has_blocking
-from tables.detect import guess_layout, looks_like_list, sample_data_rows
 from tables.mapping import match_templates, suggest_columns
 from tables.markdown import ai_point_lines, people_index_for, record_block
 from tables.source import open_source
 from tables.spec import (
     COLUMN_ROLES, COLUMN_TYPES, MD_MODES, resolve_columns, spec_from_suggestions, validate_spec,
 )
+from views import safe_next, set_download_name
 
 bp = Blueprint("tables", __name__, url_prefix="/tables")
 
@@ -52,6 +54,16 @@ TABLE_KIND_LABELS = {"list": "一覧表", "crosstab": "クロス集計", "form_l
 SCOPE_LABELS = {"pending": "まだ整形していない行と、内容が変わった行", "errors": "エラーになった行だけ",
                 "flagged": "要確認の行だけ", "all": "すべての行をやり直す"}
 MATCHED_LABELS = {"template": "設定", "dictionary": "辞書", "similar": "似た見出し", "none": "", "": ""}
+# CSV の文字コード・区切り文字は画面の選択肢だけを受け付ける（他の値は読み込みで落ちて画面が開けなくなるため）
+# ダウンロードでデータが消えることの案内（design.md 3.3）
+DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この取り込みのデータ（元のファイル・読み込んだ内容・"
+                           "作った Markdown・AI整形の結果）はこのPCから消えます。同じものをもう一度ダウンロードすることはできません。"
+                           "正規化CSVも要るときは、zip より先にダウンロードしてください。")
+DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込みのデータはこのPCから消えます。"
+                              "もう一度ダウンロードすることはできません。")
+ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
+                    ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16")]
+DELIMITER_CHOICES = [(",", "カンマ"), ("\t", "タブ"), (";", "セミコロン"), ("|", "縦棒")]
 
 
 # ---- 共通 ---------------------------------------------------------------------------------
@@ -76,10 +88,13 @@ def _is_excel(imp: dict) -> bool:
 
 
 def _open(imp: dict):
-    return pipeline.open_import_source(imp)
+    """控え付きの表ソース。元のファイルは控えにない範囲を読むときだけ開く。"""
+    return pipeline.import_source(imp)
 
 
 def _sheet(imp: dict, source) -> str:
+    if not _is_excel(imp):
+        return source.file_name  # CSV はファイル名が1つのシート（全行を数えずに済ませる）
     src = imp.get("source") or {}
     names = [s.name for s in source.sheets()]
     if src.get("sheet") in names:
@@ -93,13 +108,18 @@ def _layout(imp: dict, source, sheet: str, header_rows=None, data_end=None, use_
     if use_saved:
         header_rows = header_rows or [int(r) for r in src.get("header_rows") or [] if r] or None
         data_end = data_end or src.get("data_end_row") or None
-    return guess_layout(source, sheet, header_rows=header_rows or None, data_end=data_end or None)
+    return source.layout(sheet, header_rows=header_rows or None, data_end=data_end or None)
 
 
 def _after_read_url(import_id: int, spec) -> str:
     if spec is not None and spec.log_stage is not None:
         return url_for("tables.ai", import_id=import_id)
     return url_for("tables.preview", import_id=import_id)
+
+
+def _after_read_step(spec) -> int:
+    """読み込みのあとに開く画面の番号。追記ログ列があれば「AI整形（任意）」に戻るので手順バーもそこを指す。"""
+    return 5 if spec is not None and spec.log_stage is not None else 6
 
 
 def _json_error(message: str, status: int = 400, **extra):
@@ -144,10 +164,50 @@ def _busy_page(imp: dict):
                 store.update_import(imp["id"], status="preview")
                 flash("Markdownの作成が途中で止まりました。もう一度 [確定してMarkdownを作成] を押してください", "error")
         return redirect(request.path)
-    title = "表を読み込んでいます" if imp["status"] == "reading" else "Markdownを作成しています"
-    step = 6 if imp["status"] == "reading" else 7
+    reading = imp["status"] == "reading"
+    title = "表を読み込んでいます" if reading else "Markdownを作成しています"
+    step = _after_read_step(_spec_for(imp)) if reading else 7
     return render_template("tables/wait.html", imp=imp, job=job, title=title,
+                           cancel_note=("読み込みを中止します。シートや見出し行を選び直してからやり直せます。" if reading
+                                        else "Markdownの作成を中止します。読み込んだ内容は残ります。"),
                            job_url=url_for("tables.api_job", job_id=job["id"]), **_steps_ctx(step))
+
+
+# 待ち画面から中止できるジョブ（取り込みの job_id に入るもの）と、中止したときに戻す状態
+CANCELLABLE_JOBS = {"table_read": "uploaded", "table_render": "preview"}
+
+
+@bp.post("/imports/<int:import_id>/cancel")
+def cancel_job(import_id: int):
+    """待ち画面の［中止］: 読み込み・Markdown作成のジョブを止める。"""
+    imp = _load_import(import_id)
+    job = jobs.get_job(imp["job_id"]) if imp.get("job_id") else None
+    if job is None or job["kind"] not in CANCELLABLE_JOBS or job.get("finished"):
+        flash("中止できる処理がありません（すでに終わっている可能性があります）", "error")
+        return redirect(url_for("tables.preview", import_id=import_id))
+    jobs.request_cancel(job["id"])
+    after = jobs.get_job(job["id"])
+    if after and after["status"] == "cancelled" and imp["status"] in ("reading", "confirming"):
+        # 待機中のまま中止されたときは本体が動かないので、ここで取り込みの状態を戻す
+        store.update_import(import_id, status=CANCELLABLE_JOBS[job["kind"]])
+    flash("処理を中止しました", "success")
+    return redirect(url_for("tables.preview", import_id=import_id))
+
+
+# ---- 取り込みを削除 --------------------------------------------------------------------------
+
+@bp.post("/imports/<int:import_id>/delete")
+def delete_import(import_id: int):
+    """間違えて取り込んだファイルを消す（読み込んだ内容・作った Markdown も消える。取り込み設定は残る）。"""
+    imp = _load_import(import_id)
+    if imp["status"] in ("reading", "confirming"):
+        flash("処理中の取り込みは削除できません。終わるか中止してから削除してください", "error")
+        return redirect(url_for("tables.preview", import_id=import_id))
+    purge.purge_table_import(import_id)
+    # ファイル名は出さない: flash はブラウザのセッションクッキーに載るので、取引先名や「社外秘」を
+    # 含みうる名前をサーバー側から消したあともブラウザに残ってしまう（design.md 3.3）
+    flash("取り込みを削除しました（元のファイル・読み込んだ内容・作った Markdown を消しました）", "success")
+    return redirect(safe_next(url_for("tables.new")))
 
 
 # ---- 1 ファイルを選ぶ ------------------------------------------------------------------------
@@ -194,6 +254,8 @@ def upload():
         flash(str(exc), "error")
         return redirect(url_for("tables.new"))
     import_id = store.create_import(stored.file_name, stored.file_hash, stored.stored_path, source=source_info)
+    if source_info.get("kind") == "excel":
+        pipeline.import_source(store.get_import(import_id), real=source).sheets()  # シート一覧を控えに入れる
     return redirect(url_for("tables.source", import_id=import_id))
 
 
@@ -219,8 +281,9 @@ def source(import_id: int):
         sheets = source_obj.sheets() if _is_excel(imp) else []
         sheet = _sheet(imp, source_obj)
         if _is_excel(imp) and len([s for s in sheets if not s.hidden]) <= 8:
-            list_like = {s.name: looks_like_list(source_obj, s.name) for s in sheets if not s.hidden}
-        layout = guess_layout(source_obj, sheet, max_scan_rows=200)
+            # 「一覧表らしい」「クロス集計らしい（対応していません）」を出し分ける（3画面目の判定と合わせる）
+            list_like = {s.name: source_obj.list_kind(s.name) for s in sheets if not s.hidden}
+        layout = source_obj.layout(sheet, max_scan_rows=200)
         headers = layout.headers
     except UploadError as exc:
         error = str(exc)
@@ -234,10 +297,10 @@ def source(import_id: int):
     return render_template(
         "tables/source.html", imp=imp, src=src, error=error, sheets=sheets, sheet=sheet, list_like=list_like,
         headers=headers, candidates=candidates, selected=selected or "new",
-        new_name=src.get("new_template_name") or Path(imp["file_name"]).stem,
-        encodings=[("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
-                   ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16")],
-        delimiters=[(",", "カンマ"), ("\t", "タブ"), (";", "セミコロン"), ("|", "縦棒")],
+        # 名前の初期値にファイル名を使わない: 設定の名前は消さずに残り続けるので、取引先名・工場名・
+        # 「社外秘」を含みうるファイル名がそのまま残ってしまう（design.md 3.3・R5）
+        new_name=src.get("new_template_name") or "",
+        encodings=ENCODING_CHOICES, delimiters=DELIMITER_CHOICES,
         **_steps_ctx(2))
 
 
@@ -250,8 +313,13 @@ def save_source(import_id: int):
         if request.form.get("sheet"):
             src["sheet"] = request.form["sheet"]
     else:
+        allowed = {"encoding": {v for v, _label in ENCODING_CHOICES},
+                   "delimiter": {v for v, _label in DELIMITER_CHOICES}}
         for name in ("encoding", "delimiter"):
             value = request.form.get(name)
+            if value and value not in allowed[name]:
+                flash("この画面にない文字コード・区切り文字は選べません", "error")
+                return redirect(url_for("tables.source", import_id=import_id))
             if value:
                 src[name] = value
         src["errors"] = "replace" if request.form.get("replace_errors") == "on" else "strict"
@@ -392,7 +460,8 @@ def _settings_of(spec, default_name: str) -> dict:
             "group_by": md.get("group_by") or "month",
             "max_records_per_file": md.get("max_records_per_file") or 300,
             "omit_person": md.get("omit_person", True),
-            "lightrag_hint": bool(md.get("lightrag_hint"))}
+            "lightrag_hint": bool(md.get("lightrag_hint", True)),        # 新しい設定（spec is None）の既定はオン
+            "dedupe_timeline": bool(md.get("dedupe_timeline", True))}
 
 
 def _column_row(index: int, header: str, col=None, sugg=None, use: bool = True) -> dict:
@@ -409,6 +478,9 @@ def _column_row(index: int, header: str, col=None, sugg=None, use: bool = True) 
         "type_error_rate": getattr(sugg, "type_error_rate", 0.0) if sugg is not None else 0.0,
         "blank_rate": getattr(sugg, "blank_rate", 0.0) if sugg is not None else 0.0,
         "inferred_type": getattr(sugg, "inferred_type", "") if sugg is not None else "",
+        "inferred_type_label": TYPE_LABELS.get(getattr(sugg, "inferred_type", "") if sugg is not None else "",
+                                               getattr(sugg, "inferred_type", "") if sugg is not None else ""),
+        "auto_omit": sugg is not None and getattr(sugg, "md", "") == "omit",
         "matched_by": MATCHED_LABELS.get(getattr(sugg, "matched_by", "") if sugg is not None else "", ""),
     }
 
@@ -444,7 +516,10 @@ def _build_spec(payload: dict, base_spec=None):
     spec.header["ignored"] = [str(r.get("header") or "") for r in rows if not r.get("use")]
     spec.markdown["file_prefix"] = str(payload.get("file_prefix") or "").strip() or name
     spec.markdown["omit_person"] = bool(payload.get("omit_person", True))
+    # 画面のチェックは必ず true/false で送られてくる（static/tables.js）。キーが無いのは画面以外からの呼び出しで、
+    # そのときは分割ヒントは付けず、時系列の重複削除は今までどおり行う。
     spec.markdown["lightrag_hint"] = bool(payload.get("lightrag_hint"))
+    spec.markdown["dedupe_timeline"] = bool(payload.get("dedupe_timeline", True))
     if base_spec is not None:
         # 画面で扱わない細かい設定は前の設定から引き継ぐ
         for attr in ("name_patterns", "file_types", "na_tokens", "fiscal_year_start_month", "data_end", "exclude",
@@ -472,7 +547,7 @@ def columns(import_id: int):
         source_obj = _open(imp)
         sheet = _sheet(imp, source_obj)
         guess = _layout(imp, source_obj, sheet)
-        samples = sample_data_rows(source_obj, sheet, guess, 200)
+        samples = source_obj.sample_rows(sheet, guess, 200)
     except UploadError as exc:
         flash(str(exc), "error")
         return redirect(url_for("tables.source", import_id=import_id))
@@ -493,8 +568,8 @@ def columns(import_id: int):
         rows.append(_column_row(s.index, s.header, col, s, use))
     src = imp.get("source") or {}
     return render_template(
-        "tables/columns.html", imp=imp, rows=rows, settings=_settings_of(spec, src.get("new_template_name") or
-                                                                         Path(imp["file_name"]).stem),
+        # 設定の名前の初期値にファイル名を使わない（R5・design.md 3.3）。名前は 2画面目で必ず入力させる
+        "tables/columns.html", imp=imp, rows=rows, settings=_settings_of(spec, src.get("new_template_name") or ""),
         changed=src.get("headers_changed"), is_new=spec is None, header_rows_count=len(guess.header_rows) or 1,
         save_url=url_for("tables.save_columns", import_id=import_id), **_options_ctx(), **_steps_ctx(4))
 
@@ -542,7 +617,7 @@ def _not_ready(imp: dict, spec):
         return redirect(url_for("tables.source", import_id=imp["id"]))
     if imp["status"] == "failed":
         return render_template("tables/failed.html", imp=imp, error=(imp.get("stats") or {}).get("error") or "",
-                               **_steps_ctx(6))
+                               **_steps_ctx(_after_read_step(spec)))
     if imp["status"] == "uploaded":
         return redirect(url_for("tables.layout", import_id=imp["id"]))
     return None
@@ -602,6 +677,7 @@ def ai_split_preview(import_id: int):
     from aiproc import prompts, runner
     from logproc import format_author, format_when, review_notes
     from logproc import render_timeline
+    from services import llm
 
     _load_import(import_id)
     row_key = str(_payload().get("row_key") or "")
@@ -622,7 +698,7 @@ def ai_split_preview(import_id: int):
     } for s in parse.segments]
     return jsonify({
         "row_key": row_key, "kind": parse.kind, "order": parse.order, "text": parse.text, "segments": segments,
-        "route": w.route, "reason": w.reason, "notes": review_notes(parse),
+        "route": w.route, "reason": w.reason, "ai_ready": llm.is_configured(), "notes": review_notes(parse),
         "timeline": render_timeline(parse, w.entity_label, glossary=(w.stage.glossary or None) if w.stage else None),
         "sent_text": prompts.messages_text(w.messages) if w.messages else "",
     })
@@ -726,6 +802,16 @@ def ai_control(import_id: int, action: str):
 
 # ---- 6 内容とファイルの確認 ---------------------------------------------------------------------------
 
+def _preview_job(import_id: int, imp: dict, spec) -> dict:
+    """確認画面の md を作るジョブ。同じ入力のジョブがあればそれを見せ、なければ始める。"""
+    signature = pipeline.preview_signature(import_id, imp, spec)
+    job = jobs.latest_job("table_import", import_id, kind="table_preview")
+    if job is not None and (job.get("params") or {}).get("signature") == signature:
+        if not job.get("finished") or job["status"] == "failed":
+            return job  # 動いている途中、または同じ入力で失敗したまま（作り直しても同じ結果になる）
+    return jobs.get_job(pipeline.start_preview_job(import_id, signature))
+
+
 @bp.get("/imports/<int:import_id>/preview")
 def preview(import_id: int):
     imp = _load_import(import_id)
@@ -738,18 +824,26 @@ def preview(import_id: int):
         return not_ready
     stats = imp.get("stats") or {}
     issues = pipeline.load_issues(import_id)
-    files = pipeline.preview_files(import_id, imp, spec)
+    files = pipeline.ready_preview_files(import_id, imp, spec)
+    if files is None:  # 初回は件数分の md を作るのに時間がかかるので、ジョブにして待ち画面を出す
+        job = _preview_job(import_id, imp, spec)
+        if job.get("finished") and job["status"] != "done":
+            return render_template("tables/failed.html", imp=imp,
+                                   error=job.get("message") or "Markdownの下書きを作れませんでした",
+                                   **_steps_ctx(6))
+        return render_template("tables/wait.html", imp=imp, job=job, title="Markdownの下書きを作っています",
+                               job_url=url_for("tables.api_job", job_id=job["id"]), **_steps_ctx(6))
     page = max(1, _int(request.args.get("page"), 1) or 1)
-    all_rows = pipeline.load_rows(import_id)
-    total_pages = max(1, (len(all_rows) + DATA_PAGE - 1) // DATA_PAGE)
-    page = min(page, total_pages)
-    data_rows = all_rows[(page - 1) * DATA_PAGE: page * DATA_PAGE]
-    del all_rows
+    data_rows, total = pipeline.load_rows_page(import_id, (page - 1) * DATA_PAGE, DATA_PAGE)
+    total_pages = max(1, (total + DATA_PAGE - 1) // DATA_PAGE)
+    if page > total_pages:
+        page = total_pages
+        data_rows, _total = pipeline.load_rows_page(import_id, (page - 1) * DATA_PAGE, DATA_PAGE)
     return render_template(
         "tables/preview.html", imp=imp, spec=spec, stats=stats, issues=issues[:ISSUES_SHOWN], issue_total=len(issues),
         counts=count_levels(issues), blocking=has_blocking(issues), files=files, data_rows=data_rows, page=page,
         total_pages=total_pages, columns=[(c.key, c.display) for c in spec.columns],
-        confirmed=imp["status"] == "confirmed", **_steps_ctx(6))
+        confirmed=imp["status"] == "confirmed", delete_note=DELETE_ON_DOWNLOAD_NOTE, **_steps_ctx(6))
 
 
 @bp.get("/imports/<int:import_id>/preview/file")
@@ -765,8 +859,9 @@ def preview_file(import_id: int):
 def issues_csv(import_id: int):
     imp = _load_import(import_id)
     data = outputs.issues_csv(pipeline.load_issues(import_id))
-    return send_file(io.BytesIO(data), mimetype="text/csv", as_attachment=True,
-                     download_name=f"{Path(imp['file_name']).stem}_問題一覧.csv")
+    name = f"{Path(imp['file_name']).stem}_問題一覧.csv"
+    return set_download_name(
+        send_file(io.BytesIO(data), mimetype="text/csv", as_attachment=True, download_name=name), name, "issues")
 
 
 @bp.post("/imports/<int:import_id>/confirm")
@@ -801,18 +896,26 @@ def done(import_id: int):
     spec = _spec_for(imp)
     files = [{"name": p.name, "size": p.stat().st_size} for p in pipeline.md_paths(import_id)]
     return render_template("tables/done.html", imp=imp, spec=spec, files=files, stats=imp.get("stats") or {},
+                           delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
                            **_steps_ctx(7))
 
 
 @bp.get("/imports/<int:import_id>/download.zip")
 def download_zip(import_id: int):
+    """zip を渡し、渡し終えた取り込みのデータを消す（design.md 3.3）。
+
+    zip は全体をメモリに作ってから消すので、消す処理で中身が欠けることはない。作れなかったときは何も消さない。
+    """
     imp = _load_import(import_id)
     spec = _spec_for(imp)
     if imp["status"] != "confirmed" or spec is None or not pipeline.md_paths(import_id):
         flash("先に [確定してMarkdownを作成] を押してください", "error")
         return redirect(url_for("tables.preview", import_id=import_id))
     data = pipeline.build_download(import_id, imp, spec)
-    return send_file(io.BytesIO(data), mimetype="application/zip", as_attachment=True, download_name=f"{_download_base(imp, spec)}.zip")
+    name = f"{_download_base(imp, spec)}.zip"
+    response = send_file(io.BytesIO(data), mimetype="application/zip", as_attachment=True, download_name=name)
+    set_download_name(response, name, "records")
+    return purge.purge_after_send(response, purge.purge_table_import, import_id)
 
 
 @bp.get("/imports/<int:import_id>/normalized.csv")
@@ -822,8 +925,9 @@ def download_csv(import_id: int):
     if spec is None or imp["status"] not in ("preview", "confirmed"):
         abort(404)
     data = outputs.normalized_csv(spec, pipeline.load_rows(import_id))
-    return send_file(io.BytesIO(data), mimetype="text/csv", as_attachment=True,
-                     download_name=f"{_download_base(imp, spec)}_正規化データ.csv")
+    name = f"{_download_base(imp, spec)}_正規化データ.csv"
+    return set_download_name(
+        send_file(io.BytesIO(data), mimetype="text/csv", as_attachment=True, download_name=name), name, "records")
 
 
 # ---- 取り込み設定の編集（一覧は設定画面） ------------------------------------------------------------------------
@@ -863,7 +967,7 @@ def delete_template(template_id: int):
     if store.get_template(template_id) is None:
         abort(404)
     store.delete_template(template_id)
-    flash("取り込み設定を削除しました。作成済みの取り込み履歴は残ります", "success")
+    flash("取り込み設定を削除しました", "success")
     return redirect(url_for("settings.table_templates"))
 
 

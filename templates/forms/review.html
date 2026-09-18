@@ -8,12 +8,14 @@
 <div class="page-head">
   <div>
     <h1>読み取り結果の確認・修正</h1>
-    <p class="page-lead">{{ doc.file_name }} ／ 帳票の種類: {{ extraction.pattern.name }} ／ シート: {{ extraction.sheets | join('、') }} {{ ui.badge(doc.state) }}</p>
+    <p class="page-lead">{{ doc.file_name }} ／ 帳票の種類: {{ extraction.pattern.name }} ／ シート: {{ extraction.sheets | join('、') }} <span data-doc-state>{{ ui.badge(doc.state) }}</span></p>
   </div>
   <div class="btn-row">
-    <a class="btn ghost" href="{{ url_for('history.index') }}">取り込み履歴に戻る（作業内容は保存されています）</a>
+    <a class="btn ghost" href="{{ url_for('home.index') }}">ホームに戻る（作業内容は保存されています）</a>
   </div>
 </div>
+
+{% include "forms/_batch_bar.html" %}
 
 {% if doc.state == 'modified' %}
 <div class="notice" role="note">
@@ -26,14 +28,14 @@
 
 <div class="review-toolbar cluster">
   <ul class="chips" aria-label="項目の状態">
-    <li><button type="button" class="chip chip-warn{{ ' is-zero' if not summary.counts.issue }}" data-next-issue>要確認 <strong data-count="issue">{{ summary.counts.issue }}</strong></button></li>
+    <li><button type="button" class="chip chip-warn{{ ' is-zero' if not summary.counts.issue }}" data-next-issue title="押すと次の要確認の項目へ移動します">要確認 <strong data-count="issue">{{ summary.counts.issue }}</strong></button></li>
     <li><span class="chip chip-ai{{ ' is-zero' if not summary.counts.ai }}">AIが入力 <strong data-count="ai">{{ summary.counts.ai }}</strong></span></li>
     <li><span class="chip chip-manual{{ ' is-zero' if not summary.counts.manual }}">手で修正 <strong data-count="manual">{{ summary.counts.manual }}</strong></span></li>
   </ul>
   <span class="muted small" data-save-status aria-live="polite"></span>
   <span class="spacer"></span>
   <a class="btn small ghost" href="{{ url_for('forms.type_select', doc_id=doc.id) }}">種類・シートを選び直す</a>
-  <a class="btn small ghost" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード</a>
+  <a class="btn small ghost" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード（消えません）</a>
 </div>
 
 <div class="split" id="review" data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}" data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}">
@@ -94,7 +96,32 @@
               {% if f.value_cell %}<small class="muted">{{ f.sheet }}!{{ f.value_cell }}</small>{% endif %}
             </div>
             {% set text = '' if f.value is none else f.value %}
-            {% if f.data_type == 'text' or (text is string and '\n' in text) %}
+            {% if f.data_type == 'table' %}
+              {# 値が空でも、帳票の種類で覚えた列見出しがあれば空の表を出す（人が行を入れ直せるように） #}
+              {% set tcolumns = f.value.columns if f.value else (f.table_columns or []) %}
+              {% set trows = f.value.rows if f.value else [] %}
+              <input type="hidden" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}" value="{{ f.value | table_json }}" data-table-value>
+              {% if tcolumns %}
+              <p class="hint">1行＝1明細として Markdown に出します。余分な行は［行を削除］で外してください。{% if not trows %}元のファイルから読み取れなかったので、［行を追加］で入力してください。{% endif %}</p>
+              {% if f.table_blocks and f.table_blocks > 1 %}
+              <p class="hint">同じ形の列見出しが{{ f.table_blocks }}組、縦に積み重なっていました。すべての組を1つの表にまとめています（組ごとに列見出しが変わるため、行によって空の欄があります）。</p>
+              {% endif %}
+              <div class="table-wrap">
+                <table class="table compact table-editor" data-table-editor aria-label="{{ f.display_name }}（1行＝1明細）">
+                  <thead><tr>{% for c in tcolumns %}<th scope="col">{{ c }}</th>{% endfor %}<th class="center"><span class="sr-only">行の操作</span></th></tr></thead>
+                  <tbody>
+                  {% for row in trows %}
+                    <tr>{% for cell in row %}<td><textarea class="cell-input" rows="1" aria-label="{{ tcolumns[loop.index0] if loop.index0 < tcolumns | length else '' }}">{{ cell }}</textarea></td>{% endfor %}
+                      <td class="center"><button type="button" class="btn small ghost" data-remove-table-row>行を削除</button></td></tr>
+                  {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+              <button type="button" class="btn small" data-add-table-row>行を追加</button>
+              {% else %}
+              <p class="muted small">明細表が見つかりませんでした。元のファイルを確認し、見つからない場合は［種類・シートを選び直す］か、帳票の種類の「探す見出し」「明細表の列見出し」を直してください。</p>
+              {% endif %}
+            {% elif f.data_type == 'text' or (text is string and '\n' in text) %}
               <textarea class="input" rows="{{ [3, (text | string).count('\n') + 2] | max }}" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}">{{ text }}</textarea>
             {% else %}
               <input class="input" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}" value="{{ text }}" {% if f.data_type == 'date' %}placeholder="例: 2026-09-14"{% elif f.data_type == 'number' %}inputmode="decimal"{% endif %}>

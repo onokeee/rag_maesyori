@@ -10,6 +10,11 @@
     <p class="page-lead">ファイル: {{ imp.file_name }}{% if imp.source.kind == 'excel' %}／シート: {{ sheet }}{% endif %}。
       色分けで、見出し・データ・小計・注記・除外される行を確かめてください。行番号をクリックすると見出し行やデータの終わりを指定できます。</p>
   </div>
+  <div class="btn-row">
+    {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=imp.id),
+        "この取り込みを削除します。アップロードしたファイルも消えます（取り込み設定は残ります）。元に戻せません。",
+        label="この取り込みを削除", small=False, next=url_for('tables.new')) }}
+  </div>
 </div>
 
 <div data-layout-page data-detect-url="{{ url_for('tables.layout_detect', import_id=imp.id) }}">
@@ -22,7 +27,7 @@
       <label>データの終わりの行（空欄＝自動）
         <input type="text" name="data_end_row" class="input" value="{{ data_end_saved }}" placeholder="自動（{{ layout.data_end }}行目）" data-end-input>
       </label>
-      <div class="field">
+      <div class="field" role="radiogroup" aria-label="行番号をクリックしたときの動作">
         <span>行番号をクリックしたとき</span>
         <label class="check"><input type="radio" name="pick" value="header" checked> 見出し行にする（Shift で2段）</label>
         <label class="check"><input type="radio" name="pick" value="end"> データの終わりにする</label>
@@ -30,8 +35,8 @@
     </div>
     <dl class="tbl-summary">
       <div><dt>表の形</dt><dd data-kind>{{ info.table_kind_label }}</dd></div>
-      <div><dt>データの範囲</dt><dd data-range>{{ layout.data_start }}〜{{ layout.data_end }}行目</dd></div>
-      <div><dt>行の内訳</dt><dd data-counts style="font-size:.9rem">{% for k, v in info.counts.items() %}{{ k }} {{ v }}{% if not loop.last %}／{% endif %}{% endfor %}</dd></div>
+      <div><dt>データの範囲</dt><dd data-range>{% if layout.data_end < layout.data_start %}データの行が見つかりません{% else %}{{ layout.data_start }}〜{{ layout.data_end }}行目{% endif %}</dd></div>
+      <div><dt>行の内訳</dt><dd data-counts style="font-size:.9rem">{% for k, v in info.counts.items() %}{{ k }} {{ v }}行{% if not loop.last %}／{% endif %}{% endfor %}</dd></div>
     </dl>
     <div data-crosstab class="flash flash-error" role="alert" {% if layout.table_kind != 'crosstab' %}hidden{% endif %}>月別集計のようなクロス集計の表には対応していません。1行＝1件の一覧表を選んでください。</div>
     <ul class="list-plain warn" data-warnings>{% for w in layout.warnings %}<li>{{ w }}</li>{% endfor %}</ul>

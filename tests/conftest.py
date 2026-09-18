@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from flask.testing import FlaskClient
 
 from app import create_app
 from excel.workbook import load_workbook_info
@@ -42,6 +43,19 @@ def app(tmp_path):
     return create_app(make_config(tmp_path))
 
 
+class BufferedClient(FlaskClient):
+    """本文を最後まで読んで応答を閉じるテスト用クライアント（本番のサーバと同じ扱い）。
+
+    ダウンロードしたデータを消すのは「本文を送り終えて応答を閉じたとき」なので（core.purge.purge_after_send）、
+    応答を閉じないテストクライアントでは消える処理が動かない。buffered=True で毎回閉じる。
+    """
+
+    def open(self, *args, **kwargs):
+        kwargs.setdefault("buffered", True)
+        return super().open(*args, **kwargs)
+
+
 @pytest.fixture
 def client(app):
+    app.test_client_class = BufferedClient
     return app.test_client()

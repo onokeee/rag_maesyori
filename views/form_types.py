@@ -219,7 +219,8 @@ def delete_sample(pattern_id: int, sample_id: int):
     except UploadError:
         pass
     db.delete_sample(sample_id)
-    flash(f"見本ファイル {sample['file_name']} を削除しました", "info")
+    # ファイル名は出さない（flash はブラウザのセッションクッキーに載る。design.md 3.3）
+    flash("見本ファイルを削除しました", "info")
     return redirect(safe_next(url_for(".edit", pattern_id=pattern_id)))
 
 

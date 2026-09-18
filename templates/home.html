@@ -61,8 +61,14 @@
 </section>
 {% endif %}
 
+<div class="notice" role="note">
+  取り込んだデータはこのPCに残しません。Markdown をダウンロードすると、元のファイル・読み取った内容・作ったファイルは消えます
+  （もう一度ダウンロードすることはできません）。残るのは <a href="{{ url_for('form_types.index') }}">帳票の種類</a>・<a href="{{ url_for('settings.table_templates') }}">一覧表の取り込み設定</a>・<a href="{{ url_for('settings.ai') }}">AI接続</a>の設定だけです。
+  この画面には、まだダウンロードしていないものだけが出ます。
+</div>
+
 <div class="grid-2">
-  {% call ui.card("作業中の帳票", subtitle="確認中・修正中のもの") %}
+  {% call ui.card("作業中の帳票", subtitle="読み取り前・確認中のもの") %}
     {% if forms_working %}
     <ul class="list-plain list-rows">
       {% for d in forms_working %}
@@ -71,7 +77,9 @@
           <span class="item-title">{{ d.title or d.file_name }}</span>
           <span class="item-sub">{{ d.pattern_name or "種類未選択" }} ・ {{ d.created_at | replace("T", " ") }}</span>
         </div>
-        <div class="cluster">{{ ui.badge(d.state) }}<a class="btn small" href="{{ d.href }}">続きを開く</a></div>
+        <div class="cluster">{{ ui.badge(d.state) }}<a class="btn small" href="{{ d.href }}">続きを開く</a>
+          {{ ui.confirm_delete_form(url_for('forms.delete', doc_id=d.id),
+               "元のファイルと読み取り結果を削除します。元に戻せません。", label="削除", next=url_for('home.index')) }}</div>
       </li>
       {% endfor %}
     </ul>
@@ -80,7 +88,7 @@
     {% endif %}
   {% endcall %}
 
-  {% call ui.card("作業中の一覧表", subtitle="読み込み中・確認中のもの") %}
+  {% call ui.card("作業中の一覧表", subtitle="読み込み前・読み込み中・確認中のもの") %}
     {% if tables_working %}
     <ul class="list-plain list-rows">
       {% for t in tables_working %}
@@ -89,7 +97,12 @@
           <span class="item-title">{{ t.file_name }}</span>
           <span class="item-sub">{{ t.template_name or "取り込み設定未選択" }} ・ {{ (t.updated_at or t.created_at or "") | replace("T", " ") }}</span>
         </div>
-        <div class="cluster">{{ ui.badge(t.status) }}<a class="btn small" href="{{ t.href }}">続きを開く</a></div>
+        <div class="cluster">{{ ui.badge(t.status) }}<a class="btn small" href="{{ t.href }}">続きを開く</a>
+          {% if t.status not in ("reading", "confirming") %}
+            {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=t.id),
+                 "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。",
+                 label="削除", next=url_for('home.index')) }}
+          {% endif %}</div>
       </li>
       {% endfor %}
     </ul>
@@ -98,41 +111,76 @@
     {% endif %}
   {% endcall %}
 
-  {% call ui.card("最近の確定（帳票）") %}
-    {% if forms_recent %}
+  {% call ui.card("ダウンロード待ちの帳票", subtitle="確定済み。ダウンロードすると消えます") %}
+    {% if forms_ready %}
     <ul class="list-plain list-rows">
-      {% for d in forms_recent %}
+      {% for item in forms_ready %}
+      {% set d = item.doc %}
+      {% set b = item.batch %}
+      {% if d %}
       <li>
         <div class="item-main">
           <a class="item-title" href="{{ d.href }}">{{ d.title or d.file_name }}</a>
           <span class="item-sub">{{ d.pattern_name or "" }} ・ {{ (d.confirmed_at or "") | replace("T", " ") }}</span>
         </div>
-        {{ ui.badge(d.state) }}
+        <div class="cluster">{{ ui.badge(d.state, label="修正中（確定済みの版あり）" if d.state == "modified" else None) }}
+          <a class="btn small" href="{{ url_for('forms.download_md', doc_id=d.id) }}"
+             data-confirm="ダウンロードすると、この帳票のデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
+             data-confirm-ok="ダウンロードして消す">.mdをダウンロード</a></div>
       </li>
+      {% else %}
+      <li class="batch-item">
+        <div class="item-main">
+          <span class="item-title">まとめ取り込み（{{ b.total }}ファイル）</span>
+          <span class="item-sub">確定済み {{ b.confirmed }}/{{ b.total }}件{% if not b.all_confirmed %} ・ 未確定が{{ b.total - b.confirmed }}件あります{% endif %}</span>
+          <ul class="list-plain">
+            {% for m in b.docs %}
+            <li class="cluster">
+              <a href="{{ m.href }}">{{ m.title or m.file_name }}</a>
+              <a class="btn small ghost" href="{{ url_for('forms.download_md', doc_id=m.id) }}"
+                 data-confirm="この帳票だけをダウンロードすると、この帳票だけがまとまりから消えます（zip は残りの帳票だけになります）。もう一度ダウンロードすることはできません。"
+                 data-confirm-ok="この帳票だけダウンロードして消す">.mdだけ</a>
+            </li>
+            {% endfor %}
+          </ul>
+        </div>
+        <div class="cluster">
+          {% if b.all_confirmed %}
+          <a class="btn small" href="{{ url_for('forms.download_batch', batch_id=b.id) }}"
+             data-confirm="ダウンロードすると、このまとまりの帳票のデータはこのPCからすべて消えます。もう一度ダウンロードすることはできません。"
+             data-confirm-ok="ダウンロードして消す">zipをダウンロード（{{ b.total }}件）</a>
+          {% else %}
+          <a class="btn small" href="{{ url_for('forms.download_batch', batch_id=b.id, confirmed_only=1) }}"
+             data-confirm="確定済みの{{ b.confirmed }}件だけを zip でダウンロードします。その{{ b.confirmed }}件のデータはこのPCから消えます（未確定の{{ b.total - b.confirmed }}件は残ります）。"
+             data-confirm-ok="ダウンロードして消す">確定済み{{ b.confirmed }}件だけzip</a>
+          {% endif %}
+        </div>
+      </li>
+      {% endif %}
       {% endfor %}
     </ul>
-    <p class="small"><a href="{{ url_for('history.index', tab='forms', state='confirmed') }}">取り込み履歴ですべて見る</a></p>
     {% else %}
-      {{ ui.empty_state("確定した帳票はまだありません") }}
+      {{ ui.empty_state("ダウンロード待ちの帳票はありません") }}
     {% endif %}
   {% endcall %}
 
-  {% call ui.card("最近の一覧表出力") %}
-    {% if tables_recent %}
+  {% call ui.card("ダウンロード待ちの一覧表", subtitle="確定済み。ダウンロードすると消えます") %}
+    {% if tables_ready %}
     <ul class="list-plain list-rows">
-      {% for t in tables_recent %}
+      {% for t in tables_ready %}
       <li>
         <div class="item-main">
           <a class="item-title" href="{{ t.href }}">{{ t.template_name or t.file_name }}</a>
           <span class="item-sub">{{ t.file_name }} ・ {{ (t.confirmed_at or "") | replace("T", " ") }}</span>
         </div>
-        <a class="btn small" href="{{ url_for('tables.download_zip', import_id=t.id) }}">zipをダウンロード</a>
+        <a class="btn small" href="{{ url_for('tables.download_zip', import_id=t.id) }}"
+           data-confirm="ダウンロードすると、この取り込みのデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
+           data-confirm-ok="ダウンロードして消す">zipをダウンロード</a>
       </li>
       {% endfor %}
     </ul>
-    <p class="small"><a href="{{ url_for('history.index', tab='tables') }}">取り込み履歴ですべて見る</a></p>
     {% else %}
-      {{ ui.empty_state("一覧表の出力はまだありません") }}
+      {{ ui.empty_state("ダウンロード待ちの一覧表はありません") }}
     {% endif %}
   {% endcall %}
 </div>

@@ -297,6 +297,8 @@ input[type=checkbox], input[type=radio] { width: 1rem; height: 1rem; accent-colo
 .fields td.source, .test-table .cell-ref { color: var(--muted); font-size: .8rem; white-space: nowrap; }
 .field-table td { min-width: 150px; }
 .field-table td:first-child, .field-table td:nth-child(5) { min-width: 0; width: 48px; }
+.table-editor td { padding: 2px; vertical-align: top; }
+.table-editor .cell-input { width: 100%; min-width: 6em; font: inherit; resize: vertical; border: 1px solid var(--border, #ccc); border-radius: 4px; padding: 2px 4px; }
 .field-table .examples { font-size: .8rem; color: var(--muted); max-width: 220px; }
 .example { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .test-table td { min-width: 180px; }

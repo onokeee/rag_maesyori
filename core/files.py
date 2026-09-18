@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,12 @@ ZIP_MAX_RATIO = 100
 ZIP_RATIO_MIN_BYTES = 16 * 1024 * 1024
 # workbook.xml の名前空間判定で読む先頭バイト数
 _WORKBOOK_HEAD_BYTES = 64 * 1024
+# 掴まれているファイルを消すときの再試行（ウイルス対策のスキャンなどは短時間で終わる）
+REMOVE_RETRIES = 3
+REMOVE_RETRY_WAIT = 0.05
+# アップロードの保存先（UPLOAD_DIR 直下）と save_upload が付けるファイル名の形
+UPLOAD_SUBDIRS = ("documents", "samples", "tables")
+_STORED_NAME = re.compile(r"[0-9a-f]{32}\.[A-Za-z0-9]+")
 
 
 class UploadError(Exception):
@@ -143,10 +151,73 @@ def _check_zip_limits(infos: list[zipfile.ZipInfo]) -> None:
         raise UploadError(f"ブックの中身が大きすぎます（展開後の合計 {_format_size(total)}、上限 {_format_size(ZIP_MAX_TOTAL)}）")
 
 
-def remove_upload(stored_path: str | None) -> None:
+def remove_upload(stored_path: str | None) -> bool:
+    """アップロードしたファイルを消す。消せたら True。
+
+    Windows では他のプロセス（ウイルス対策のスキャン、Excel で開いたまま、同期ソフト）や、解析に失敗した
+    ブックを掴んだままの openpyxl のせいで消せないことがある。「ダウンロードしたら消えます」（design.md 3.3）と
+    言い切っている以上、消せないときも中身だけは 0 バイトに切り詰めて、元のデータが残らないようにする。
+    例外は投げない（ここで落とすと、日本語のエラー案内の代わりに 500 になる）。
+    残った空ファイルは次の起動時に remove_orphan_uploads が片付ける。
+    """
     if not stored_path:
-        return
+        return True
     try:
-        upload_path(stored_path).unlink(missing_ok=True)
+        path = upload_path(stored_path)
     except UploadError:
+        return False
+    for attempt in range(REMOVE_RETRIES):
+        try:
+            path.unlink(missing_ok=True)
+            return True
+        except OSError:
+            time.sleep(REMOVE_RETRY_WAIT * (attempt + 1))
+    try:
+        with open(path, "r+b") as f:
+            f.truncate(0)
+    except OSError:
         pass
+    return False
+
+
+def remove_orphan_import_dirs(tables_dir, known_ids) -> int:
+    """DB に無い取り込みの imports/<id>/ フォルダを消す。消した件数を返す。
+
+    取り込みを消し損ねたとき（削除の途中で落ちた・Windows でファイルを掴まれていた）に、読み込んだ行や
+    作った Markdown が残り続けないように起動時に片付ける。作業中の取り込みは DB に行があるので消さない。
+    """
+    root = Path(tables_dir) / "imports"
+    if not root.is_dir():
+        return 0
+    known = {int(i) for i in known_ids}
+    removed = 0
+    for path in sorted(root.iterdir()):
+        if not path.is_dir() or not path.name.isdigit() or int(path.name) in known:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            removed += 1
+    return removed
+
+
+def remove_orphan_uploads(base, known_paths) -> int:
+    """DB のどこからも参照されていないアップロード済みファイルを消す。消した件数を返す。
+
+    取り込みの途中で失敗し、消し損ねたファイルが残ることがある（画面からは消せない）ので起動時に片付ける。
+    save_upload が作った名前（uuid + 拡張子）のファイルだけを対象にする。
+    """
+    base = Path(base)
+    known = {str(p).replace("\\", "/").strip("/") for p in known_paths if p}
+    removed = 0
+    for subdir in UPLOAD_SUBDIRS:
+        for path in sorted((base / subdir).glob("*")):
+            if not path.is_file() or not _STORED_NAME.fullmatch(path.name):
+                continue
+            if f"{subdir}/{path.name}" in known:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+    return removed

@@ -18,6 +18,16 @@
     });
   }
 
+  // ---- 帳票の種類の編集: 型が「明細表」のときだけ列見出しの欄を出す ----
+  document.addEventListener("change", (event) => {
+    const select = event.target.closest && event.target.closest("[data-type-select]");
+    if (!select) return;
+    const row = select.closest("tr");
+    if (!row) return;
+    const hide = select.value !== "table";
+    row.querySelectorAll("[data-table-columns], [data-table-columns-label]").forEach((el) => { el.hidden = hide; });
+  });
+
   // ---- 帳票の種類の編集: シート行・項目行の追加 ----
   document.querySelectorAll("[data-add-row]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -47,8 +57,15 @@
     auto: ["自動で読み取り", "blue"], ai: ["AIが入力（要確認）", "violet"],
     manual: ["手で修正", "teal"], blank: ["空欄", "gray"],
   };
+  // 文書の状態タグ（components/_ui.html の STATE_LABELS と同じ語・色）
+  const STATES = {
+    unread: ["読み取り前", "gray"], reviewing: ["確認中", "amber"],
+    modified: ["修正中", "violet"], confirmed: ["確定済み", "green"],
+  };
   const fieldBoxes = Array.from(form.querySelectorAll("[data-field]"));
-  const inputOf = (box) => box.querySelector("input.input, textarea.input");
+  // 明細表の項目は、最後に選んだセルの入力欄を「入力欄」とする（セルのクリックで値を入れる先）
+  const inputOf = (box) => box._activeCell || box.querySelector("input.input, textarea.input, textarea.cell-input");
+  const valueOf = (box) => box.querySelector("[name^='value-']");
   let activeBox = null;
 
   // シートのタブ
@@ -88,9 +105,61 @@
     if (target) target.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
   fieldBoxes.forEach((box) => {
-    const input = inputOf(box);
-    if (!input) return;
-    input.addEventListener("focus", () => { activeBox = box; highlight(box); });
+    const input = box.querySelector("input.input, textarea.input");
+    if (input) input.addEventListener("focus", () => { activeBox = box; highlight(box); });
+    box.addEventListener("focusin", (event) => {
+      if (!event.target.classList.contains("cell-input")) return;
+      box._activeCell = event.target;
+      activeBox = box;
+      highlight(box);
+    });
+  });
+
+  // 明細表: セルの編集・行の追加と削除 → hidden の JSON に戻す（入力イベントで途中保存される）
+  function syncTable(box) {
+    const hidden = box.querySelector("[data-table-value]");
+    const table = box.querySelector("[data-table-editor]");
+    if (!hidden || !table) return;
+    const columns = Array.from(table.querySelectorAll("thead th[scope=col]")).map((th) => th.textContent.trim());
+    const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) =>
+      Array.from(tr.querySelectorAll(".cell-input")).map((el) => el.value));
+    hidden.value = JSON.stringify({ columns, rows });
+    hidden.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  fieldBoxes.forEach((box) => {
+    const table = box.querySelector("[data-table-editor]");
+    if (!table) return;
+    table.addEventListener("input", () => syncTable(box));
+    box.addEventListener("click", (event) => {
+      const remove = event.target.closest("[data-remove-table-row]");
+      if (remove) {
+        const tr = remove.closest("tr");
+        if (box._activeCell && tr.contains(box._activeCell)) box._activeCell = null;
+        tr.remove();
+        syncTable(box);
+        return;
+      }
+      if (event.target.closest("[data-add-table-row]")) {
+        const body = table.querySelector("tbody");
+        const n = table.querySelectorAll("thead th[scope=col]").length;
+        const tr = document.createElement("tr");
+        for (let i = 0; i < n; i += 1) {
+          const td = document.createElement("td");
+          const ta = document.createElement("textarea");
+          ta.className = "cell-input";
+          ta.rows = 1;
+          td.appendChild(ta);
+          tr.appendChild(td);
+        }
+        const td = document.createElement("td");
+        td.className = "center";
+        td.innerHTML = '<button type="button" class="btn small ghost" data-remove-table-row>行を削除</button>';
+        tr.appendChild(td);
+        body.appendChild(tr);
+        const first = tr.querySelector(".cell-input");
+        if (first) first.focus();
+      }
+    });
   });
 
   // セルをクリック → 選んでいる項目にその値を入れる
@@ -118,7 +187,7 @@
   function values() {
     const out = {};
     fieldBoxes.forEach((box) => {
-      const input = inputOf(box);
+      const input = valueOf(box);
       if (input) out[box.dataset.field] = input.value;
     });
     return out;
@@ -154,6 +223,12 @@
       missingBox.hidden = !list.length;
       const span = missingBox.querySelector("[data-missing-list]");
       if (span) span.textContent = list.join("、");
+    }
+    // 確定済みの帳票を直すと状態が「修正中」に変わるので、見出しの状態タグも書き替える
+    const stateBadge = document.querySelector("[data-doc-state] .badge");
+    if (stateBadge && s.state && STATES[s.state]) {
+      stateBadge.textContent = STATES[s.state][0];
+      stateBadge.className = "badge badge-" + STATES[s.state][1] + " badge-" + s.state;
     }
     const pre = form.querySelector("[data-md-preview]");
     if (pre && typeof s.markdown === "string") pre.textContent = s.markdown;

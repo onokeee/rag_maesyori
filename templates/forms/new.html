@@ -7,6 +7,7 @@
   <div>
     <h1>ファイルを選ぶ</h1>
     <p class="page-lead">1ファイル＝1件の報告書・記録票（例：設備修理報告書）を取り込みます。一覧・台帳のように1行＝1件の表は<a href="{{ url_for('tables.new') }}">一覧表を取り込む</a>から。</p>
+    <p class="page-lead">複数のファイルをまとめて選べます。1件ずつ確認したあと、最後に Markdown を zip でまとめてダウンロードします。</p>
   </div>
 </div>
 
@@ -23,10 +24,12 @@
 
 {% call ui.card() %}
 <form method="post" action="{{ url_for('forms.upload') }}" enctype="multipart/form-data" class="stack">
-  {{ ui.file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ", hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）") }}
+  {{ ui.file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
+                  hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて選ぶと1件ずつ確認します", multiple=True) }}
   <div class="form-actions">
     <button type="submit" class="btn primary">ファイルを選んで次へ</button>
   </div>
+  <p class="hint">取り込んだデータはこのPCに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
 </form>
 {% endcall %}
 {% endblock %}

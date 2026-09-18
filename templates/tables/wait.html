@@ -14,6 +14,18 @@
   {{ ui.progress(job, url=job_url) }}
   </div>
   <p class="hint">大きなファイル（数万行）は数十秒かかることがあります。</p>
+  {% if cancel_note %}
+  <div class="form-actions">
+    {% if job.cancel_requested %}
+    <p class="hint">中止しています。少しお待ちください。</p>
+    {% else %}
+    <form method="post" action="{{ url_for('tables.cancel_job', import_id=imp.id) }}" class="inline"
+          data-confirm="{{ cancel_note }}" data-confirm-ok="中止する">
+      <button type="submit" class="btn danger-outline">中止</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
 {% endcall %}
 {% endblock %}
 {% block scripts %}

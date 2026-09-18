@@ -9,9 +9,11 @@
     <p class="page-lead">ファイル: {{ doc.file_name }} {{ ui.badge(doc.state) }}</p>
   </div>
   <div class="btn-row">
-    <a class="btn ghost" href="{{ url_for('history.index') }}">取り込み履歴に戻る</a>
+    <a class="btn ghost" href="{{ url_for('home.index') }}">ホームに戻る</a>
   </div>
 </div>
+
+{% include "forms/_batch_bar.html" %}
 
 {% if duplicate %}
 <div class="notice" role="note">同じ内容のファイルがすでに確定済みです:
@@ -69,7 +71,7 @@
       <label class="check">
         <input type="checkbox" name="sheets" value="{{ s.name }}" {{ 'checked' if s.name in selected_sheets }}>
         <span>{{ s.name }}{% if s.hidden %} <small class="muted">（非表示のシート）</small>{% endif %}</span>
-        <small>値のあるセル {{ s.cells }}{% if s.images %} / 画像 {{ s.images }}件{% endif %}{% if s.name in table_sheets %} / 一覧表らしい{% endif %}</small>
+        <small>値のあるセル {{ s.cells }}個{% if s.images %} / 画像 {{ s.images }}件{% endif %}{% if s.name in table_sheets %} / 一覧表らしい{% endif %}</small>
       </label>
       {% endfor %}
     </div>

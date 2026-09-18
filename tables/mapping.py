@@ -21,6 +21,10 @@ _LOG_LINE_RE = re.compile(
 _MERGED = object()  # 結合範囲の左上以外のセル（空欄ではない扱い）
 _NUMBER_TYPES = {"number"}
 _DATE_TYPES = {"date", "datetime"}
+# 意味の分からないコード列（「状態コード: 9」のような行）を既定で出さないための判定
+_CODE_HEADER_WORDS = ("コード", "区分", "フラグ", "code", "flag", "kbn")
+_SHORT_CODE_RE = re.compile(r"^[0-9A-Za-z]{1,4}$")
+_OPAQUE_CODE_MAX_DISTINCT = 20
 
 
 @dataclass
@@ -90,6 +94,8 @@ def suggest_columns(headers: list[str], sample_rows, template_spec=None) -> list
             s.log = True
         if s.blank_rate >= 1.0 and s.matched_by != "template":
             s.md = "omit"
+        if _is_opaque_code(header, s, stats):
+            s.md = "omit"
         if s.matched_by != "template" and s.role in ("entity", "entity_label") and _looks_filled_down(values):
             s.fill_down_blank = True
         out.append(s)
@@ -128,6 +134,20 @@ def match_templates(headers: list[str], sheet_or_file_name: str, specs: list) ->
 
 
 # ---- 内部 ----
+
+def _is_opaque_code(header: str, s: ColumnSuggestion, stats: dict) -> bool:
+    """「状態コード: 9」のような、置き換え表なしでは意味の分からないコード列か（既定で md=omit にする）。
+
+    見出しが「コード・区分・フラグ」を含み、値が英数字1〜4文字・種類が少ないものだけ。取り込み設定から来た列は変えない。
+    LightRAG オフライン評価 6.5: T2 では `- 状態コード: 9` などの定型行が記録トークンの 23% を占めていた。
+    """
+    if s.matched_by == "template" or s.md == "omit" or not stats["short_codes"]:
+        return False
+    if s.role in ("key", "date", "entity", "entity_label", "measure", "log", "person"):
+        return False
+    norm = norm_header(header)
+    return any(word in norm for word in _CODE_HEADER_WORDS)
+
 
 def _display_name(header: str) -> str:
     """表示名の候補。2段見出しは下段、単位は除く（「交換部品_単価(円)」→「単価」）。"""
@@ -227,11 +247,14 @@ def _column_stats(values: list[tuple[object, str]]) -> dict:
         if len(examples) >= 3:
             break
     log_hits = sum(1 for _v, t in nonblank if len(_LOG_LINE_RE.findall(t)) >= 2)
+    texts = [unicodedata.normalize("NFKC", t).strip() for _v, t in nonblank]
     return {
         "type": _infer_type(kinds, nonblank),
         "blank_rate": round(1 - len(filled) / total, 3) if total else 1.0,
         "examples": examples,
         "log_like": bool(nonblank) and log_hits >= max(2, 0.3 * len(nonblank)),
+        "short_codes": bool(texts) and len(set(texts)) <= _OPAQUE_CODE_MAX_DISTINCT
+        and all(_SHORT_CODE_RE.match(t) for t in texts),
     }
 
 

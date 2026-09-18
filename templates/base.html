@@ -25,7 +25,6 @@
       <a href="{{ url_for('home.index') }}" {% if path == '/' %}class="active" aria-current="page"{% endif %}>ホーム</a>
       <a href="{{ url_for('forms.new') }}" {% if path.startswith('/forms') %}class="active" aria-current="page"{% endif %}>帳票を取り込む</a>
       <a href="{{ url_for('tables.new') }}" {% if path.startswith('/tables') %}class="active" aria-current="page"{% endif %}>一覧表を取り込む</a>
-      <a href="{{ url_for('history.index') }}" {% if path.startswith('/history') %}class="active" aria-current="page"{% endif %}>取り込み履歴</a>
       <details class="nav-dropdown" data-dropdown>
         <summary {% if path.startswith('/settings') %}class="active"{% endif %}>設定<svg class="caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></summary>
         <div class="dropdown-menu">

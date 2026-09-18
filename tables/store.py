@@ -175,6 +175,9 @@ def update_import(import_id: int, conn=None, commit: bool = True, **columns) -> 
         db.commit()
 
 
+# 取り込み1件を消すのは core/purge.py の purge_table_import（ファイルと DB の行をまとめて消す。design.md 3.3）
+
+
 def list_imports(template_id: int | None = None, status: str | list | None = None, limit: int = 100, conn=None) -> list[dict]:
     where, args = [], []
     if template_id is not None:

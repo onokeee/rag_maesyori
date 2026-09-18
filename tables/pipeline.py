@@ -4,7 +4,8 @@
 - run_render: その取り込みの記録（＋照合に通った AI 整形の結果）から全 md を作り、取り込みのフォルダに保存
 - build_download: md と管理用CSV をまとめた zip
 期間の置き換え・投入済みとの差分・取り消しはしない（取り込みごとに、その取り込みの内容だけで md を作る）。
-置き場所: TABLES_DIR/imports/<import_id>/（rows.jsonl.gz, issues.*, md/, preview_md/）
+置き場所: TABLES_DIR/imports/<import_id>/（rows.jsonl.gz, issues.*, md/, preview_md/, source_cache.json）
+画面とジョブは import_source() の控え（tables.source_cache）を通して表を読み、同じ計算を繰り返さない。
 """
 from __future__ import annotations
 
@@ -22,10 +23,10 @@ from core.files import UploadError, upload_path
 from models import database
 from tables import outputs, store
 from tables.checks import count_levels, run_checks
-from tables.detect import guess_layout
 from tables.markdown import MdFile, render_all
 from tables.normalize import read_records
-from tables.source import open_source
+from tables.source import EXCEL_EXTENSIONS, open_source
+from tables.source_cache import ImportSource
 
 ROWS_FILE = "rows.jsonl.gz"
 ISSUES_CSV = "issues.csv"
@@ -34,8 +35,8 @@ MD_DIR = "md"
 PREVIEW_DIR = "preview_md"
 
 
-class PipelineError(Exception):
-    """利用者に見せる日本語メッセージの処理エラー。"""
+class PipelineError(jobs.JobError):
+    """利用者に見せる日本語メッセージの処理エラー（そのまま画面に出る）。"""
 
 
 # ---- ファイル -----------------------------------------------------------------------------
@@ -50,6 +51,10 @@ def import_files(import_id: int) -> dict[str, Path]:
             "md": base / MD_DIR, "preview": base / PREVIEW_DIR}
 
 
+# 取り込み1件を消すのは core/purge.py の purge_table_import（アップロードしたファイル・このフォルダ・
+# DB の行・AI整形の控えをまとめて消す。design.md 3.3）
+
+
 def write_atomic(path: Path, data: bytes) -> None:
     """一時ファイルに書いてから置き換える（途中で止まっても前のファイルが残る）。"""
     path = Path(path)
@@ -61,13 +66,18 @@ def write_atomic(path: Path, data: bytes) -> None:
 
 
 def write_rows(path: Path, records) -> None:
-    """記録を gzip の JSON Lines で保存（mtime=0・キー順固定で決定的）。"""
-    raw = io.BytesIO()
-    with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+    """記録を gzip の JSON Lines で保存（mtime=0・キー順固定で決定的）。一時ファイルに直接書いてから置き換える。"""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    with open(tmp, "wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=6) as gz:
+        buf = io.BufferedWriter(gz, 1024 * 1024)
         for rec in records:
             d = rec.to_dict() if hasattr(rec, "to_dict") else dict(rec)
-            gz.write(json.dumps(d, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
-    write_atomic(path, raw.getvalue())
+            buf.write(json.dumps(d, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n")
+        buf.flush()
+        buf.detach()
+    os.replace(tmp, path)
 
 
 def load_rows(import_id: int, offset: int = 0, limit: int | None = None) -> list[dict]:
@@ -77,6 +87,23 @@ def load_rows(import_id: int, offset: int = 0, limit: int | None = None) -> list
     with gzip.open(path, "rt", encoding="utf-8") as f:
         rows = [json.loads(line) for line in f if line.strip()]
     return rows[offset: offset + limit] if limit is not None else rows[offset:]
+
+
+def load_rows_page(import_id: int, offset: int, limit: int) -> tuple[list[dict], int]:
+    """offset から limit 件の記録と全件数。範囲外の行は JSON を読まずに数えるだけ。"""
+    path = import_files(import_id)["rows"]
+    if not path.exists():
+        return [], 0
+    rows: list[dict] = []
+    total = 0
+    with gzip.open(path, "rb") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            if offset <= total < offset + limit:
+                rows.append(json.loads(line))
+            total += 1
+    return rows, total
 
 
 def load_issues(import_id: int) -> list[dict]:
@@ -118,24 +145,41 @@ def spec_for_import(imp: dict):
     return version["spec"] if version else None
 
 
-def open_import_source(imp: dict):
+def _source_options(imp: dict) -> dict:
     src = imp.get("source") or {}
     options = {key: src[key] for key in ("encoding", "delimiter", "errors") if src.get(key)}
     options["max_cells"] = current_app.config.get("EXCEL_MAX_CELLS", 500000)
+    return options
+
+
+def open_import_source(imp: dict, sheet_stats: dict | None = None):
+    options = _source_options(imp)
+    if sheet_stats:
+        options["sheet_stats"] = sheet_stats
     return open_source(upload_path(imp["stored_path"]), imp["file_name"], options)
 
 
+def import_source(imp: dict, real=None) -> ImportSource:
+    """控え付きの表ソース（元のファイルは必要になったときだけ開く）。ファイルや読み込み設定が変われば控えは作り直す。"""
+    key = json.dumps([imp.get("file_hash") or "", imp["stored_path"], imp["file_name"], _source_options(imp)],
+                     ensure_ascii=False, sort_keys=True)
+    kind = "excel" if Path(imp["file_name"]).suffix.lower() in EXCEL_EXTENSIONS else "csv"
+    return ImportSource(import_dir(imp["id"]), key, kind, imp["file_name"],
+                        lambda stats: open_import_source(imp, stats), real=real)
+
+
 def layout_for_import(source, imp: dict, spec):
-    """保存した範囲（見出し行・データ終了行）で表の形を決め直す。未指定なら自動判定。"""
+    """保存した範囲（見出し行・データ終了行）で表の形を決め直す。未指定なら自動判定。同じ条件の結果は控えから。"""
+    cached = source if isinstance(source, ImportSource) else import_source(imp, real=source)
     src = imp.get("source") or {}
     sheet = src.get("sheet")
     if not sheet:
-        sheets = [s for s in source.sheets() if not s.hidden] or source.sheets()
+        sheets = [s for s in cached.sheets() if not s.hidden] or cached.sheets()
         sheet = sheets[0].name
     header_rows = [int(r) for r in (src.get("header_rows") or []) if r] or None
     anchors = list((spec.header or {}).get("anchors") or []) if spec is not None else None
-    return guess_layout(source, sheet, anchors=anchors or None, header_row=src.get("header_row") or None,
-                        data_end=src.get("data_end_row") or None, header_rows=header_rows)
+    return cached.layout(sheet, anchors=anchors or None, header_row=src.get("header_row") or None,
+                         data_end=src.get("data_end_row") or None, header_rows=header_rows)
 
 
 # ---- 読み込み（ジョブ） ----------------------------------------------------------------------------
@@ -150,8 +194,9 @@ def run_read(ctx, import_id: int) -> dict:
     spec = version["spec"]
     try:
         ctx.progress(phase="読み込み", done=0, total=0)
-        source = open_import_source(imp)
-        layout = layout_for_import(source, imp, spec)
+        cached = import_source(imp)
+        source = cached.real
+        layout = layout_for_import(cached, imp, spec)
         ctx.check_cancel()
 
         def on_progress(done, total):
@@ -182,7 +227,10 @@ def run_read(ctx, import_id: int) -> dict:
         store.update_import(import_id, status="uploaded")
         raise
     except Exception as exc:
-        message = str(exc) if isinstance(exc, (PipelineError, UploadError)) else f"{exc.__class__.__name__}: {exc}"
+        # 例外の型と本文は core.jobs のログに残す。画面には Python の例外名を出さない
+        message = str(exc) if isinstance(exc, (PipelineError, UploadError)) else (
+            "表の読み込み中に予期しないエラーが起きました。もう一度読み込んでも直らない場合は、"
+            "表の範囲・見出し行や列の対応づけを見直してください")
         store.update_import(import_id, status="failed", stats={**(imp.get("stats") or {}), "error": message})
         raise
 
@@ -224,31 +272,112 @@ def render_files(import_id: int, imp: dict, spec, records: list[dict] | None = N
     return render_all(spec, records, usable_ai_results(import_id, imp, spec), {"coverage": {}})
 
 
-def preview_files(import_id: int, imp: dict, spec) -> list[dict]:
-    """プレビュー用に全 md を作る（行・設定・AI結果が変わらなければ前回の結果を使う）。"""
+def _preview_signature(import_id: int, imp: dict, spec) -> str:
+    """プレビューの md を作った入力（設定・行データ・AI の結果）の目印。"""
     from tables.spec import spec_hash
 
-    base = import_files(import_id)
-    rows_path = base["rows"]
+    rows_path = import_files(import_id)["rows"]
     row = database.get_db().execute(
         "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM ai_items WHERE template_id = ?",
         (imp.get("template_id") or 0,)).fetchone()
-    signature = json.dumps([spec_hash(spec), rows_path.stat().st_mtime_ns if rows_path.exists() else 0, list(row)])
+    return json.dumps([spec_hash(spec), rows_path.stat().st_mtime_ns if rows_path.exists() else 0, list(row)])
+
+
+def _preview_index(import_id: int, signature: str) -> dict | None:
+    index_path = import_files(import_id)["preview"] / "index.json"
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return index if isinstance(index, dict) and index.get("signature") == signature else None
+
+
+def _md_dir_from_preview(import_id: int, signature: str) -> int | None:
+    """同じ入力で作ったプレビューの md を md/ に置く（作り直さない）。置いたファイル数。そろっていなければ None。
+
+    作成は決定的なので、作り直しても同じバイト列になる。中身は読まずにハードリンク（できなければコピー）で置く
+    （Windows では書いたばかりの多数の小さなファイルを読み直すと遅いため）。ファイルは書き換えずに作り直すので共有してよい。
+    """
+    index = _preview_index(import_id, signature)
+    if index is None:
+        return None
+    files = import_files(import_id)
+    preview, target = files["preview"], files["md"]
+    names = [item["name"] for item in index["files"]]
+    try:
+        if any((preview / item["name"]).stat().st_size != item["size"] for item in index["files"]):
+            return None
+    except (OSError, KeyError, TypeError):
+        return None
+    tmp = target.with_name(target.name + ".new")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    try:
+        for name in names:
+            try:
+                os.link(preview / name, tmp / name)
+            except OSError:
+                shutil.copyfile(preview / name, tmp / name)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    shutil.rmtree(target, ignore_errors=True)
+    tmp.rename(target)
+    return len(names)
+
+
+def preview_signature(import_id: int, imp: dict, spec) -> str:
+    """プレビューの md を作った入力の目印（画面から、作り直しが要るかを見るために使う）。"""
+    return _preview_signature(import_id, imp, spec)
+
+
+def ready_preview_files(import_id: int, imp: dict, spec) -> list[dict] | None:
+    """すでに作ってあるプレビューの一覧。作っていなければ None（作るのはジョブ run_preview）。"""
+    index = _preview_index(import_id, _preview_signature(import_id, imp, spec))
+    return index["files"] if index is not None else None
+
+
+def preview_files(import_id: int, imp: dict, spec, ctx=None) -> list[dict]:
+    """プレビュー用に全 md を作る（行・設定・AI結果が変わらなければ前回の結果を使う）。"""
+    base = import_files(import_id)
+    signature = _preview_signature(import_id, imp, spec)
     index_path = base["preview"] / "index.json"
-    if index_path.exists():
-        try:
-            index = json.loads(index_path.read_text(encoding="utf-8"))
-            if index.get("signature") == signature:
-                return index["files"]
-        except (ValueError, OSError):
-            pass
+    index = _preview_index(import_id, signature)
+    if index is not None:
+        return index["files"]
+    if ctx is not None:
+        ctx.progress(phase="Markdownの作成", done=1, total=3)
     files = render_files(import_id, imp, spec)
+    if ctx is not None:
+        ctx.check_cancel()
+        ctx.progress(phase="保存", done=2, total=3)
     _write_md_dir(base["preview"], files)
     listing = [{"name": f.name, "kind": f.kind, "size": len(f.data),
                 "records": sum(1 for line in f.text.split("\n") if line.startswith("## ")) if f.kind == "records" else None}
                for f in files]
     index_path.write_text(json.dumps({"signature": signature, "files": listing}, ensure_ascii=False), encoding="utf-8")
     return listing
+
+
+def run_preview(ctx, import_id: int) -> dict:
+    """ジョブ: 「内容とファイルの確認」に出す md をまとめて作る（確定はしない）。
+
+    件数が多いと十数秒かかるので、画面（GET）の中では作らず、待ち画面で進み具合を出せるようにする。
+    """
+    imp = store.get_import(import_id)
+    spec = spec_for_import(imp)
+    if spec is None:
+        raise PipelineError("取り込み設定が見つかりません")
+    ctx.progress(phase="記録の読み込み", done=0, total=3)
+    ctx.check_cancel()
+    files = preview_files(import_id, imp, spec, ctx=ctx)
+    ctx.progress(phase="完了", done=3, total=3)
+    return {"files": len(files)}
+
+
+def start_preview_job(import_id: int, signature: str) -> int:
+    return jobs.start_job("table_preview", "table_import", import_id, lambda ctx: run_preview(ctx, import_id),
+                          {"import_id": import_id, "signature": signature})
 
 
 def run_render(ctx, import_id: int) -> dict:
@@ -262,16 +391,20 @@ def run_render(ctx, import_id: int) -> dict:
         records = load_rows(import_id)
         ctx.check_cancel()
         ctx.progress(phase="Markdownの作成", done=1, total=3)
-        files = render_files(import_id, imp, spec, records)
-        ctx.check_cancel()
-        ctx.progress(phase="保存", done=2, total=3)
-        _write_md_dir(import_files(import_id)["md"], files)
+        # 確認画面で同じ入力から作ったプレビューがあれば、それを置く
+        file_count = _md_dir_from_preview(import_id, _preview_signature(import_id, imp, spec))
+        if file_count is None:
+            files = render_files(import_id, imp, spec, records)
+            ctx.check_cancel()
+            ctx.progress(phase="保存", done=2, total=3)
+            _write_md_dir(import_files(import_id)["md"], files)
+            file_count = len(files)
         stats = imp.get("stats") or {}
-        stats["output"] = {"files": len(files), "records": len(records)}
+        stats["output"] = {"files": file_count, "records": len(records)}
         store.mark_version_used(imp["template_version_id"])
         store.update_import(import_id, status="confirmed", confirmed_at=database.now(), stats=stats)
         ctx.progress(phase="完了", done=3, total=3)
-        return {"files": len(files), "records": len(records)}
+        return {"files": file_count, "records": len(records)}
     except Exception:
         store.update_import(import_id, status="preview")
         raise

@@ -4,6 +4,8 @@ Markdown は LightRAG 調査の指針（docs/design.md 6章）に従う。
   - 1帳票だけで意味が通るように、種類・識別番号・設備・日付をタイトルと本文に書く
   - 定型文・種類の版・DBの文書ID・セル座標は出さない（JSON側に残す）
   - 値は NFKC＋空白の畳み込み、数値は単位付き。人名の項目と「出さない」項目は省く
+  - 値が別の欄の見出し語そのもの（読み取り誤り。「- 数量: 単価」）の項目は出さない（JSON には残す）
+  - 明細表は見出しの下に1行1明細で「- 品番: X／品名: Y／数量: 2」と書く（パイプ表は使わない）
   - 同じ入力からは同じバイト列になる（生成日時などを書かない）
 """
 from __future__ import annotations
@@ -13,8 +15,9 @@ import re
 import unicodedata
 from pathlib import Path
 
-from excel.text import nfkc_value
-from pattern.dictionary import is_person_field
+from excel.tables import is_table_value, table_row_items
+from excel.text import nfkc_value as _excel_nfkc_value, normalize_label as _normalize_label
+from pattern.dictionary import is_person_field, is_person_label
 from pattern.model import DEFAULT_MD_OPTIONS, DEFAULT_TITLE_KEYS
 
 try:  # WP-core の共通実装があればそれを使う
@@ -26,11 +29,17 @@ try:
 except ImportError:  # pragma: no cover - core 未導入時
     _core_naming = None
 
-# 長文項目の見出しに識別子を入れるのは、推定トークン数がこれを超える帳票だけ
-HEADING_IDENTIFIER_TOKENS = 1000
+# 長文項目の見出しに識別子を入れるのは、推定トークン数がこれを超える帳票だけ。
+# LightRAG が帳票を2つ以上の断片に切りうる大きさ（サーバー既定の固定窓 1,200トークン）に合わせる。
+# 推定式が実トークン以上になったので、1,200 未満の帳票＝1断片に収まる帳票には識別子を入れない。
+HEADING_IDENTIFIER_TOKENS = 1200
+# 値が見出し語かどうかを見るのは短い値だけ（長い本文にたまたま同じ語が入っていても消さない）
+MAX_LABEL_VALUE_CHARS = 20
 AI_MARK = "（AI入力）"
 
 _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+# 明細表の合計行の先頭（「合計」「小計」「部品費計」）
+_TOTAL_LABEL = re.compile(r"^(?:合計|小計|総計|計|.{1,6}計)$")
 
 
 # ---- JSON ---------------------------------------------------------------------
@@ -67,7 +76,13 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     title_fields = _title_fields(pattern, extraction["fields"], shown)
 
     title_texts = _title_texts(title_fields, heading=False)
-    title = f"{type_name} {'｜'.join(title_texts)}" if title_texts else f"{type_name} {_one_line(Path(doc['file_name']).stem)}"
+    stem = _one_line(Path(doc["file_name"]).stem)
+    if not title_texts:
+        title = f"{type_name} {stem}"
+    elif _has_identifier(title_fields):
+        title = f"{type_name} {'｜'.join(title_texts)}"
+    else:  # 識別番号も設備も入らないタイトルは、元ファイル名を足して帳票を特定できるようにする
+        title = f"{type_name} {'｜'.join([*title_texts, stem])}"
     identifier = "／".join(_title_texts(title_fields, heading=True))
 
     head = [f"# {_escape_line(title)}"]
@@ -79,7 +94,8 @@ def build_markdown(doc: dict, extraction: dict) -> str:
         tail.append(f"- 添付画像: {len(attachments)}枚")
     tail.append(f"- 出典: {_source_text(doc, title_fields)}")
 
-    long_fields = [f for f in filled if f["data_type"] == "text"]
+    long_fields = [f for f in filled if f["data_type"] in ("text", "table")]
+    omit_person = bool(_md_options(extraction).get("omit_person_fields", True))
 
     def render(with_identifier: bool) -> str:
         blocks = [head, basics]
@@ -87,6 +103,12 @@ def build_markdown(doc: dict, extraction: dict) -> str:
             heading = _one_line(f["display_name"])
             if with_identifier and identifier:
                 heading += f"（{identifier}）"
+            if f["data_type"] == "table":
+                lines = table_markdown_lines(f["value"], omit_person)
+                if f.get("ai_filled") and lines:
+                    lines[-1] += AI_MARK
+                blocks.append([f"## {_escape_line(heading)}", *lines])
+                continue
             lines = [line for line in _format_value(f).split("\n") if line.strip()]
             blocks.append([f"## {_escape_line(heading)}", *(_escape_line(line) for line in lines)])
         blocks.append(tail)
@@ -99,13 +121,21 @@ def build_markdown(doc: dict, extraction: dict) -> str:
 
 
 def markdown_filename(doc: dict, extraction: dict) -> str:
-    """{種類名}_{タイトル項目値...}.md。タイトル項目が空なら {種類名}_{file_hash先頭8}.md。"""
+    """{種類名}_{タイトル項目値...}.md。識別番号が入らないときは {file_hash先頭8} を足して一意にする。
+
+    LightRAG 1.5.x は文書IDがファイル名の MD5 なので、同名のファイルは2件目が HTTP 409 で入らない
+    （オフライン評価 3章: 見本 150 件中 3 件が同名だった）。
+    """
     pattern = extraction["pattern"]
     shown = _shown_fields(extraction)
-    values = [_plain_value(f) for f in _title_fields(pattern, extraction["fields"], shown)]
+    title_fields = _title_fields(pattern, extraction["fields"], shown)
+    values = [_plain_value(f) for f in title_fields]
     values = [v for v in values if _safe_filename_part(v)]
+    hash8 = str(doc.get("file_hash") or "")[:8]
     if not values:
-        values = [str(doc.get("file_hash") or "")[:8] or Path(doc["file_name"]).stem]
+        return _md_filename([pattern["name"], hash8 or Path(doc["file_name"]).stem])
+    if not any(f["field_name"] == "report_id" for f in title_fields) and hash8:
+        values.append(hash8)
     return _md_filename([pattern["name"], *values])
 
 
@@ -116,21 +146,41 @@ def _md_options(extraction: dict) -> dict:
 
 
 def _shown_fields(extraction: dict) -> list[dict]:
-    """Markdown に出す項目（「出さない」項目と、設定により人名の項目を除く）。"""
+    """Markdown に出す項目（「出さない」項目、設定により人名の項目、値が見出し語だけの項目を除く）。"""
     omit_person = bool(_md_options(extraction).get("omit_person_fields", True))
+    labels = set(extraction["pattern"].get("labels") or ())
     return [
         f for f in extraction["fields"]
         if f.get("rag_output", "show") != "omit"
         and not (omit_person and is_person_field(f["field_name"], f.get("display_name", "")))
+        and not _is_label_value(f, labels)
     ]
 
 
+def _is_label_value(f: dict, labels: set[str]) -> bool:
+    """値が別の欄（またはこの欄）の見出し語そのものか。読み取り誤りで「- 品名: 品番」になった行を出さないための判定。
+
+    LightRAG オフライン評価 3章: `- 品名: 品番`（F4 30/30）など、値が見出し語のままの行が LLM のエンティティになっていた。
+    """
+    if not labels or f["data_type"] in ("table", "date", "number") or f.get("edited"):
+        return False
+    text = _one_line(f["value"])
+    if not text or len(text) > MAX_LABEL_VALUE_CHARS or "\n" in str(f["value"] or ""):
+        return False
+    return _normalize_label(text) in labels
+
+
 def _title_fields(pattern: dict, all_fields: list[dict], shown: list[dict]) -> list[dict]:
-    """タイトルに使う項目（値のあるもの）。未設定なら報告番号・設備・発生日の辞書キー順。"""
-    by_name = {f["field_name"]: f for f in shown}
+    """タイトルに使う項目（値のあるもの）。未設定なら報告番号・設備・発生日の辞書キー順。明細表は使わない。"""
+    by_name = {f["field_name"]: f for f in shown if f["data_type"] != "table"}
     configured = [n for n in (pattern.get("title_fields") or []) if n in {f["field_name"] for f in all_fields}]
     keys = configured or list(DEFAULT_TITLE_KEYS)
     return [by_name[k] for k in dict.fromkeys(keys) if k in by_name and not _is_blank(by_name[k]["value"])]
+
+
+def _has_identifier(fields: list[dict]) -> bool:
+    """タイトル項目に、その帳票を見分けられるもの（識別番号・設備）があるか。"""
+    return any(f["field_name"] in ("report_id", "equipment_id", "equipment_name") for f in fields)
 
 
 def _title_texts(fields: list[dict], heading: bool) -> list[str]:
@@ -152,7 +202,7 @@ def _title_texts(fields: list[dict], heading: bool) -> list[str]:
 
 
 def _basic_lines(filled: list[dict]) -> list[str]:
-    short = [f for f in filled if f["data_type"] != "text"]
+    short = [f for f in filled if f["data_type"] not in ("text", "table")]
     names = {f["field_name"]: f for f in short}
     pair = "equipment_id" in names and "equipment_name" in names
     lines: list[str] = []
@@ -207,7 +257,33 @@ def _source_text(doc: dict, title_fields: list[dict]) -> str:
     return f"{file_name}（{_one_line(ident['display_name'])} {_plain_value(ident)}）"
 
 
+def table_markdown_lines(value, omit_person: bool = False) -> list[str]:
+    """明細表の1行を「- 品番: X／品名: Y」の1行にする。空のセルは書かない。合計行は「- 合計: 投入数: 50枚／…」。
+
+    omit_person: 人名の列見出し（担当・氏名など）の列を出さない（本文の人名の項目と同じ扱い）。
+    """
+    lines = []
+    if not is_table_value(value):
+        return lines
+    for row in value["rows"]:
+        items = [(_one_line(k), _one_line(v)) for k, v in table_row_items(value, row)]
+        items = [(k, v) for k, v in items if v]
+        if omit_person:
+            items = [(k, v) for k, v in items if not is_person_label(k)]
+        if not items:
+            continue
+        if _TOTAL_LABEL.match(items[0][1]):
+            # 数字の無い合計行（「合計」だけの行）は記録として意味がないので出さない
+            if len(items) > 1:
+                lines.append(f"- {items[0][1]}: " + "／".join(f"{k}: {v}" for k, v in items[1:]))
+            continue
+        lines.append("- " + "／".join(f"{k}: {v}" for k, v in items))
+    return lines
+
+
 def _is_blank(value) -> bool:
+    if isinstance(value, dict):
+        return not value.get("rows")
     return value is None or (isinstance(value, str) and not value.strip())
 
 
@@ -228,6 +304,18 @@ def _one_line(value) -> str:
 
 
 # ---- Markdown テキスト処理（core/mdtext・core/naming があればそれを使う） -------------------
+
+def nfkc_value(text) -> str:
+    """値の正規化（NFKC＋空白の畳み込み）。丸数字などの囲み文字（①②Ⓐ㋐）は原文どおり残す。
+
+    ①→1 にすると「①破損ウェーハ片を回収」が「1破損ウェーハ片を回収」になり、番号と本文の区切りが消える。
+    ㈱→(株)、⑴→(1) のように区切りが残る表記は今までどおり正規化する（core/mdtext.nfkc_keep_enclosed）。
+    """
+    s = "" if text is None else str(text).replace("_x000D_", "")
+    if _core_mdtext is not None and hasattr(_core_mdtext, "nfkc_value"):
+        return _core_mdtext.nfkc_value(s)
+    return _excel_nfkc_value(s)
+
 
 _MD_BLOCK_START = re.compile(r"^(\s*)(#|>|[-*+](?=\s|$)|\d+[.)](?=\s|$)|```|~~~)")
 _MD_RULE = re.compile(r"^\s*([-=_*])\1{2,}\s*$")

@@ -1,15 +1,17 @@
 """設定: AI接続（＋接続テスト）、LightRAGへの入れ方、一覧表の取り込み設定の一覧、ヘッダーのモデル切り替えAPI。"""
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import time
 import unicodedata
 from pathlib import Path
-from urllib.parse import quote
 
-from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
+from flask import (Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request,
+                   send_file, url_for)
 
+from core.naming import LIGHTRAG_HINT_RECORDS
 from models import database
 from services import llm
 from tables import store
@@ -19,6 +21,9 @@ bp = Blueprint("settings", __name__)
 
 ENTITY_TYPES_FILE = "entity_types_setsubi.yml"
 ENTITY_TYPES_DOWNLOAD_NAME = "entity_types_setsubi.yml"
+
+# 取り込み設定のJSONとして読めないときの文言（読めない理由は利用者の対処が同じなので1つにまとめる）
+NOT_A_TEMPLATE_JSON = "このファイルは一覧表の取り込み設定として読み込めません（このアプリの［JSONで書き出す］で作ったファイルを選んでください）"
 
 
 @bp.get("/settings/")
@@ -115,11 +120,21 @@ def _entity_types_path() -> Path:
     return Path(current_app.root_path) / "templates" / "settings" / ENTITY_TYPES_FILE
 
 
+def _hint_params(hint: str) -> dict[str, str]:
+    """'legacy-R(chunk_ts=1500,chunk_ol=0)' → {'chunk_ts': '1500', 'chunk_ol': '0'}（説明の表示用）。"""
+    inner = hint.partition("(")[2].rstrip(")")
+    return dict(kv.split("=", 1) for kv in inner.split(",") if "=" in kv)
+
+
 @bp.get("/settings/lightrag")
 def lightrag():
+    params = _hint_params(LIGHTRAG_HINT_RECORDS)
     return render_template("settings/lightrag.html",
                            entity_yaml=_entity_types_path().read_text(encoding="utf-8"),
-                           download_name=ENTITY_TYPES_DOWNLOAD_NAME)
+                           download_name=ENTITY_TYPES_DOWNLOAD_NAME,
+                           hint_records=LIGHTRAG_HINT_RECORDS,
+                           hint_chunk_ts=params.get("chunk_ts", ""),
+                           hint_chunk_ol=params.get("chunk_ol", "0"))
 
 
 @bp.get("/settings/lightrag/entity-types.yml")
@@ -149,8 +164,9 @@ def export_table_template(template_id: int):
             "description": template["description"] or "", "version": template["version"],
             "spec": spec_to_dict(template["spec"])}
     body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    return Response(body, mimetype="application/json",
-                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(template['name'])}.json"})
+    # 他のダウンロードと同じく send_file に任せる（filename* だけでなく ASCII の filename= も付く）
+    return send_file(io.BytesIO(body), mimetype="application/json", as_attachment=True,
+                     download_name=f"{template['name']}.json")
 
 
 @bp.post("/settings/table-templates/import")
@@ -163,16 +179,18 @@ def import_table_template():
     try:
         data = json.loads(storage.read(5 * 1024 * 1024).decode("utf-8-sig"))
     except (UnicodeDecodeError, ValueError):
-        flash("JSONとして読み込めませんでした（このアプリで書き出したファイルを選んでください）", "error")
+        flash(NOT_A_TEMPLATE_JSON, "error")
         return redirect(back)
     spec_dict = data.get("spec") if isinstance(data, dict) else None
     if not isinstance(spec_dict, dict):
-        flash("一覧表の取り込み設定のJSONではありません（spec がありません）", "error")
+        flash(NOT_A_TEMPLATE_JSON, "error")
         return redirect(back)
     try:
         spec = spec_from_dict(spec_dict)
-    except Exception as exc:
-        flash(f"設定の内容が正しくありません（{exc}）", "error")
+    except Exception:
+        # 例外の本文には内部の変数名が出るので画面には出さず、ログにだけ残す
+        current_app.logger.exception("取り込み設定のJSONを読み込めませんでした（%s）", storage.filename)
+        flash(NOT_A_TEMPLATE_JSON, "error")
         return redirect(back)
     name = _clean(request.form.get("name") or data.get("name") or spec.name, 100)
     spec.name = name

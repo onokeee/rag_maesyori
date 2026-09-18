@@ -52,8 +52,11 @@ def _default_checks() -> dict:
 
 
 def _default_markdown() -> dict:
-    return {"file_prefix": "", "group_by": "month", "max_records_per_file": 300, "lightrag_hint": False,
-            "dataset_card": True, "records": True,
+    # lightrag_hint: 新しい取り込み設定の既定はオン（ヒント無しだと LIGHTRAG_PARSER 未設定のサーバーで記録が途中で切られる）。
+    # 保存済みの設定は JSON に値を持っているので、この既定では書き換わらない。
+    # dedupe_timeline: 対応の時系列から、同じ記録の他の列と同じ文を省く（既定オン＝これまでの動き）。
+    return {"file_prefix": "", "group_by": "month", "max_records_per_file": 300, "lightrag_hint": True,
+            "dataset_card": True, "records": True, "dedupe_timeline": True,
             "summaries": [SummarySpec("month"), SummarySpec("entity_fiscal_year")],
             "title_columns": [], "omit_person": True}
 

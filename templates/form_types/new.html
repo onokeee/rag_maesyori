@@ -21,6 +21,8 @@
       <input name="description" class="input" value="{{ form.get('description', '') }}"></label>
   </div>
   {{ ui.file_drop("samples", accept=".xlsx,.xlsm", label="見本ファイルをここにドラッグ＆ドロップ（複数可）", hint=".xlsx / .xlsm", multiple=True) }}
+  <p class="notice" role="note">見本ファイルは、読み取りテストと項目の見直しに使うため、<strong>このPCに残り続けます</strong>（取り込んだ帳票と違って、ダウンロードで消える対象ではありません）。
+    本物の報告書を見本にするときは、使い終わったあとに［帳票の種類］の画面から見本ファイルを削除してください。</p>
   <div class="form-actions">
     <button type="submit" class="btn primary">読み取る項目の候補を作る</button>
   </div>

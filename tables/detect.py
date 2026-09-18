@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from collections import Counter
@@ -93,11 +94,13 @@ def is_month_label(text: str) -> bool:
 
 def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: int | None = None,
                  data_end: int | None = None, header_rows: list[int] | None = None,
-                 max_scan_rows: int | None = None) -> LayoutGuess:
+                 max_scan_rows: int | None = None, scan_memo: dict | None = None) -> LayoutGuess:
     """表の見出し帯・データ範囲・種類を推定する。
 
     header_rows を渡すとそのまま使う。header_row だけなら2段見出しかを自動で確かめる。
     max_scan_rows を渡すと、データの終わりの探索をその行数で打ち切る（簡易判定用）。
+    scan_memo（dict）を渡すと、全行をなめる部分（キー列・行の分類・データの終わり）の結果をそこに控え、
+    同じ見出し帯・同じ条件ならなめ直さない（自動判定のあとに同じ見出し行を指定し直したときなど）。値は JSON にできる形。
     """
     head = list(source.rows(sheet, 1, HEAD_ROWS))
     warnings: list[str] = []
@@ -129,10 +132,19 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
 
     header_norms = {_norm(h) for h in headers if h and not h.startswith("列")}
     ctx = _Ctx(width=width, header_norms=header_norms, key_cols=[], is_csv=is_csv, header_rows=rows_h)
-    ctx.key_cols = _auto_key_columns(source, sheet, data_start, ctx)
-
-    classes, counts, end, scan_warnings = _scan(
-        source, sheet, head, ctx, data_start, data_end, max_scan_rows)
+    memo_key = json.dumps([sheet, rows_h, headers, width, is_csv, data_end, max_scan_rows], ensure_ascii=False)
+    found = scan_memo.get(memo_key) if scan_memo is not None else None
+    if found is not None:
+        ctx.key_cols = list(found["key_cols"])
+        classes = [RowClass(i, k, r) for i, k, r in found["classes"]]
+        counts, end, scan_warnings = dict(found["counts"]), found["end"], list(found["warnings"])
+    else:
+        ctx.key_cols = _auto_key_columns(source, sheet, data_start, ctx)
+        classes, counts, end, scan_warnings = _scan(
+            source, sheet, head, ctx, data_start, data_end, max_scan_rows)
+        if scan_memo is not None:
+            scan_memo[memo_key] = {"key_cols": list(ctx.key_cols), "classes": [[c.index, c.kind, c.reason] for c in classes],
+                                   "counts": dict(counts), "end": end, "warnings": list(scan_warnings)}
     warnings.extend(scan_warnings)
 
     months = sum(1 for h in headers if is_month_label(h))
@@ -187,13 +199,20 @@ def sample_data_rows(source, sheet, layout: LayoutGuess, n: int = 200) -> list[S
     return out
 
 
-def looks_like_list(source, sheet) -> bool:
-    """一覧表らしいか（見出し行の下に同じ形の行が10行以上）。帳票フローからも使う。"""
+def list_kind(source, sheet) -> str:
+    """行が並ぶ表か（見出し行の下に同じ形の行が10行以上）。"list" / "crosstab" / ""（どちらでもない）。"""
     try:
         layout = guess_layout(source, sheet, max_scan_rows=200)
     except Exception:
-        return False
-    return layout.table_kind in ("list", "crosstab") and layout.counts.get("data", 0) >= 10
+        return ""
+    if layout.table_kind in ("list", "crosstab") and layout.counts.get("data", 0) >= 10:
+        return layout.table_kind
+    return ""
+
+
+def looks_like_list(source, sheet) -> bool:
+    """一覧表らしいか（クロス集計も含む）。帳票フローからも使う。"""
+    return bool(list_kind(source, sheet))
 
 
 # ---- 内部: 行の事実 ----

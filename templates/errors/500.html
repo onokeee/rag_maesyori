@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}エラーが発生しました{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <div class="card-head">
+    <h1 class="card-title">エラーが発生しました</h1>
+  </div>
+  <p>処理の途中で問題が起きました。もう一度やり直してください。何度も同じところで止まるときは、起動した画面（コマンドプロンプト）に出ているメッセージを確認してください。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('home.index') }}">ホームへ</a>
+  </div>
+</div>
+{% endblock %}

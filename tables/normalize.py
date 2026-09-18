@@ -3,6 +3,8 @@
 1行ずつ: 行の分類 → 継続行の連結 → 結合範囲と「空欄＝上と同じ」列の補完 →
 型の変換（和暦・年のない日付・8桁日付・6桁時刻・△▲/末尾マイナス・桁区切り・%・timedelta→分・単位換算）→
 記録キー（出現順の番号付き）。値は NFKC だけで揃える（名寄せ辞書は使わない）。
+ただし md に出す文章の値は丸数字などの囲み文字（①Ⓐ㋐㊤…）を原文どおり残す（①→1 だと番号と本文の区切りが消えるため）。
+比較・照合に使う正規化（日付・数値の解析、NA 判定、コードの突き合わせ）は従来どおり NFKC だけをかける。
 数値・日付以外の文章列は元の値を残さない（NFKC と空白の畳み込みだけなので）。
 """
 from __future__ import annotations
@@ -17,6 +19,7 @@ from pathlib import Path
 
 from openpyxl.utils.datetime import MAC_EPOCH, WINDOWS_EPOCH, from_excel
 
+from core.mdtext import nfkc_keep_enclosed
 from tables.checks import Issue
 from tables.detect import classify_rows, split_header_unit
 from tables.spec import TableSpec, resolve_columns
@@ -189,14 +192,22 @@ class ConvertContext:
 
 
 def _nfkc(text) -> str:
+    """比較・照合用の NFKC（囲み文字も ①→1 にそろえる）。日付・数値の解析、NA 判定、キーの照合に使う。"""
     return unicodedata.normalize("NFKC", str(text or ""))
 
 
-def nfkc_text(text) -> str:
-    """NFKC＋行内の空白の畳み込み（改行は残す）。"""
+def nfkc_text(text, keep_enclosed: bool = True) -> str:
+    """NFKC＋行内の空白の畳み込み（改行は残す）。
+
+    md に出す値は囲み文字（①Ⓐ㋐㊤…）を原文どおり残す（core.mdtext.nfkc_keep_enclosed）。
+    コードのように比較・突き合わせに使う値は keep_enclosed=False で従来どおり NFKC だけをかける。
+    """
     if text is None:
         return ""
-    s = _nfkc(text).replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
+    base = nfkc_keep_enclosed(str(text or "")) if keep_enclosed else _nfkc(text)
+    s = base.replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in s:  # 1行なら行に分けない（結果は同じ）
+        return _SPACES.sub(" ", s).strip()
     lines = [_SPACES.sub(" ", line).strip() for line in s.split("\n")]
     return "\n".join(lines).strip("\n")
 
@@ -337,6 +348,29 @@ def _zero_pad(value: float, number_format: str | None) -> str:
     return str(n)
 
 
+_NON_ASCII = re.compile(r"[^\x00-\x7f]")
+
+
+def _upper_code(text: str) -> str:
+    """code 列の upper。同じセルに「番号＋設備名」が入っている台帳があるので、番号の部分だけ大文字にする。
+
+    「Oxideエッチャ 2号機（ETC-302）」→「Oxideエッチャ 2号機（ETC-302）」（設備名はそのまま）。
+    英数字だけの値は今までどおり全体を大文字にする（「etc-302」→「ETC-302」）。
+    """
+    if not _NON_ASCII.search(text):
+        return text.upper()
+    from tables.summaries import split_entity_code  # 番号と名前の分け方は集計と同じものを使う
+
+    code, name = split_entity_code(text)
+    if not name or code.upper() == code:
+        return text
+    low, target = text.lower(), code.lower()
+    at = low.find(target) if low.startswith(target) else low.rfind(target)
+    if at < 0:
+        return text
+    return text[:at] + code.upper() + text[at + len(code):]
+
+
 def convert_cell(value, text: str, col, cctx: ConvertContext, number_format: str | None = None,
                  header_unit: str = "") -> tuple[object, str | None, str | None]:
     """セル1つを列の型に変換する。戻り値: (値, エラー文, 印)。印: year_inferred / year_missing / error_value"""
@@ -361,9 +395,9 @@ def convert_cell(value, text: str, col, cctx: ConvertContext, number_format: str
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             out = _zero_pad(value, number_format) if float(value).is_integer() else str(_clean_number(value))
         else:
-            out = _SPACES.sub(" ", nfkc_text(text)).strip()
+            out = _SPACES.sub(" ", nfkc_text(text, keep_enclosed=False)).strip()  # コードは突き合わせに使うので NFKC のみ
         if "upper" in col.normalize:
-            out = out.upper()
+            out = _upper_code(out)
         return out, None, None
     if t == "text":
         out = nfkc_text(text)
@@ -593,7 +627,7 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
         if on_progress is not None and n % PROGRESS_EVERY == 0:
             on_progress(n, total_rows)
         for i, cell in enumerate(row.cells):
-            if cell.text and cell.merged_anchor == (row.index, i + 1):
+            if cell.merged_anchor is not None and cell.text and cell.merged_anchor == (row.index, i + 1):
                 anchors[cell.merged_anchor] = (cell.value, cell.text, cell.number_format)
         kind, reason = rc.kind, rc.reason
         if kind == "blank":
@@ -644,6 +678,8 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
                     stats.filled_down[col.key] = stats.filled_down.get(col.key, 0) + 1
             elif raw[1] or raw[0] is not None:
                 prev_raw[col.key] = raw
+            if raw[0] is None and not raw[1]:
+                continue  # 空欄は変換しても値・問題・件数が増えない
             out = convert(col, raw, row.index, record_warnings, originals, header_units.get(col.key, ""))
             if out is not None:
                 values[col.key] = out

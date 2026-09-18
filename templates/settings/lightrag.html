@@ -39,11 +39,65 @@ ENTITY_TYPE_PROMPT_FILE={{ download_name }}</code></pre>
 {% endcall %}
 
 {% call ui.card("3. 分割（チャンク）の設定") %}
+  <p><strong>一覧表の記録ファイルは、ヒントを付けて入れてください。</strong>取り込み設定の「ファイル名に LightRAG の分割ヒントを付ける」をオンにすると <code>.[{{ hint_records }}]</code> が付き、サーバーの設定に関係なく記録1件が1つの断片に収まります（<a href="#filename-hint">ヒントの説明</a>）。</p>
+  <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>サーバーの設定</th><th>一覧表の記録ファイル</th><th>帳票・集計ファイル・データセット説明</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">ヒントを付ける（推奨）</th><td>記録1件が1つの断片。途中切れなし</td><td>—（ヒントは付けません）</td></tr>
+        <tr><th scope="row"><code>LIGHTRAG_PARSER</code> 未設定</th><td><strong>使えません</strong>。1,200トークンの固定幅で機械的に切られ、記録の2〜6割が途中で切れます。日本語の文字の途中で切れて文字化け（�）を含む断片もできます</td><td>問題ありません（1件＝1断片）</td></tr>
+        <tr><th scope="row"><code>*:native-teP,*:legacy-R</code>（<code>env.example</code> のまま）</th><td>ヒントがなければ見出し・段落の単位で最大2,000トークン。記録は切れません</td><td>問題ありません</td></tr>
+        <tr><th scope="row">サーバー全体を <code>legacy-R(chunk_ts=800)</code></th><td>記録が途中で切れます</td><td><strong>やめてください</strong>。長い帳票が2つに分かれます</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="hint">当社サンプル（一覧表3種・約46,000件）での実測: <code>LIGHTRAG_PARSER</code> 未設定だと記録の 21〜61% が途中で切れ、T1 では 6,011断片中323件に文字化けが出ました。ヒント（<code>chunk_ts={{ hint_chunk_ts }}</code>）では途中切れ 0 件です。</p>
   <ul>
-    <li><code>LIGHTRAG_PARSER</code> を設定しない場合、1,200トークンの固定幅で分割され、日本語の文や記録の途中で切れることがあります。</li>
-    <li><strong>帳票</strong>: 1件がほぼ1チャンクに収まるので、既定のままで構いません。</li>
-    <li><strong>一覧表の記録ファイル</strong>: 一覧表の取り込み設定で「ファイル名にLightRAG用のヒントを付ける」をオンにする（<code>.[legacy-R(chunk_ts=800,chunk_ol=0)]</code> が付きます）か、サーバー側で <code>LIGHTRAG_PARSER</code> を legacy-R にします。</li>
+    <li><strong>帳票</strong>: ヒントは付けません。短い帳票は1件が1つの断片に収まります。明細表（交換部品・点検項目の表）を読む帳票は 1,200トークンを超えて2つ以上に分かれることがありますが、長い項目の見出しに識別子（<code>## 点検項目（AGV-811 Fab1 AGV）</code>）が入るので、どの帳票の断片かは分かります。明細表の行だけで埋まった断片には識別番号が出ません。</li>
+    <li>ヒントを付けても外しても<strong>文書ID（doc_id）は同じ</strong>です。付け外しして入れ直すときは、古いファイルを先に削除してください（1.5.x は同名だと 409）。</li>
+    <li>「設備×年月ごと」に分ける設定は、ファイル数が7〜8倍になり処理も少し増えます。設備の列がきれいな番号で、設備ごとに入れ替えたい場合だけ選んでください。</li>
+    <li>1ファイルに入れる記録の上限（既定300件）は、分割のされ方には影響しません。LightRAG での削除・入れ直しの単位として決めてください。</li>
     <li>投入後、文書の状態（doc_status）の <code>parse_engine</code> / <code>chunk_opts</code> で、実際にどう分割されたかを確認できます。</li>
+  </ul>
+{% endcall %}
+
+{#- ヒントの文字列と数値は core/naming.py の LIGHTRAG_HINT_RECORDS から表示する（値を変えたら説明も追従する） -#}
+{% call ui.card("ファイル名の分割ヒント（.[…]）とは", id="filename-hint") %}
+  <p>LightRAG は受け取った md をそのままは使わず、一定の長さ（トークン数）の<strong>断片（チャンク）</strong>に切ってから、断片ごとに AI で設備・現象・部品などを抜き出します。</p>
+  <p>LightRAG 1.5.x では、ファイル名の末尾（<code>.md</code> の直前）に <code>.[…]</code> で指示を書くと、そのファイルだけ、サーバーの初期設定ではなくその指示どおりに分割します。</p>
+  <pre class="code"><code>トラブル対応一覧_2024-04.[{{ hint_records }}].md</code></pre>
+  <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>部分</th><th>意味</th></tr></thead>
+      <tbody>
+        <tr><th scope="row"><code>legacy</code></th><td>読み込み方。md をテキストのまま読みます（表を AI で解析するなどの処理をしません）。</td></tr>
+        <tr><th scope="row"><code>R</code></th><td>分け方。空行 → 改行 → 句点（。）の順に、なるべく区切りのよい場所で切ります。</td></tr>
+        <tr><th scope="row"><code>chunk_ts={{ hint_chunk_ts }}</code></th><td>断片1つの最大の長さ（トークン数）。</td></tr>
+        <tr><th scope="row"><code>chunk_ol={{ hint_chunk_ol }}</code></th><td>前の断片と重ねる長さ。0 なら重ねません（重ねると同じ記録が2つの断片に入ります）。</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <h3>なぜ付けるのか</h3>
+  <p>同じ md でも、切られ方はサーバーの設定しだいで大きく変わります。</p>
+  <ul>
+    <li><code>LIGHTRAG_PARSER</code> を設定していない: 1,200トークンの固定幅で機械的に切ります。記録の途中で切れたり、日本語の文字の途中で切れて文字化け（U+FFFD）を含む断片ができたりします。</li>
+    <li>サーバーの設定例（<code>env.example</code>）をそのまま使っている: 見出し・段落の単位で、最大2,000トークンずつ切ります（native-P）。</li>
+  </ul>
+  <p>ヒントを付けると、サーバーの設定に関係なく、アプリが意図した切り方にそろえられます。</p>
+  <p>記録が途中で切れると、後ろ側の断片に管理No・設備・日付が入らず、「どの設備のいつの話か」が分からない断片になります。そうした断片は検索しても正しく使われません。そのため <code>chunk_ts</code> は、記録1件がまるごと収まる長さにしてあります。</p>
+  <h3>このアプリでの扱い</h3>
+  <ul>
+    <li>一覧表の取り込み設定で「ファイル名に LightRAG の分割ヒントを付ける」をオンにすると、<strong>記録ファイル</strong>の名前にヒントが付きます（新しい取り込み設定では既定でオン。記録ファイルを入れるなら、そのままオンを推奨）。集計ファイルとデータセット説明には付けません。</li>
+    <li>帳票には付けません（多くは1件が1つの断片に収まり、分かれる場合も見出しに識別子が入るため）。</li>
+    <li>元の値に含まれる <code>.[</code> や <code>[</code> <code>]</code> はファイル名から取り除きます。意図しないヒントと解釈されて、アップロードが断られるのを防ぐためです。</li>
+  </ul>
+  <h3>注意</h3>
+  <ul>
+    <li>LightRAG 1.5.x の機能です。1.4.x では分割の指定として効きません。</li>
+    <li>1.5.x は文書ID（doc_id）を決めるときにヒントを外すので、ヒントを付ける／外す・数値を変えても<strong>同じ文書</strong>として扱われます（同名として 409 になるため、入れ直す前に LightRAG から削除してください）。</li>
+    <li>ヒントを付けたファイルでは、サーバーの <code>LIGHTRAG_PARSER</code> に書いた処理オプション（例: 表の AI 解析 <code>t</code>）がヒントの内容で丸ごと置き換わります。</li>
+    <li>ヒントの書式が正しくないと、アップロード時に HTTP 400 で断られます。</li>
+    <li>実際にどう分割されたかは、文書の状態（doc_status）の <code>parse_engine</code> / <code>chunk_opts</code> で確認できます。</li>
   </ul>
 {% endcall %}
 

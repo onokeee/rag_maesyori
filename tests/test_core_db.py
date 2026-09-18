@@ -76,8 +76,12 @@ def test_migrates_old_db_with_registered_document(tmp_path):
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == db.BUSY_TIMEOUT_MS
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"table_templates", "table_template_versions", "table_template_samples", "table_imports",
-                "table_outputs", "table_downloads", "alias_entries", "jobs", "llm_calls", "ai_items"} <= tables
+        assert {"table_templates", "table_template_versions", "table_imports", "jobs", "llm_calls",
+                "ai_items"} <= tables
+        # 使っていない表は残さない（取り込みを指す列が無く、行が入ると purge の探索から漏れる。design.md 3.3）
+        assert tables.isdisjoint({"table_outputs", "table_downloads", "table_template_samples", "alias_entries"})
+        # AI整形の控えは取り込み単位で消せる（同じ設定の別の取り込みを巻き添えにしない）
+        assert "import_id" in {r[1] for r in conn.execute("PRAGMA table_info(ai_items)")}
 
         doc = db.get_document(1)
         assert doc["state"] == "confirmed"
@@ -127,26 +131,21 @@ def test_new_db_document_states_and_filters(core_app):
         assert json.loads(doc["data_json"])["values"]["report_id"] == "R2026-00123"
         assert db.discard_changes(d2) is False
 
-        rows, total = db.list_documents()
-        assert total == 2 and [r["id"] for r in rows] == [d2, d1]
-        rows, total = db.list_documents(state="confirmed")
-        assert total == 1 and rows[0]["pattern_name"] == "設備修理報告書" and rows[0]["state"] == "confirmed"
-        assert db.list_documents(state=["unread", "reviewing"])[1] == 1
-        assert db.list_documents(pattern_id=pid)[1] == 1
-        assert db.list_documents(q="CMP研磨")[1] == 1           # タイトルで検索
-        assert db.list_documents(q="点検")[1] == 1               # ファイル名で検索
-        assert db.list_documents(q="100%")[1] == 0               # LIKE の記号は文字として扱う
-        assert db.list_documents(q="_")[1] == 1                  # 「修理報告書_標準」だけ
-        today = db.now()[:10]
-        assert db.list_documents(date_from=today, date_to=today)[1] == 2
-        assert db.list_documents(date_to="2000-01-01")[1] == 0
-        rows, total = db.list_documents(limit=1, offset=1)
-        assert total == 2 and len(rows) == 1 and rows[0]["id"] == d1
+        # ホームの一覧（状態で絞る。取り込み履歴は無いので検索・絞り込みは持たない）
+        assert [r["id"] for r in db.list_documents()] == [d2, d1]
+        rows = db.list_documents(state="confirmed")
+        assert len(rows) == 1 and rows[0]["pattern_name"] == "設備修理報告書" and rows[0]["state"] == "confirmed"
+        assert len(db.list_documents(state=["unread", "reviewing"])) == 1
+        assert [r["id"] for r in db.list_documents(limit=1)] == [d2]
         assert [d["id"] for d in db.list_confirmed_documents()] == [d1]
         assert db.list_confirmed_documents([]) == []
 
-        db.delete_document(d1)
-        assert db.get_document(d1) is None
+        # まとめ取り込み（同じ batch_id を選んだ順に返す）
+        b1 = db.create_document("1.xlsx", "h1", "documents/1.xlsx", batch_id="B", batch_order=0)
+        b2 = db.create_document("2.xlsx", "h2", "documents/2.xlsx", batch_id="B", batch_order=1)
+        assert [d["id"] for d in db.list_batch_documents("B")] == [b1, b2]
+        assert db.list_batch_documents("") == [] and db.list_batch_documents("ない") == []
+        assert db.get_document(b1)["batch_id"] == "B"
 
 
 def test_save_pattern_new_fields_and_version_no(core_app):

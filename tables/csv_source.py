@@ -283,6 +283,8 @@ class CsvSource:
             self.sniff = sniff_csv(self.path)
         self.encoding: str = options.get("encoding") or self.sniff.encoding
         self.delimiter: str = options.get("delimiter") or self.sniff.delimiter
+        if not isinstance(self.delimiter, str) or len(self.delimiter) != 1:
+            raise UploadError("区切り文字は1文字で選んでください")
         errors = str(options.get("errors") or "strict")
         self.replace_errors = errors.startswith("replace")
         self.replaced_rows: list[int] = []  # 〓に置き換えたレコード番号（直近の rows() 走査分）
@@ -323,7 +325,10 @@ class CsvSource:
                         return
                     emitted += 1
                     yield SourceRow(index=index, cells=[_csv_cell(v) for v in record], hidden=None)
-        except UnicodeDecodeError as e:
+        except LookupError as e:
+            raise UploadError(f"文字コード {self.encoding} は使えません。文字コードを選び直してください") from e
+        except UnicodeError as e:
+            # UTF-16 の「BOM が無い」などは UnicodeDecodeError ではなく UnicodeError で上がる
             raise UploadError(
                 f"{index + 1}行目付近で、文字コード {self.encoding} として読めない文字がありました。"
                 f"文字コードを選び直すか、「読めない文字を{REPLACEMENT_CHAR}に置き換える」を選んでください"
@@ -331,8 +336,10 @@ class CsvSource:
 
 
 def _csv_cell(raw: str) -> CellInfo:
+    if not raw:
+        return CellInfo(value=None, text="")
     text = clean_text(raw)
-    m = _EXCEL_WRAPPED.match(text)
+    m = _EXCEL_WRAPPED.match(text) if text.startswith("=") else None
     if m:
         text = m.group(1).strip()
     return CellInfo(value=text if text else None, text=text)

@@ -43,7 +43,10 @@
       <td>{{ item.template_name or "（未選択）" }}</td>
       <td>{{ ui.badge(item.status) }}</td>
       <td class="nowrap">{{ (item.updated_at or item.created_at or "")[:16] }}</td>
-      <td class="actions"><a href="{{ href }}">開く</a></td>
+      <td class="actions"><a href="{{ href }}">開く</a>
+        {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=item.id),
+            "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。",
+            label="削除", next=url_for('tables.new')) }}</td>
     </tr>
   {% endfor %}
   </tbody>

@@ -12,11 +12,14 @@
 </div>
 
 {% call ui.card() %}
+  <p class="notice" role="note">{{ delete_note }}</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('tables.download_zip', import_id=imp.id) }}">Markdownをまとめてダウンロード（zip）</a>
+    <a class="btn primary" href="{{ url_for('tables.download_zip', import_id=imp.id) }}"
+       data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdownをまとめてダウンロード（zip）</a>
     <a class="btn" href="{{ url_for('tables.download_csv', import_id=imp.id) }}">正規化CSVをダウンロード</a>
   </div>
-  <p class="hint">zip の中身: 「RAG投入用」フォルダに Markdown、「管理用_RAGには入れない」フォルダに 正規化データ.csv・問題一覧.csv・取込レポート.csv が入っています。LightRAG には「RAG投入用」の中身だけを入れてください。</p>
+  <p class="hint">zip の中身: 「RAG投入用」フォルダに Markdown、「管理用_RAGには入れない」フォルダに 正規化データ.csv・問題一覧.csv・取込レポート.csv が入っています。LightRAG には「RAG投入用」の中身だけを入れてください。
+    入れる手順は<a href="{{ url_for('settings.lightrag') }}">LightRAGへの入れ方</a>を見てください。</p>
 {% endcall %}
 
 {% call ui.card("作成したファイル") %}
@@ -27,7 +30,7 @@
 
 <div class="form-actions">
   <a class="btn ghost" href="{{ url_for('tables.preview', import_id=imp.id) }}">内容の確認に戻る</a>
-  <a class="btn ghost" href="{{ url_for('history.index', tab='tables') }}">取り込み履歴へ</a>
+  <a class="btn ghost" href="{{ url_for('home.index') }}">ホームへ</a>
   <a class="btn" href="{{ url_for('tables.new') }}">次の一覧表を取り込む</a>
 </div>
 {% endblock %}

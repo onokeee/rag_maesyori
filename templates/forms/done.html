@@ -6,18 +6,62 @@
 <div class="page-head">
   <div>
     <h1>完了（Markdownをダウンロード）</h1>
-    <p class="page-lead">{{ doc.file_name }} を確定しました。 {{ ui.badge(doc.state) }}</p>
+    <p class="page-lead">{{ doc.file_name }} を確定しました。 {{ ui.badge(doc.state) }}
+      {% if batch %}<span class="muted">まとめ取り込み {{ batch.position }}/{{ batch.total }}件目（確定済み {{ batch.confirmed }}/{{ batch.total }}）</span>{% endif %}</p>
   </div>
 </div>
 
+{% if batch %}
+  {% call ui.card("まとめ取り込み（" ~ batch.total ~ "ファイル）") %}
+    <p>確定済み {{ batch.confirmed }}/{{ batch.total }}件。すべて確定すると、Markdown をまとめて zip でダウンロードできます。
+      {% if not batch.all_confirmed and batch.confirmed %}読めない帳票が混ざっているときは、確定済みの {{ batch.confirmed }} 件だけを先に受け取れます（未確定の分はこのPCに残ります）。{% endif %}</p>
+    <ul class="list-plain list-rows">
+      {% for d in batch.docs %}
+      <li>
+        <div class="item-main">
+          <span class="item-title">{{ loop.index }}. {{ d.title or d.file_name }}</span>
+          <span class="item-sub">{{ d.file_name }}</span>
+        </div>
+        <div class="cluster">{{ ui.badge(d.state) }}
+          {% if d.id != doc.id %}<a class="btn small" href="{{ d.href or url_for('forms.type_select', doc_id=d.id) }}">開く</a>{% endif %}</div>
+      </li>
+      {% endfor %}
+    </ul>
+    <div class="btn-row">
+      {% if batch.all_confirmed %}
+        <a class="btn primary" href="{{ url_for('forms.download_batch', batch_id=batch.id) }}"
+           data-confirm="{{ batch_confirm }}" data-confirm-ok="ダウンロードして消す">まとめてMarkdownをダウンロード（zip）</a>
+      {% else %}
+        {% if batch.next %}
+          <a class="btn primary" href="{{ url_for('forms.type_select', doc_id=batch.next.id) }}">次の帳票へ（残り{{ batch.total - batch.confirmed }}件）</a>
+        {% endif %}
+        {% if batch.confirmed %}
+          <a class="btn" href="{{ url_for('forms.download_batch', batch_id=batch.id, confirmed_only=1) }}"
+             data-confirm="確定済みの{{ batch.confirmed }}件だけを zip でダウンロードします。その{{ batch.confirmed }}件のデータはこのPCから消えます（未確定の{{ batch.total - batch.confirmed }}件は残ります）。"
+             data-confirm-ok="ダウンロードして消す">確定済み{{ batch.confirmed }}件だけをダウンロード（zip）</a>
+        {% endif %}
+      {% endif %}
+      <a class="btn ghost" href="{{ url_for('home.index') }}">ホームへ</a>
+    </div>
+    <p class="notice" role="note">{{ batch_confirm }} LightRAG に入れる前に、ダウンロードした zip を開いて中身を確かめてください。</p>
+  {% endcall %}
+{% endif %}
+
 {% call ui.card() %}
   <p>ファイル名: <code>{{ file_name }}</code></p>
+  {% if hash_suffix %}<p class="hint">ファイル名の末尾の英数字8桁は、同じ題名の帳票と見分けるための元ファイルの符号です（同じファイルなら毎回同じ値になります）。LightRAG に入れるときは名前を変えないでください。</p>{% endif %}
+  {% if batch %}
+    <p class="hint">この帳票だけを先にダウンロードすることもできますが、そのときはこの帳票だけがまとまりから消えます。</p>
+  {% endif %}
+  <p class="notice" role="note">{{ delete_note }}</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('forms.download_md', doc_id=doc.id) }}">Markdownをダウンロード（.md）</a>
-    <a class="btn" href="{{ url_for('forms.new') }}">次の帳票を取り込む</a>
-    <a class="btn ghost" href="{{ url_for('history.index') }}">取り込み履歴へ</a>
+    <a class="btn {{ 'primary' if not batch }}" href="{{ url_for('forms.download_md', doc_id=doc.id) }}"
+       data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">この帳票のMarkdownをダウンロード（.md）</a>
+    {% if not batch %}<a class="btn" href="{{ url_for('forms.new') }}">次の帳票を取り込む</a>{% endif %}
+    <a class="btn ghost" href="{{ url_for('home.index') }}">ホームへ</a>
   </div>
-  <p class="hint">値を直したいときは<a href="{{ url_for('forms.detail', doc_id=doc.id) }}">この帳票の詳細</a>から[修正する]を押してください。</p>
+  <p class="hint">値を直したいときは、ダウンロードする前に<a href="{{ url_for('forms.detail', doc_id=doc.id) }}">この帳票の詳細</a>から[修正する]を押してください。
+    ダウンロードした .md を LightRAG に入れる手順は<a href="{{ url_for('settings.lightrag') }}">LightRAGへの入れ方</a>を見てください。</p>
 {% endcall %}
 
 {% call ui.card("Markdownの内容") %}

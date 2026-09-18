@@ -52,14 +52,37 @@ def test_progress_and_result(core_app):
 
 
 def test_failure_is_recorded(core_app):
+    """利用者に見せるエラー（JobError）のメッセージは、そのまま画面に出る。"""
     def work(ctx):
         ctx.progress(done=1)
-        raise ValueError("列が見つかりません")
+        raise jobs.JobError("列が見つかりません")
 
     with core_app.app_context():
         job = jobs.wait_job(jobs.start_job("table_read", "table_import", 1, work))
         assert job["status"] == "failed"
-        assert "列が見つかりません" in job["message"] and job["progress"]["done"] == 1
+        assert job["message"] == "列が見つかりません" and job["progress"]["done"] == 1
+
+
+def test_unexpected_failure_does_not_show_the_python_exception_name(core_app):
+    """想定外の例外は Python の例外名（KeyError など）を画面に出さず、日本語の案内にする。"""
+    def work(ctx):
+        raise KeyError("equipment_no")
+
+    with core_app.app_context():
+        job = jobs.wait_job(jobs.start_job("table_read", "table_import", 1, work))
+        assert job["status"] == "failed"
+        assert "KeyError" not in job["message"] and "equipment_no" not in job["message"]
+        assert "処理中にエラーが発生しました" in job["message"] and "ログ" in job["message"]
+
+
+def test_ai_and_table_errors_are_shown_to_the_user(core_app):
+    """AI整形・一覧表の処理エラーは日本語のメッセージを持つので、そのまま出す（JobError を継承している）。"""
+    from aiproc.runner import AIJobError
+    from tables.pipeline import PipelineError
+
+    assert issubclass(AIJobError, jobs.JobError) and issubclass(PipelineError, jobs.JobError)
+    assert jobs.error_message(AIJobError("AI接続が設定されていません")) == "AI接続が設定されていません"
+    assert jobs.error_message(PipelineError("見出しの行が見つかりません")) == "見出しの行が見つかりません"
 
 
 def test_cancel_running_job(core_app):

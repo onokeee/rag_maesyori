@@ -109,6 +109,23 @@ def test_sniff_shift_jis_2004_and_utf16(tmp_path):
     assert list(CsvSource(u16).rows())[2].cells[1].text == "剝離1"
 
 
+def test_wrong_encoding_choice_is_a_message_not_a_500(tmp_path):
+    """画面の選択肢から文字コードを選び直せるように、読めない指定は UploadError にする。
+
+    UTF-8 のファイルに UTF-16 を選ぶと、デコーダは UnicodeDecodeError ではなく UnicodeError（BOM が無い）を出す。
+    """
+    body = "設備名,担当\n" + "".join(f"CMP-10{i},田中\n" for i in range(5))
+    path = _write(tmp_path / "utf8.csv", body, "utf-8")
+    with pytest.raises(UploadError, match="文字コード"):
+        list(CsvSource(path, options={"encoding": "utf-16", "delimiter": ","}).rows())
+    with pytest.raises(UploadError, match="文字コード utf-8-x は使えません"):
+        list(CsvSource(path, options={"encoding": "utf-8-x", "delimiter": ","}).rows())
+    with pytest.raises(UploadError, match="区切り文字は1文字"):
+        CsvSource(path, options={"encoding": "utf-8", "delimiter": "ABC"})
+    # 正しい指定はそのまま読める
+    assert list(CsvSource(path, options={"encoding": "utf-8", "delimiter": ","}).rows())[1].cells[0].text == "CMP-100"
+
+
 def test_ascii_head_then_cp932_is_detected_by_full_decode(tmp_path):
     head = "code,name,memo\n" + "".join(f"C{i:06d},item{i},ok\n" for i in range(60000))  # 1MB超のASCII
     path = tmp_path / "big.csv"
@@ -648,3 +665,168 @@ def test_sample_t5_csv_and_two_row_header_xlsx():
     assert xl.counts == {"data": 728}
     cols = suggest_columns(xl.headers, sample_data_rows(xsrc, "2026上期", xl))
     assert cols[0].key == "record_no" and cols[0].display == "台帳No" and cols[0].matched_by == "dictionary"
+
+# ---- Excel: XML を順に読む実装と、通常モードで開いたときの一致 ----
+
+_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+
+
+def _raw_workbook(path: Path) -> Path:
+    """Excel が書くような形（共有文字列・書式・結合・リンク・コメント・テーブル）と、まれな形を手で組んだブック。"""
+    import zipfile
+
+    sheet1 = f"""<worksheet xmlns="{_MAIN}" xmlns:r="{_REL}"><dimension ref="A1:K12"/>
+<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+<cols><col min="2" max="3" width="10" hidden="1" customWidth="1"/></cols>
+<sheetData>
+<row r="1"><c r="A1" s="1" t="s"><v>0</v></c><c r="B1" s="1" t="s"><v>1</v></c><c r="C1" s="1" t="s"><v>3</v></c>
+<c r="D1" t="inlineStr"><is><r><t>リッチ</t></r><r><rPr><b/></rPr><t xml:space="preserve"> 文字</t></r><rPh sb="0" eb="1"><t>ヨミ</t></rPh></is></c><c r="E1" t="s"><v>6</v></c></row>
+<row r="2" spans="1:5"><c r="A2" t="s"><v>2</v></c><c r="B2" s="2"><v>46237</v></c><c r="C2" t="str"><f>A1</f><v></v></c><c r="D2" t="b"><v>0</v></c><c r="E2" t="e"><v>#N/A</v></c></row>
+<row r="4" hidden="1"><c r="A4"><v>1.5</v></c><c s="3"><v>2</v></c><c t="inlineStr"><is><t/></is></c><c t="inlineStr"/></row>
+<row r="5" hidden="0" ht="20" customHeight="1"><c r="A5" s="4"><v>46237.5</v></c><c r="F5" s="3"/></row>
+<row r="7"><c r="A7" t="s"><v>3</v></c><c r="B7"><v>99</v></c></row>
+<row r="9"><c r="A9" t="d"><v>2026-08-03T10:00:00</v></c><c r="B9" t="s"><v>7</v></c></row>
+<row r="10" hidden="true"><c r="G10" t="s"><v>5</v></c></row>
+</sheetData>
+<autoFilter ref="A1:E5"/>
+<mergeCells count="1"><mergeCell ref="A7:C8"/></mergeCells>
+<hyperlinks><hyperlink ref="K9" r:id="rId1"/><hyperlink ref="B12" location="Sheet2!A1"/><hyperlink ref="A2" location="x!A1"/><hyperlink ref="B8" location="y!A1"/></hyperlinks>
+<tableParts count="1"><tablePart r:id="rId3"/></tableParts>
+</worksheet>"""
+    sheet2 = f"""<x:worksheet xmlns:x="{_MAIN}"><x:sheetData>
+<x:row r="3"><x:c r="A3" t="inlineStr"><x:is><x:t>三</x:t></x:is></x:c></x:row>
+<x:row r="2"><x:c r="A2"><x:v>2</x:v></x:c><x:c r="B2"><x:v>5</x:v></x:c></x:row>
+<x:row r="3"><x:c r="B3"><x:v>7</x:v></x:c><x:c r="A3"><x:v>8</x:v></x:c></x:row>
+<x:row r="5"><x:c r="A6" t="inlineStr"><x:is><x:t>行がずれたセル</x:t></x:is></x:c></x:row>
+</x:sheetData></x:worksheet>"""
+    sheet3 = f"""<worksheet xmlns="{_MAIN}"><sheetData/><mergeCells><mergeCell ref="B2:C3"/></mergeCells></worksheet>"""
+    strings = ["管理No", "発生日", "", "設備", "リンク", "  ", "備考\r\n2行目", "=\"001\""]
+    shared = f'<sst xmlns="{_MAIN}" count="{len(strings)}" uniqueCount="{len(strings)}">' + "".join(
+        f'<si><t xml:space="preserve">{s}</t></si>' for s in strings) + "</sst>"
+    styles = f"""<styleSheet xmlns="{_MAIN}"><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy/mm/dd hh:mm"/></numFmts>
+<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><strike/><sz val="11"/><name val="Calibri"/></font></fonts>
+<fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFFFFF00"/></patternFill></fill></fills>
+<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="2" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>
+</styleSheet>"""
+    files = {
+        "[Content_Types].xml": f"""<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="{_CT}.sheet.main+xml"/>
+<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{_CT}.worksheet+xml"/>
+<Override PartName="/xl/worksheets/sheet2.xml" ContentType="{_CT}.worksheet+xml"/>
+<Override PartName="/xl/worksheets/sheet3.xml" ContentType="{_CT}.worksheet+xml"/>
+<Override PartName="/xl/styles.xml" ContentType="{_CT}.styles+xml"/>
+<Override PartName="/xl/sharedStrings.xml" ContentType="{_CT}.sharedStrings+xml"/>
+<Override PartName="/xl/comments1.xml" ContentType="{_CT}.comments+xml"/>
+<Override PartName="/xl/tables/table1.xml" ContentType="{_CT}.table+xml"/></Types>""",
+        "_rels/.rels": f'<Relationships xmlns="{_PKG_REL}"><Relationship Id="rId1" Type="{_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": f"""<workbook xmlns="{_MAIN}" xmlns:r="{_REL}"><sheets>
+<sheet name="一覧" sheetId="1" r:id="rId1"/><sheet name="並び" sheetId="2" r:id="rId2"/><sheet name="空" sheetId="3" state="hidden" r:id="rId3"/></sheets></workbook>""",
+        "xl/_rels/workbook.xml.rels": f"""<Relationships xmlns="{_PKG_REL}">
+<Relationship Id="rId1" Type="{_REL}/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="{_REL}/worksheet" Target="worksheets/sheet2.xml"/>
+<Relationship Id="rId3" Type="{_REL}/worksheet" Target="worksheets/sheet3.xml"/><Relationship Id="rId4" Type="{_REL}/styles" Target="styles.xml"/>
+<Relationship Id="rId5" Type="{_REL}/sharedStrings" Target="sharedStrings.xml"/></Relationships>""",
+        "xl/worksheets/sheet1.xml": sheet1,
+        "xl/worksheets/sheet2.xml": sheet2,
+        "xl/worksheets/sheet3.xml": sheet3,
+        "xl/worksheets/_rels/sheet1.xml.rels": f"""<Relationships xmlns="{_PKG_REL}">
+<Relationship Id="rId1" Type="{_REL}/hyperlink" Target="https://example.com/a" TargetMode="External"/>
+<Relationship Id="rId2" Type="{_REL}/comments" Target="../comments1.xml"/>
+<Relationship Id="rId3" Type="{_REL}/table" Target="../tables/table1.xml"/></Relationships>""",
+        "xl/comments1.xml": f"""<comments xmlns="{_MAIN}"><authors><author>a</author></authors><commentList>
+<comment ref="C3" authorId="0"><text><t>メモ</t></text></comment></commentList></comments>""",
+        "xl/tables/table1.xml": f"""<table xmlns="{_MAIN}" id="1" name="表1" displayName="表1" ref="A1:E5"><autoFilter ref="A1:E5"/>
+<tableColumns count="5"><tableColumn id="1" name="管理No"/><tableColumn id="2" name="発生日"/><tableColumn id="3" name="設備"/>
+<tableColumn id="4" name="列4"/><tableColumn id="5" name="列5"/></tableColumns></table>""",
+        "xl/styles.xml": styles,
+        "xl/sharedStrings.xml": shared,
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, text in files.items():
+            zf.writestr(name, '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + text)
+    return path
+
+
+def _normal_mode(path: Path):
+    """通常モード（load_workbook）で開いたときの SheetInfo と行（以前の ExcelSource と同じ手順）。"""
+    import warnings
+
+    from openpyxl import load_workbook
+    from openpyxl.utils import column_index_from_string
+
+    from tables.source import CellInfo, SheetInfo, SourceRow, cell_text
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wb = load_workbook(path, data_only=True)
+    infos, rows = [], {}
+    for ws in wb.worksheets:
+        max_row = max_col = 0
+        for (r, c), cell in ws._cells.items():
+            if cell.value is not None and cell.value != "":
+                max_row, max_col = max(max_row, r), max(max_col, c)
+        anchors = {}
+        for rng in ws.merged_cells.ranges:
+            for r in range(rng.min_row, rng.max_row + 1):
+                for c in range(rng.min_col, rng.max_col + 1):
+                    anchors[(r, c)] = (rng.min_row, rng.min_col)
+        hidden = set()
+        for key, dim in ws.column_dimensions.items():
+            if dim.hidden:
+                lo = dim.min or column_index_from_string(key)
+                hidden.update(range(lo, (dim.max or lo) + 1))
+        infos.append(SheetInfo(ws.title, ws.sheet_state != "visible", max_row, max_col, [t.ref for t in ws.tables.values()],
+                               wb.epoch == CALENDAR_MAC_1904, sorted(hidden), ws.freeze_panes, ws.auto_filter.ref or None))
+        out = []
+        for r in range(1, max_row + 1):
+            cells = []
+            for c in range(1, max_col + 1):
+                xl = ws._cells.get((r, c))
+                if xl is None:
+                    cells.append(CellInfo(None, "", merged_anchor=anchors.get((r, c))))
+                    continue
+                cells.append(CellInfo(xl.value, cell_text(xl.value), xl.number_format, bool(xl.font.b), bool(xl.font.strike),
+                                      xl.fill.fill_type not in (None, "none"), anchors.get((r, c))))
+            dim = ws.row_dimensions.get(r)
+            out.append(SourceRow(r, cells, bool(dim is not None and dim.hidden)))
+        rows[ws.title] = out
+    return infos, rows
+
+
+def test_excel_streaming_reader_matches_normal_mode(tmp_path):
+    path = _raw_workbook(tmp_path / "raw.xlsx")
+    infos, expected = _normal_mode(path)
+    src = ExcelSource(path)
+    assert src.sheets() == infos
+    for info in infos:
+        assert list(src.rows(info.name)) == expected[info.name], info.name
+        assert list(src.rows(info.name, 3, 4)) == expected[info.name][2:6], info.name
+    # 手で組んだ形がねらいどおり読めていること
+    first = {r.index: r for r in expected["一覧"]}
+    assert infos[0].max_col == 11 and infos[0].max_row == 12  # リンク先の値が入った K9・B12 まで
+    assert first[9].cells[10].value == "https://example.com/a" and first[12].cells[1].value == "Sheet2!A1"
+    assert first[2].cells[0].value == "" and first[1].cells[3].value == "リッチ 文字"
+    assert first[7].cells[1].value is None and first[7].cells[1].merged_anchor == (7, 1)  # 結合範囲の値は消える
+    assert first[3].cells[2].number_format == "General" and first[3].cells[1].number_format is None  # コメントのセル
+    assert first[4].hidden and not first[5].hidden and first[10].hidden
+    assert infos[0].table_ranges == ["A1:E5"] and infos[0].hidden_columns == [2, 3] and infos[0].freeze_panes == "A2"
+    assert [r.cells[0].value for r in expected["並び"]][:3] == [None, 2, 8] and infos[2].hidden
+    # 一度数えたシートの大きさを渡すと数え直さずに同じ結果
+    again = ExcelSource(path, options={"sheet_stats": src.sheet_stats()})
+    assert again.sheets() == infos and list(again.rows("一覧")) == expected["一覧"]
+
+
+@pytest.mark.samples
+def test_sample_excel_streaming_reader_matches_normal_mode():
+    for name in ("T5_是正処置管理台帳_2026上期.xlsx", "T3_月別停止時間集計.xlsx"):
+        path = _sample(name)
+        infos, expected = _normal_mode(path)
+        src = ExcelSource(path)
+        assert src.sheets() == infos
+        for info in infos:
+            assert list(src.rows(info.name)) == expected[info.name], (name, info.name)

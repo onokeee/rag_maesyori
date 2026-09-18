@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -17,14 +17,8 @@ from pattern.model import FieldDef, PatternDef, SheetDef
 
 BUSY_TIMEOUT_MS = 5000
 
-# 帳票の状態（導出値）→ 画面の語
-DOCUMENT_STATES = {
-    "unread": "読み取り前",
-    "reviewing": "確認中",
-    "confirmed": "確定済み",
-    "modified": "修正中",
-}
-
+# 帳票の状態（導出値）: unread=読み取り前 / reviewing=確認中 / confirmed=確定済み / modified=修正中
+# 画面に出す語は templates/components/_ui.html の STATE_LABELS が持つ
 _STATE_SQL = """CASE
     WHEN d.data_json IS NULL THEN 'unread'
     WHEN d.confirmed_json IS NULL THEN 'reviewing'
@@ -270,8 +264,33 @@ def _m3_tables(conn: sqlite3.Connection) -> None:
     _run_script(conn, _SCHEMA_TABLES)
 
 
+def _m4_form_batches(conn: sqlite3.Connection) -> None:
+    """帳票のまとめ取り込み（1回の選択で複数ファイル）。同じ batch_id の帳票を順に確認して zip で渡す。"""
+    _add_column(conn, "documents", "batch_id", "TEXT NOT NULL DEFAULT ''")
+    _add_column(conn, "documents", "batch_order", "INTEGER NOT NULL DEFAULT 0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_batch ON documents(batch_id)")
+
+
+# 使っていない表（8.1 で外した機能のもの）。取り込みを指す列が無く purge の探索に乗らないので、
+# 行が入れば永久に残ってしまう。作らない機能の表は置かない（design.md 3.3）
+_UNUSED_TABLES = ("table_outputs", "table_downloads", "table_template_samples", "alias_entries")
+
+
+def _m5_purge_scope(conn: sqlite3.Connection) -> None:
+    """AI整形の控えを「取り込み単位」で消せるようにし、使っていない表を落とす。
+
+    ai_items は (設定, 段, 行) で一意なので、設定単位で消すと同じ設定で作業中の別の取り込みの結果まで
+    消えていた（課金済みの応答キャッシュも道連れ）。import_id を持たせて purge の探索（IMPORT_REF_COLUMNS）に乗せる。
+    """
+    _add_column(conn, "ai_items", "import_id", "INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_items_import ON ai_items(import_id)")
+    for table in _UNUSED_TABLES:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables]
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
+                                                          _m5_purge_scope]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -303,6 +322,10 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode = WAL")
+    # 消した行の中身をその場でゼロ埋めする（design.md 3.3）。これが無いと、行を消しても解放された
+    # ページに帳票の値・設備名・人名が平文で残り、DBファイル（と app.db-wal）から読めてしまう。
+    # VACUUM は他の接続があると失敗することがあるので、消し方そのものを安全側にしておく。
+    conn.execute("PRAGMA secure_delete = ON")
     return conn
 
 
@@ -388,7 +411,17 @@ def _field_def(row: dict) -> FieldDef:
     # unit / rag_output は WP-forms が FieldDef に追加する。未追加でも属性として持たせる
     fd.unit = row.get("unit") or ""
     fd.rag_output = row.get("rag_output") or "show"
+    fd.table_columns = list(json.loads(row["extraction_rule"]).get("columns") or [])
     return fd
+
+
+def _extraction_rule(f: FieldDef) -> dict:
+    """pattern_fields.extraction_rule の JSON。明細表は列見出しも持つ。"""
+    rule = {"direction": f.direction}
+    columns = getattr(f, "table_columns", None)
+    if f.data_type == "table" and columns:
+        rule["columns"] = list(columns)
+    return rule
 
 
 def load_pattern(pattern_id: int | None) -> PatternDef | None:
@@ -443,7 +476,7 @@ def save_pattern(pattern: PatternDef, status: str) -> None:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (pattern.id, i, f.field_name, f.display_name, json.dumps(f.candidates, ensure_ascii=False),
-                 int(f.required), f.data_type, json.dumps({"direction": f.direction}),
+                 int(f.required), f.data_type, json.dumps(_extraction_rule(f), ensure_ascii=False),
                  getattr(f, "unit", "") or "", getattr(f, "rag_output", "show") or "show")
                 for i, f in enumerate(pattern.fields)
             ],
@@ -487,10 +520,12 @@ def delete_sample(sample_id: int) -> None:
 # 状態は導出する: data_json なし→unread、confirmed_json なし→reviewing、
 # confirmed_json != data_json→modified、それ以外→confirmed
 
-def create_document(file_name: str, file_hash: str, stored_path: str, pattern_id: int | None = None) -> int:
+def create_document(file_name: str, file_hash: str, stored_path: str, pattern_id: int | None = None,
+                    batch_id: str = "", batch_order: int = 0) -> int:
     return _exec(
-        "INSERT INTO documents (file_name, file_hash, stored_path, pattern_id, created_at) VALUES (?, ?, ?, ?, ?)",
-        (file_name, file_hash, stored_path, pattern_id, now()),
+        "INSERT INTO documents (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, now()),
     )
 
 
@@ -503,48 +538,28 @@ def get_document(doc_id: int) -> dict | None:
     """, (doc_id,))
 
 
-def _like(text: str) -> str:
-    return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-
-
-def _day(value, shift: int = 0) -> str:
-    day = value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
-    if isinstance(day, datetime):
-        day = day.date()
-    return (day + timedelta(days=shift)).isoformat()
-
-
-def list_documents(state: str | None = None, pattern_id: int | None = None, q: str | None = None,
-                   date_from=None, date_to=None, limit: int = 50, offset: int = 0) -> tuple[list[dict], int]:
-    """取り込み履歴（帳票）。(行, 条件に合う全件数) を返す。日付は取り込み日（created_at）で両端を含む。"""
-    where, args = [], []
-    if state:
-        states = [state] if isinstance(state, str) else list(state)
-        where.append(f"({_STATE_SQL}) IN ({', '.join('?' for _ in states)})")
-        args += states
-    if pattern_id:
-        where.append("d.pattern_id = ?")
-        args.append(pattern_id)
-    if q and q.strip():
-        for word in q.split():
-            where.append("(d.file_name LIKE ? ESCAPE '\\' OR d.title LIKE ? ESCAPE '\\')")
-            args += [_like(word), _like(word)]
-    if date_from:
-        where.append("d.created_at >= ?")
-        args.append(_day(date_from))
-    if date_to:
-        where.append("d.created_at < ?")
-        args.append(_day(date_to, 1))
-    clause = ("WHERE " + " AND ".join(where)) if where else ""
-    total = get_db().execute(f"SELECT COUNT(*) FROM documents d {clause}", args).fetchone()[0]
-    rows = _all(f"""
-        SELECT d.id, d.file_name, d.file_hash, d.stored_path, d.pattern_id, d.title,
+_LIST_COLUMNS = f"""
+        SELECT d.id, d.file_name, d.file_hash, d.stored_path, d.pattern_id, d.title, d.batch_id, d.batch_order,
                d.created_at, d.confirmed_at, {_STATE_SQL} AS state,
                p.name AS pattern_name, p.version AS pattern_version
-        FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id
-        {clause} ORDER BY d.id DESC LIMIT ? OFFSET ?
-    """, (*args, limit, offset))
-    return rows, total
+        FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id"""
+
+
+def list_documents(state: str | None = None, limit: int = 50) -> list[dict]:
+    """ホームの一覧（作業中・ダウンロード待ち）。state は1つでも複数でも指定できる。"""
+    where, args = "", []
+    if state:
+        states = [state] if isinstance(state, str) else list(state)
+        where = f"WHERE ({_STATE_SQL}) IN ({', '.join('?' for _ in states)})"
+        args += states
+    return _all(f"{_LIST_COLUMNS} {where} ORDER BY d.id DESC LIMIT ?", (*args, limit))
+
+
+def list_batch_documents(batch_id: str) -> list[dict]:
+    """まとめ取り込み（1回の選択で複数ファイル）の帳票を、選んだ順に返す。"""
+    if not batch_id:
+        return []
+    return _all(f"{_LIST_COLUMNS} WHERE d.batch_id = ? ORDER BY d.batch_order, d.id", (batch_id,))
 
 
 def list_confirmed_documents(ids: list[int] | None = None) -> list[dict]:
@@ -613,5 +628,4 @@ def update_document(doc_id: int, **columns) -> None:
     _exec(f"UPDATE documents SET {assignments} WHERE id = ?", (*columns.values(), doc_id))
 
 
-def delete_document(doc_id: int) -> None:
-    _exec("DELETE FROM documents WHERE id = ?", (doc_id,))
+# 帳票を消すのは core/purge.py（元のファイルと DB の行をまとめて消す）

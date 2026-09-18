@@ -44,9 +44,11 @@
         tr.classList.toggle("is-picked", info.header_rows.includes(Number(tr.dataset.row)) || Number(tr.dataset.row) === info.data_end);
       });
       layoutPage.querySelector("[data-kind]").textContent = info.table_kind_label;
-      layoutPage.querySelector("[data-range]").textContent = `${info.data_start}〜${info.data_end}行目`;
+      // 見出し行が見つからないと data_end < data_start になる（存在しない行番号を出さない）
+      layoutPage.querySelector("[data-range]").textContent =
+        info.data_end < info.data_start ? "データの行が見つかりません" : `${info.data_start}〜${info.data_end}行目`;
       layoutPage.querySelector("[data-counts]").textContent =
-        Object.entries(info.counts).map(([k, v]) => `${k} ${v}`).join("／");
+        Object.entries(info.counts).map(([k, v]) => `${k} ${v}行`).join("／");
       layoutPage.querySelector("[data-headers]").textContent = info.headers.join("、");
       const warnings = layoutPage.querySelector("[data-warnings]");
       warnings.replaceChildren(...info.warnings.map((w) => el("li", { text: w })));
@@ -175,8 +177,12 @@
       box.textContent = "分割しています…";
       try {
         const data = await postJson(aiPage.dataset.splitUrl, { row_key: rowKey });
+        // AI接続が未設定のときは「送る」だけだと今この操作で送ったように読めるので、送られないことを書く
+        const routeText = data.route === "ai"
+          ? (data.ai_ready === false ? "送る（AI接続の設定後。今は送っていません）" : "送る")
+          : `送らない（${data.reason}）`;
         const parts = [
-          el("p", { class: "hint", text: `区切り ${data.segments.length}件（オレンジは推定）。AIに送るか: ${data.route === "ai" ? "送る" : `送らない（${data.reason}）`}` }),
+          el("p", { class: "hint", text: `区切り ${data.segments.length}件（オレンジは推定）。AIに送るか: ${routeText}` }),
           segmentList(data),
         ];
         if (data.notes.length) parts.push(el("ul", { class: "list-plain warn" }, ...data.notes.map((n) => el("li", { text: n }))));

@@ -79,27 +79,34 @@ def upsert_item(template_id: int, stage_id: str, row_key: str, *, status: str, t
                 source_hash: str | None = None, context_hash: str | None = None, segments_hash: str | None = None,
                 cache_key: str | None = None, result: dict | None = None, checks: dict | None = None,
                 attempts: int | None = None, error: str | None = None, job_id: int | None = None,
-                conn=None, commit: bool = True) -> None:
-    """行×段の状態を保存する。override（人の判断）は変えない。"""
+                import_id: int | None = None, conn=None, commit: bool = True) -> None:
+    """行×段の状態を保存する。override（人の判断）は変えない。
+
+    import_id は「どの取り込みの分か」。ダウンロードのときに、その取り込みの分だけを消すために持つ
+    （design.md 3.3。同じ設定で作業中の別の取り込みの結果を巻き添えにしない）。
+    """
     if status not in STATUSES:
         raise ValueError(f"不明な状態です: {status}")
 
     def run(c):
         c.execute(
             """INSERT INTO ai_items (template_id, stage_id, row_key, template_version_id, source_hash, context_hash,
-                   segments_hash, cache_key, status, result_json, checks_json, attempts, error, job_id, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   segments_hash, cache_key, status, result_json, checks_json, attempts, error, job_id, import_id,
+                   updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT (template_id, stage_id, row_key) DO UPDATE SET
                    template_version_id = excluded.template_version_id, source_hash = excluded.source_hash,
                    context_hash = excluded.context_hash, segments_hash = excluded.segments_hash,
                    cache_key = excluded.cache_key, status = excluded.status, result_json = excluded.result_json,
                    checks_json = excluded.checks_json,
                    attempts = CASE WHEN ? IS NULL THEN ai_items.attempts ELSE excluded.attempts END,
-                   error = excluded.error, job_id = excluded.job_id, updated_at = excluded.updated_at""",
+                   error = excluded.error, job_id = excluded.job_id,
+                   import_id = COALESCE(excluded.import_id, ai_items.import_id),
+                   updated_at = excluded.updated_at""",
             (template_id, stage_id, row_key, template_version_id, source_hash, context_hash, segments_hash, cache_key,
              status, json.dumps(result, ensure_ascii=False) if result is not None else None,
              json.dumps(checks, ensure_ascii=False) if checks is not None else None, attempts or 0, error, job_id,
-             database.now(), attempts),
+             import_id, database.now(), attempts),
         )
         if commit:
             c.commit()

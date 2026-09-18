@@ -26,7 +26,10 @@
       <div class="field">
         <span>Markdown の出し方</span>
         <label class="check"><input type="checkbox" data-setting="omit_person" {{ 'checked' if settings.omit_person }}> 人名の列を出さない</label>
-        <label class="check"><input type="checkbox" data-setting="lightrag_hint" {{ 'checked' if settings.lightrag_hint }}> ファイル名に LightRAG の分割ヒントを付ける</label>
+        <label class="check"><input type="checkbox" data-setting="lightrag_hint" {{ 'checked' if settings.lightrag_hint }}> ファイル名に LightRAG の分割ヒントを付ける（推奨・既定はオン）</label>
+        <small>新しい取り込み設定では最初からオンです。外すと、サーバーの設定しだいで記録が途中で切られます。<a href="{{ url_for('settings.lightrag') }}#filename-hint" target="_blank" rel="noopener">分割ヒントとは？</a></small>
+        <label class="check"><input type="checkbox" data-setting="dedupe_timeline" {{ 'checked' if settings.dedupe_timeline }}> 対応の時系列から、他の列と同じ内容の文を省く</label>
+        <small>外すと、原因・処置などの列と同じ文も対応の時系列にそのまま出します（既定はオン）。</small>
       </div>
     </div>
   {% endcall %}
@@ -49,7 +52,7 @@
           <td><strong>{{ r.header }}</strong>{% if r.matched_by %}<br><small class="muted">候補: {{ r.matched_by }}</small>{% endif %}</td>
           {% if show_stats %}
           <td class="examples">{{ r.examples | join('\n') }}</td>
-          <td class="nowrap"><small>{% if r.type_error_rate %}<span class="est">型エラー {{ (r.type_error_rate * 100) | round(1) }}%</span><br>{% endif %}空欄 {{ (r.blank_rate * 100) | round(0) | int }}%{% if r.inferred_type and r.inferred_type != r.type %}<br>値は「{{ r.inferred_type }}」らしい{% endif %}</small></td>
+          <td class="nowrap"><small>{% if r.type_error_rate %}<span class="est">型エラー {{ (r.type_error_rate * 100) | round(1) }}%</span><br>{% endif %}空欄 {{ (r.blank_rate * 100) | round(0) | int }}%{% if r.inferred_type and r.inferred_type != r.type %}<br>値は「{{ r.inferred_type_label or r.inferred_type }}」らしい{% endif %}</small></td>
           {% endif %}
           <td><input type="text" data-field="key" value="{{ r.key }}" placeholder="自動" aria-label="キー"></td>
           <td><input type="text" data-field="display" value="{{ r.display }}" aria-label="表示名"></td>
@@ -58,7 +61,8 @@
           <td><input type="text" data-field="unit" value="{{ r.unit }}" style="min-width:4rem" aria-label="単位"></td>
           <td><select data-field="role" aria-label="役割">{% for v, label in roles %}<option value="{{ v }}" {{ 'selected' if v == r.role }}>{{ label }}</option>{% endfor %}</select></td>
           <td class="center"><input type="checkbox" data-field="fill_down_blank" {{ 'checked' if r.fill_down_blank }} aria-label="空欄は上と同じ"></td>
-          <td><select data-field="md" aria-label="mdでの扱い">{% for v, label in md_modes %}<option value="{{ v }}" {{ 'selected' if v == r.md }}>{{ label }}</option>{% endfor %}</select></td>
+          <td><select data-field="md" aria-label="mdでの扱い">{% for v, label in md_modes %}<option value="{{ v }}" {{ 'selected' if v == r.md }}>{{ label }}</option>{% endfor %}</select>
+            {%- if r.md == 'omit' and r.auto_omit %}<br><small class="muted">値がコードだけなので、はじめから「出さない」にしています</small>{% endif %}</td>
           <td class="center"><input type="checkbox" data-field="ai" {{ 'checked' if r.ai }} aria-label="AI整形の対象"></td>
         </tr>
       {% endfor %}

@@ -6,19 +6,24 @@
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 from core.mdtext import escape_md_line, estimate_tokens, join_blocks, md_bullet
-from core.naming import LIGHTRAG_HINT_RECORDS, md_filename
+from core.naming import LIGHTRAG_HINT_RECORDS, hint_chunk_tokens, md_filename
 from tables.spec import TableSpec
 from tables.summaries import (
-    category_column, dataset_counts, entity_columns, entity_display, entity_fiscal_year_summaries, fmt_measure, fmt_number,
-    is_month, measure_columns, month_first_day, month_label, month_last_day, month_summaries, unit_label,
+    category_column, dataset_counts, entity_columns, entity_display, entity_fiscal_year_summaries, entity_value,
+    fmt_measure, fmt_number, is_month, measure_columns, month_first_day, month_label, month_last_day, month_summaries,
+    unit_label,
 )
 
-RECORD_TOKEN_BUDGET = 1500
+# 記録1件の上限。LightRAG のヒントの chunk_ts から余裕（100トークン）を引く＝1件が1チャンクに収まる大きさ
+RECORD_TOKEN_MARGIN = 100
+RECORD_TOKEN_BUDGET = (hint_chunk_tokens() or 1500) - RECORD_TOKEN_MARGIN
 TITLE_TEXT_CHARS = 40
 
 
@@ -184,6 +189,44 @@ def _is_hidden(col, spec: TableSpec) -> bool:
     return col.role == "person" and bool((spec.markdown or {}).get("omit_person", True))
 
 
+_BRACKETS = {"（": "）", "(": ")", "「": "」", "『": "』", "【": "】", "［": "］", "[": "]", "〔": "〕", "《": "》",
+             "〈": "〉", "｛": "｝", "{": "}", "“": "”"}
+_TITLE_TAG = re.compile(r"^[【\[][^】\]]{0,12}[】\]][ 　]*|^■?[ 　]*発生(?:日時)?[ 　]*[:：][ 　]*")
+# 行頭の「R05.04.01 11:45(休日)、」のような日付・時刻（見出しの末尾に日付が入るので、現象の字数を使わない）
+_TITLE_LEAD_DATE = re.compile(
+    r"^(?:(?:[RHSrhs][ 　]?\d{1,2}|\d{2,4})[./年\-][ 　]?\d{1,2}[./月\-][ 　]?\d{1,2}日?"
+    r"|\d{1,2}[:：]\d{2}(?:[:：]\d{2})?"
+    r"|[（(][^）)]{0,10}[)）]"
+    r"|[\s頃、,。.・~〜\-]+)+")
+
+
+def _clip_title_text(text: str, limit: int) -> str:
+    """見出し用に切り詰める。閉じない括弧の前で切り、切ったことが分かるように「…」を付ける。"""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[:limit]
+    opened: list[int] = []
+    for i, ch in enumerate(cut):
+        if ch in _BRACKETS:
+            opened.append(i)
+        elif opened and ch == _BRACKETS[cut[opened[-1]]]:
+            opened.pop()
+    if opened:
+        cut = cut[:opened[0]]
+    cut = cut.rstrip().rstrip("、,。.")
+    return (cut or text[:limit].rstrip()) + "…"
+
+
+def _title_text_line(raw) -> str:
+    """見出しに使う文章。1行目の「【発生】」「発生日時:」などの札と、それに続く日付・時刻を外した残り。
+
+    「【発生】R05.04.01 11:45(休日)」のように日付だけの1行目は空になる（見出しの日付と同じものを繰り返さない）。
+    """
+    first = _one_line(str(raw).split("\n")[0])
+    body = _TITLE_TAG.sub("", first).strip()
+    return _TITLE_LEAD_DATE.sub("", body).strip()
+
+
 def record_title(values: dict, spec: TableSpec) -> str:
     """見出し: 【管理No】設備名（設備番号）現象の先頭40字｜日付"""
     md = spec.markdown or {}
@@ -198,10 +241,10 @@ def record_title(values: dict, spec: TableSpec) -> str:
                 text = entity_display(values, spec)[2]
             else:
                 raw = values.get(key)
-                text = _one_line(str(raw).split("\n")[0]) if raw not in (None, "") else ""
+                text = _title_text_line(raw) if raw not in (None, "") else ""
                 limit = int(length) if length.isdigit() else TITLE_TEXT_CHARS
                 if col is not None and col.type in ("text", "string") and len(text) > limit:
-                    text = text[:limit]
+                    text = _clip_title_text(text, limit)
                 if col is not None and col.role == "key" and text:
                     text = f"【{text}】"
             if text and text not in pieces:
@@ -215,8 +258,9 @@ def record_title(values: dict, spec: TableSpec) -> str:
             pieces.append(display)
         text_col = spec.column("symptom") or spec.first_role("text")
         if text_col is not None and values.get(text_col.key):
-            first = _one_line(str(values[text_col.key]).split("\n")[0])
-            pieces.append(first[:TITLE_TEXT_CHARS])
+            first = _title_text_line(values[text_col.key])
+            if first:
+                pieces.append(_clip_title_text(first, TITLE_TEXT_CHARS))
     title = ""
     for piece in pieces:
         if title and not title.endswith(("】", "）")):
@@ -229,7 +273,21 @@ def record_title(values: dict, spec: TableSpec) -> str:
 
 
 def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None) -> list[str]:
-    """1件分の行（見出し＋箇条書き）。空行は入れない。"""
+    """1件分の行（見出し＋箇条書き）。空行は入れない。
+
+    推定トークンが RECORD_TOKEN_BUDGET を超える場合だけ、時系列を切って収める（要点と時系列の合計で判定する）。
+    """
+    lines, timeline_tokens = _record_lines(record, spec, ai_results, people, None)
+    if timeline_tokens:
+        total = estimate_tokens("\n".join(lines))
+        if total > RECORD_TOKEN_BUDGET:
+            budget = RECORD_TOKEN_BUDGET - (total - timeline_tokens)
+            lines, _ = _record_lines(record, spec, ai_results, people, max(0, budget))
+    return lines
+
+
+def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people,
+                  timeline_budget: int | None) -> tuple[list[str], int]:
     values = record.get("values", {}) or {}
     key = record.get("key", "")
     lines = [f"## {record_title(values, spec)}"]
@@ -238,6 +296,7 @@ def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, 
     date_key = spec.date_key
     log_key = spec.log_stage.column if spec.log_stage else None
     entity_done = False
+    timeline_tokens = 0
     status, result = _ai_item(ai_results, key)
     for col in spec.columns:
         if _is_hidden(col, spec):
@@ -256,9 +315,16 @@ def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, 
                 if not _is_hidden(c, spec):
                     lines += md_bullet(c.display, format_value(c, values.get(c.key)))
             continue
+        if entity is not None and label is None and col.key == entity.key:
+            # 設備名の列がない台帳。見出し・集計と同じ「設備名（設備番号）」の書き方にそろえる（列の名前はそのまま）
+            _eid, name, display = entity_display(values, spec)
+            if name and display:
+                lines += md_bullet(col.display, display)
+                continue
         value = values.get(col.key)
         if col.key == log_key:
-            lines += _log_lines(col, values, spec, status, result, people)
+            log, timeline_tokens = _log_lines(col, values, spec, status, result, people, timeline_budget)
+            lines += log
             continue
         if value in (None, ""):
             continue
@@ -276,14 +342,86 @@ def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, 
                 lines += md_bullet(f"{target.display if target else stage.id}（AI分類）", _one_line(v))
     source = record.get("source", {}) or {}
     lines += md_bullet("出典", _source_text(values, spec, source))
-    return lines
+    return lines, timeline_tokens
 
 
-def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people) -> list[str]:
+# ---- 時系列（他の列と重複する文を省く。取り込み設定の markdown.dedupe_timeline で切り替える） ----------
+
+_SENTENCE_END = re.compile(r"(?<=[。、])")
+_LEADING_NO = re.compile(r"^\s*\d{1,3}\s*[.)．）、]\s*")
+_DUPLICATE_MIN_CHARS = 6  # これより短い文は偶然一致しうるので省かない
+
+
+def _norm_sentence(text: str) -> str:
+    """文の比較用。行頭の番号・空白・区切り記号を落として NFKC。"""
+    s = unicodedata.normalize("NFKC", _LEADING_NO.sub("", str(text or "")))
+    return "".join(s.split()).strip("。、.,:：;；")
+
+
+def _column_sentences(values: dict, spec: TableSpec, log_key: str) -> dict[str, str]:
+    """同じ記録の他の列（原因・処置内容・使用部品など）にある文 → その列の表示名。"""
+    out: dict[str, str] = {}
+    for col in spec.columns:
+        if col.key == log_key or _is_hidden(col, spec) or col.type not in ("text", "string"):
+            continue
+        raw = values.get(col.key)
+        if raw in (None, ""):
+            continue
+        for piece in re.split(r"[。、\n]+", str(raw)):
+            key = _norm_sentence(piece)
+            if len(key) >= _DUPLICATE_MIN_CHARS:
+                out.setdefault(key, col.display)
+    return out
+
+
+def _dedupe_parse(parse, duplicates: dict[str, str]):
+    """時系列の本文から、同じ記録の他の列と同じ文を省く（全部同じなら「（処置内容と同じ）」に縮める）。"""
+    if not duplicates or parse.kind != "log":
+        return parse
+    changed = False
+    segments = []
+    for seg in parse.segments:
+        body = seg.body
+        if not body:
+            segments.append(seg)
+            continue
+        kept, hit = [], []
+        for piece in _SENTENCE_END.split(body):
+            name = duplicates.get(_norm_sentence(piece))
+            if name:
+                hit.append(name)
+                # 省いた文が「。」で終わっていたら、その「。」は残す（前後の文がつながって元にない1文になるため）
+                prev = kept[-1].rstrip() if kept else ""
+                if piece.rstrip().endswith("。") and prev and not prev.endswith("。"):
+                    kept[-1] = prev.rstrip("、") + "。"
+            else:
+                kept.append(piece)
+        if not hit:
+            segments.append(seg)
+            continue
+        text = "".join(kept).strip().strip("、")
+        segments.append(replace(seg, body=text or f"（{hit[0]}と同じ）"))
+        changed = True
+    return replace(parse, segments=segments) if changed else parse
+
+
+def _fit_timeline(timeline: list[str], limit: int, budget: int) -> list[str]:
+    """時系列を、設定の件数と残りの推定トークンに収める（決定的）。1件は必ず残す。"""
+    costs = [estimate_tokens(line) + 1 for line in timeline]  # +1 は2字下げと改行の分
+    n = min(len(timeline), max(1, limit))
+    while n > 1 and sum(costs[:n]) + estimate_tokens(f"（以降{len(timeline) - n}件は管理用の正規化CSVに収録）") > budget:
+        n -= 1
+    if n >= len(timeline):
+        return timeline
+    return timeline[:n] + [f"（以降{len(timeline) - n}件は管理用の正規化CSVに収録）"]
+
+
+def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people,
+               timeline_budget: int | None) -> tuple[list[str], int]:
     stage = spec.log_stage
     parse = parse_log_cell(spec, values, people)
     if parse is None or parse.kind == "empty":
-        return []
+        return [], 0
     out: list[str] = []
     types: dict[str, list[str]] = {}
     if status == "ok" and result:
@@ -295,19 +433,19 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people)
     entity_label = entity_display(values, spec)[1] or entity_display(values, spec)[2]
     from logproc import render_timeline
 
+    if (spec.markdown or {}).get("dedupe_timeline", True):
+        parse = _dedupe_parse(parse, _column_sentences(values, spec, col.key))
     timeline = render_timeline(parse, entity_label, types=types or None, glossary=stage.glossary or None)
     if parse.kind == "header_cell":
         out += md_bullet(f"{col.display}（見出しごと）", timeline)
-        return out
+        return out, 0
     if not timeline:
-        return out
-    limit = max(1, int(stage.max_timeline_entries or 20))
-    if estimate_tokens("\n".join(timeline)) > RECORD_TOKEN_BUDGET and len(timeline) > limit:
-        rest = len(timeline) - limit
-        timeline = timeline[:limit] + [f"（以降{rest}件は管理用の正規化CSVに収録）"]
+        return out, 0
+    if timeline_budget is not None:
+        timeline = _fit_timeline(timeline, max(1, int(stage.max_timeline_entries or 20)), timeline_budget)
     out.append("- 対応の時系列:")
     out += [f"  {line}" for line in timeline]
-    return out
+    return out, estimate_tokens("\n".join(timeline))
 
 
 def _source_text(values: dict, spec: TableSpec, source: dict) -> str:
@@ -409,7 +547,7 @@ def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names:
         values = rec.get("values", {}) or {}
         d = str(values.get(spec.date_key) or "")
         month = d[:7] if is_month(d) else ""
-        eid = str(values.get(entity.key) or "") if (by_entity and entity is not None) else ""
+        eid = entity_value(values, spec)[0] if (by_entity and entity is not None) else ""
         groups[(eid, month) if by_entity else ("", month)].append(rec)
     people = people_index_for(spec, ordered) if spec.log_stage else None
     hint = _hint(spec)
@@ -556,6 +694,15 @@ def render_dataset_card(spec: TableSpec, records: list[dict], coverage: dict) ->
         if col.unit and col.type == "number":
             text += f"（単位: {unit_label(col.unit)}）"
         columns += md_bullet(col.display, text)
+    # 出していない列も名前だけは書く（コードのままでは意味が分からない列を既定で外しているため）。理由が違うので人名の列は分ける
+    people_cols = [col.display for col in spec.columns if col.role == "person" and _is_hidden(col, spec)]
+    omitted = [col.display for col in spec.columns if col.md == "omit" and col.role != "person"]
+    if omitted:
+        columns.append(f"- 記録に出していない列: {'、'.join(omitted)}"
+                       "（意味の分からないコード値・管理用の列などのため。元の値は管理用の正規化CSVにあります）")
+    if people_cols:
+        columns.append(f"- 記録に出していない列（人名）: {'、'.join(people_cols)}"
+                       "（人名のため出していません。取り込み設定で出すようにできます。元の値は管理用の正規化CSVにあります）")
 
     questions = ["## 答えられる質問の例"]
     no_questions = ["## 答えられない質問の例"]

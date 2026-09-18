@@ -55,7 +55,7 @@
         {% for r in results %}
           {% set f = r.fields[fd.field_name] %}
           <td class="{{ 'missing' if f.value in (none, '') and fd.required else ('empty-value' if f.value in (none, '')) }}">
-            {% if f.value in (none, '') %}<span class="muted">—（見つかりません）</span>{% else %}<span class="pre">{{ f.value | string | truncate(80) }}</span>{% if f.unit %} {{ f.unit }}{% endif %}{% endif %}
+            {% if f.value in (none, '') %}<span class="muted">—（見つかりません）</span>{% else %}<span class="pre">{{ f.value | field_text | truncate(160 if f.data_type == 'table' else 80) }}</span>{% if f.unit %} {{ f.unit }}{% endif %}{% endif %}
             {% if f.value_cell %}<small class="muted">{{ f.value_cell }}</small>{% endif %}
             {% if f.warning %}<div class="warn">{{ f.warning }}</div>{% endif %}
           </td>

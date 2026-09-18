@@ -6,8 +6,12 @@
 {{ ui.steps(steps, step) }}
 <div class="page-head">
   <div>
-    <h1>内容とファイルの確認</h1>
+    <h1>内容とファイルの確認{% if confirmed %} {{ ui.badge("confirmed") }}{% endif %}</h1>
+    {% if confirmed %}
+    <p class="page-lead">ファイル: {{ imp.file_name }}／取り込み設定: {{ spec.name }}。この取り込みは確定済みです。中身を見直すだけならこのまま閉じてかまいません。</p>
+    {% else %}
     <p class="page-lead">ファイル: {{ imp.file_name }}／取り込み設定: {{ spec.name }}。読み込んだ件数と問題を確かめ、作られる Markdown の中身を見てから確定します。</p>
+    {% endif %}
   </div>
   <div class="btn-row">
     {% if spec.log_stage %}<a class="btn ghost" href="{{ url_for('tables.ai', import_id=imp.id) }}">AI整形に戻る</a>{% endif %}
@@ -53,6 +57,13 @@
   <p class="muted">問題はありません。</p>
   {% endif %}
 {% endcall %}
+
+{% if not spec.markdown.get('lightrag_hint') %}
+<div class="notice" role="note">ファイル名に LightRAG の分割ヒントを付けていません。LightRAG 側で LIGHTRAG_PARSER を設定していない場合、
+  記録が固定の幅で途中から切られます。サーバーの設定を確かめたうえで進んでください。
+  <a href="{{ url_for('settings.lightrag') }}#filename-hint" target="_blank" rel="noopener">分割ヒントとは？</a>
+  （付けるときは［列の対応づけを直す］の「ファイル名に LightRAG の分割ヒントを付ける」をチェックします）</div>
+{% endif %}
 
 {% call ui.card("Markdownファイル", "ファイル名をクリックすると中身を表示します。") %}
 <div class="split" data-preview-page data-file-url="{{ url_for('tables.preview_file', import_id=imp.id) }}">
@@ -101,10 +112,12 @@
   {% endif %}
 {% endcall %}
 
-<form method="post" action="{{ url_for('tables.confirm', import_id=imp.id) }}" class="form-actions">
+<p class="notice" role="note">{{ delete_note }}</p>
+<form method="post" action="{{ url_for('tables.confirm', import_id=imp.id) }}" class="form-actions"
+      {% if confirmed %}data-confirm="この取り込みは確定済みです。Markdownを作り直しますか？（作成済みのファイルは置き換わります）" data-confirm-ok="作り直す"{% endif %}>
   {% if blocking %}<span class="warn">エラーが残っているため確定できません。</span>{% endif %}
   {% if confirmed %}<a class="btn ghost" href="{{ url_for('tables.done', import_id=imp.id) }}">作成済みのファイルを見る</a>{% endif %}
-  <button type="submit" class="btn primary" {{ 'disabled' if blocking }}>確定してMarkdownを作成</button>
+  <button type="submit" class="btn primary" {{ 'disabled' if blocking }}>{{ "確定し直してMarkdownを作り直す" if confirmed else "確定してMarkdownを作成" }}</button>
 </form>
 {% endblock %}
 {% block scripts %}<script src="{{ url_for('static', filename='tables.js') }}"></script>{% endblock %}

@@ -10,6 +10,7 @@ DATA_TYPES = {
     "text": "文章（複数行）",
     "date": "日付",
     "number": "数値",
+    "table": "明細表（列見出しと行）",
 }
 
 DIRECTIONS = {
@@ -19,9 +20,9 @@ DIRECTIONS = {
     "same_cell": "同じセル（設備番号：EQ-001）",
 }
 
+# 画像の扱い。今は枚数だけ Markdown に書く（"vision" は未実装。DB に残っている古い値は読める）
 IMAGE_PROCESSING = {
-    "none": "解析しない（元のファイルへのリンクのみ）",
-    "vision": "Visionで解析する（未実装）",
+    "none": "読み取らない（枚数だけ Markdown に書きます）",
 }
 
 # Markdown に出すかどうか
@@ -52,6 +53,8 @@ class FieldDef:
     direction: str = "auto"
     unit: str = ""
     rag_output: str = "show"
+    # 明細表: 見本で見た列見出し。見出し（アンカー）の書き方が違う帳票でも、列見出しの並びが似た表を探すのに使う
+    table_columns: list[str] = field(default_factory=list)
 
     def search_labels(self) -> list[str]:
         labels = [c.strip() for c in self.candidates if c.strip()] or [self.display_name]
@@ -84,3 +87,10 @@ class PatternDef:
         for fd in self.fields:
             norms |= fd.label_norms()
         return norms
+
+    def output_label_norms(self) -> set[str]:
+        """この帳票の見出し語（候補ラベル・表示名・明細表の列見出し）の正規化形。値がこれに当たる行は Markdown に出さない。"""
+        norms = self.label_norms()
+        for fd in self.fields:
+            norms |= {normalize_label(x) for x in (fd.display_name, *(fd.table_columns or []))}
+        return norms - {""}

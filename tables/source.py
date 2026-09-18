@@ -92,8 +92,15 @@ def open_source(path: Path, file_name: str, options: dict | None = None) -> Tabl
 
 def clean_text(text: str) -> str:
     """改行をLFにそろえ、制御文字を除いて前後の空白を削る。"""
-    s = text.replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
-    s = _CONTROL_RE.sub("", s)
+    if not text:
+        return ""
+    s = text
+    if "_x000D_" in s:
+        s = s.replace("_x000D_", "")
+    if "\r" in s:
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+    if _CONTROL_RE.search(s):  # 多くのセルは置き換えるものがないので、先に確かめてから置き換える
+        s = _CONTROL_RE.sub("", s)
     return s.strip()
 
 

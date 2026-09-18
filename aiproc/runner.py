@@ -27,6 +27,7 @@ from flask import current_app
 from aiproc import cache, custom, items, prompts
 from aiproc.common import (DEFAULT_LIMITS, DEFAULT_RUN_IF, DEFAULT_SUMMARY_TOKENS, nfkc, sget)
 from aiproc.verify import VerifyReport, verify_log_result
+from core.jobs import JobError
 from core.mdtext import estimate_tokens
 from logproc import PeopleIndex, SplitOptions, mask_text, parse_log, render_timeline, review_notes
 from models import database
@@ -41,8 +42,8 @@ SCOPE_LABELS = {"pending": "未処理のみ", "all": "全件", "errors": "エラ
                 "changed": "変更行のみ"}
 
 
-class AIJobError(Exception):
-    """ジョブを止めるエラー（日本語のメッセージ）。"""
+class AIJobError(JobError):
+    """ジョブを止めるエラー（日本語のメッセージ。そのまま画面に出る）。"""
 
 
 class SettingsChanged(AIJobError):
@@ -591,7 +592,7 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
             result = custom.fallback_result(w.stage, w.reason).to_dict() if w.kind == "custom" else None
             items.upsert_item(template_id, w.stage_id, w.row_key, status=w.route, template_version_id=tv_id,
                               **w.hashes(), result=result, checks={"reason": w.reason}, job_id=job_id,
-                              conn=conn, commit=False)
+                              import_id=import_id, conn=conn, commit=False)
             stats[w.route] += 1
         conn.commit()
         stats["total"] = len(todo) + stats["rule_only"] + stats["skipped"]
@@ -638,7 +639,8 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
                             fatal = fatal or out.fatal
                             queue.appendleft(key)
                             continue
-                        _save_outcome(out, groups[key], template_id, tv_id, job_id, conn, stats)
+                        _save_outcome(out, groups[key], template_id, tv_id, job_id, conn, stats,
+                                      import_id=import_id)
                     if done:
                         conn.commit()
                         _report(ctx, stats, started)
@@ -679,11 +681,13 @@ def _detect_mode(ctx, settings: dict, stop_event: threading.Event) -> str:
     raise AIJobError("AIの出力方式を判定できませんでした。")
 
 
-def _save_outcome(out: Outcome, group: list[StageWork], template_id, tv_id, job_id, conn, stats: dict) -> None:
+def _save_outcome(out: Outcome, group: list[StageWork], template_id, tv_id, job_id, conn, stats: dict,
+                  import_id: int | None = None) -> None:
     for i, w in enumerate(group):
         items.upsert_item(template_id, w.stage_id, w.row_key, status=out.status, template_version_id=tv_id,
                           **w.hashes(), cache_key=out.key, result=out.result, checks=out.checks,
-                          attempts=out.attempts, error=out.error, job_id=job_id, conn=conn, commit=False)
+                          attempts=out.attempts, error=out.error, job_id=job_id, import_id=import_id,
+                          conn=conn, commit=False)
         stats[out.status] = stats.get(out.status, 0) + 1
         stats["done"] += 1
         if i > 0 or out.cached:
@@ -742,13 +746,14 @@ def trial_row(import_id: int, row_key: str, stage_ids=None, settings: dict | Non
                          latency_ms=out.latency_ms, error=out.error, cache_key=out.key, headers=out.headers)
             items.upsert_item(template_id, w.stage_id, w.row_key, status=out.status,
                               template_version_id=data.template_version_id, **w.hashes(), cache_key=out.key,
-                              result=out.result, checks=out.checks, attempts=out.attempts, error=out.error)
+                              result=out.result, checks=out.checks, attempts=out.attempts, error=out.error,
+                              import_id=import_id)
         else:
             result = custom.fallback_result(w.stage, w.reason).to_dict() if w.kind == "custom" else None
             entry["result"] = result
             items.upsert_item(template_id, w.stage_id, w.row_key, status=w.route,
                               template_version_id=data.template_version_id, **w.hashes(), result=result,
-                              checks={"reason": w.reason})
+                              checks={"reason": w.reason}, import_id=import_id)
         if w.kind == "log" and w.parse is not None:
             types = (entry["result"] or {}).get("types") if entry["status"] in ("ok", "flagged") else None
             entry["timeline"] = render_timeline(w.parse, w.entity_label, types=types,

@@ -8,7 +8,11 @@ def test_nfkc_value():
     assert nfkc_value("原点 復帰") == "原点 復帰"   # 日本語文字間の半角空白は残す
     assert nfkc_value(None) == ""
     assert nfkc_value(95) == "95"
-    assert nfkc_value("①") == "1"
+    # 丸数字は NFKC で囲みが外れると「①破損」が「1破損」になり番号と本文の区切りが消えるので、そのまま残す
+    assert nfkc_value("①破損ウェーハ片を回収\n②Head3 メンブレン交換") == "①破損ウェーハ片を回収\n②Head3 メンブレン交換"
+    assert nfkc_value("⑳Ⓐ㋐㊤") == "⑳Ⓐ㋐㊤"
+    # 区切りが残る表記は今までどおり NFKC で正規化する
+    assert nfkc_value("㈱テスト ⑴ ⒈ ﾎﾟﾝﾌﾟ") == "(株)テスト (1) 1. ポンプ"
 
 
 def test_escape_md_line():
@@ -43,11 +47,13 @@ def test_md_bullet():
 
 
 def test_estimate_tokens():
+    # 実トークン（tiktoken o200k_base）以上になる見積もり: 非ASCII 1文字=1.1、ASCII 2文字=1
     assert estimate_tokens("") == 0
-    assert estimate_tokens("故障") == 2
-    assert estimate_tokens("abc") == 1
+    assert estimate_tokens("故障") == 3
+    assert estimate_tokens("abc") == 2
     assert estimate_tokens("abcd") == 2
-    assert estimate_tokens("CMP研磨") == 3
+    assert estimate_tokens("CMP研磨") == 4
+    assert estimate_tokens("あ" * 100) == 110
 
 
 def test_join_blocks():

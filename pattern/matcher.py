@@ -7,11 +7,14 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from excel.extractor import locate_value
 from excel.text import normalize_sheet_name
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
+from pattern.dictionary import DICTIONARY_NORMS
 from pattern.model import PatternDef
 
 _NUMBER_LIKE = re.compile(r"^[\d\s,.\-/:+%]+$")
+MIN_CONTINUATION_FIELDS = 2
 
 
 @dataclass
@@ -58,11 +61,42 @@ def match_pattern(info: WorkbookInfo, pattern: PatternDef) -> PatternMatch:
             chosen.append(best)
         sheet_score = 1.0 if chosen else 0.0
 
+    if chosen:
+        _add_continuation_sheets(info, pattern, chosen, found_by_sheet)
     found = set().union(*(found_by_sheet[n] for n in chosen)) if chosen else set()
     weights = {fd.field_name: 2 if fd.required else 1 for fd in pattern.fields}
     field_score = sum(weights[f] for f in found) / sum(weights.values()) if weights else 0.0
     confidence = round(100 * (0.25 * sheet_score + 0.75 * field_score))
     return PatternMatch(pattern, confidence, chosen, len(found), len(pattern.fields))
+
+
+def _add_continuation_sheets(info: WorkbookInfo, pattern: PatternDef, chosen: list[str],
+                             found_by_sheet: dict[str, set[str]]) -> None:
+    """「8D報告(1)」「8D報告(2)」のように1件の帳票が複数シートに分かれている場合、続きのシートも選ぶ。
+
+    選んだシートに無い項目の値が2つ以上（項目数の1割以上）あるシートを足す。一覧表らしいシート・非表示シートと、
+    見出しだけで値の無いシート（記入要領など）は足さない。選んだシートはブック内の順に並べ直す。
+    """
+    stop_labels = pattern.label_norms() | DICTIONARY_NORMS
+
+    def with_value(name: str) -> set[str]:
+        grid = info.grids[name]
+        return {fd.field_name for fd in pattern.fields
+                if fd.field_name in found_by_sheet[name] and locate_value(grid, fd, stop_labels)[1]}
+
+    covered = set().union(*(with_value(n) for n in chosen))
+    need = max(MIN_CONTINUATION_FIELDS, 0.1 * len(pattern.fields))
+    candidates = []
+    for name, grid in info.grids.items():
+        if name in chosen or grid.hidden or len(found_by_sheet[name] - covered) < need:
+            continue
+        candidates.append((name, with_value(name)))
+    for name, values in sorted(candidates, key=lambda c: -len(c[1])):
+        if len(values - covered) >= need and not _is_table_like(info.grids[name]):
+            chosen.append(name)
+            covered |= values
+    order = {name: i for i, name in enumerate(info.grids)}
+    chosen.sort(key=order.get)
 
 
 def _sheet_name_score(expected: str, actual: str) -> float:

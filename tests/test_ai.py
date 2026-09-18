@@ -95,3 +95,47 @@ def test_ai_classify_and_fill(ai_client, ai_app, fake, sample_dir):
     assert extraction["values"]["reporter"] == "山田 花子"  # 画面で入力中の修正は保持
 
 
+
+
+def test_ai_filled_numbers_use_the_same_unit_rule_as_reading(ai_app, monkeypatch):
+    """AIが入れた数値の単位も、読み取りと同じ決め方（種類の設定→書かれた値。勝手に補わない）にする。"""
+    from services import ai_assist
+
+    class _Info:
+        date1904 = False
+        grids: dict = {}
+
+    def fields():
+        return [{"field_name": "downtime", "display_name": "停止時間", "data_type": "number",
+                 "value": None, "unit": ""},
+                {"field_name": "repair_cost", "display_name": "修理費用", "data_type": "number",
+                 "value": None, "unit": ""},
+                {"field_name": "part_count", "display_name": "交換部品数", "data_type": "number",
+                 "value": None, "unit": ""}]
+
+    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: {"values": {
+        "downtime": {"value": "390分"}, "repair_cost": {"value": "12000"}, "part_count": {"value": "3"}}})
+    extraction = {"sheets": [], "fields": fields()}
+    with ai_app.app_context():
+        assert ai_assist.fill_missing(_Info(), extraction) == ["停止時間", "修理費用", "交換部品数"]
+    by_name = {f["field_name"]: f for f in extraction["fields"]}
+    # 書かれた単位を取り込む（md は「390分」になる）。単位だけの読み落としの警告は出さない
+    assert by_name["downtime"]["value"] == 390 and by_name["downtime"]["unit"] == "分"
+    assert "数値の部分だけ" not in (by_name["downtime"]["warning"] or "")
+    # どこにも単位が無く、単位で意味が変わる項目は要確認
+    assert by_name["repair_cost"]["unit"] == "" and "単位が書かれていません" in by_name["repair_cost"]["warning"]
+    # 件数・個数は単位不明で警告しない（AIが入力したことの案内だけ）
+    assert by_name["part_count"]["unit"] == "" and "単位" not in by_name["part_count"]["warning"]
+
+
+def test_fill_missing_does_not_send_table_fields(monkeypatch):
+    """明細表の項目は AI の補完の対象にしない（行と列の形があるため、確認画面で人が入力する）。"""
+    from services import ai_assist
+
+    def fail(*args, **kwargs):
+        raise AssertionError("AI を呼ばない")
+
+    monkeypatch.setattr(llm, "ask_json", fail)
+    extraction = {"sheets": [], "fields": [{"field_name": "parts", "display_name": "交換部品", "data_type": "table",
+                                            "value": None, "unit": ""}]}
+    assert ai_assist.fill_missing(None, extraction) == []

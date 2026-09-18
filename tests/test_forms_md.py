@@ -61,7 +61,8 @@ def test_configured_title_fields_are_used_in_order(standard):
     extraction["pattern"]["title_fields"] = ["equipment_id", "occurred_date"]
     md = build_markdown(_doc(info), extraction)
     assert md.startswith("# 設備修理報告書 EQ-001｜2026-09-14\n")
-    assert markdown_filename(_doc(info), extraction) == "設備修理報告書_EQ-001_2026-09-14.md"
+    # 識別番号（report_id）がタイトルに入らないので、同名を避けるため file_hash の先頭8桁を足す
+    assert markdown_filename(_doc(info), extraction) == "設備修理報告書_EQ-001_2026-09-14_01234567.md"
 
 
 def test_no_boilerplate_internal_ids_or_cell_coordinates(standard):
@@ -189,3 +190,130 @@ def test_local_fallback_matches_core_helpers(standard, monkeypatch):
     monkeypatch.setattr(formats, "_core_mdtext", None)
     monkeypatch.setattr(formats, "_core_naming", None)
     assert (build_markdown(_doc(info), extraction), markdown_filename(_doc(info), extraction)) == with_core
+
+
+# ---- 明細表 ----
+
+def _table_field(value, name="parts", display="交換部品", **extra):
+    return {"field_name": name, "display_name": display, "data_type": "table", "required": False, "value": value,
+            "unit": "", "rag_output": "show", "edited": False, "ai_filled": False, "warning": None, **extra}
+
+
+def test_table_field_is_written_one_line_per_row(standard):
+    info, _, extraction = standard
+    value = {"columns": ["品番", "品名", "数量", "備考"],
+             "rows": [["ＰＷ４８－１５９１", "ベアリング\n（軸受）", "2", ""], ["", "", "", ""],
+                      ["# 見出しではない", "スピンモータ", "1", "予備品から"], ["部品費計", "", "3", ""]]}
+    extraction["fields"].insert(5, _table_field(value))
+    refresh_summary(extraction)
+    md = build_markdown(_doc(info), extraction)
+    assert ("\n## 交換部品\n"
+            "- 品番: PW48-1591／品名: ベアリング (軸受)／数量: 2\n"
+            "- 品番: # 見出しではない／品名: スピンモータ／数量: 1／備考: 予備品から\n"
+            "- 部品費計: 数量: 3\n\n") in md
+    assert "|" not in md  # パイプ表は使わない
+    assert "- 交換部品" not in md  # 基本の箇条書きには入れない
+
+    _field(extraction, "parts")["value"] = None
+    refresh_summary(extraction)
+    md = build_markdown(_doc(info), extraction)
+    assert "## 交換部品" not in md
+    assert build_json(_doc(info), extraction)["values"]["parts"] is None
+
+
+def test_table_field_is_not_used_as_title(standard):
+    info, _, extraction = standard
+    extraction["fields"].append(_table_field({"columns": ["品番"], "rows": [["PW-1"]]}))
+    extraction["pattern"]["title_fields"] = ["parts", "report_id"]
+    assert build_markdown(_doc(info), extraction).startswith("# 設備修理報告書 R2026-00123\n")
+    assert markdown_filename(_doc(info), extraction) == "設備修理報告書_R2026-00123.md"
+
+
+# ---- LightRAG オフライン評価の反映（見出し語が値になった行・ファイル名の一意性・タイトルの手がかり） ----
+
+def test_label_as_value_lines_are_not_written(standard):
+    """読み取り誤りで値が別の欄の見出し語になった項目は md・タイトル・ファイル名に出さない（JSON には残す）。"""
+    info, _, extraction = standard
+    labels = set(extraction["pattern"]["labels"])
+    assert "報告番号" in labels and "発生日" in labels  # 候補ラベル・表示名から作られている
+
+    quantity = {"field_name": "quantity", "display_name": "数量", "data_type": "string", "required": False,
+                "value": "発生日", "unit": "", "rag_output": "show", "edited": False, "ai_filled": False, "warning": None}
+    extraction["fields"].append(quantity)
+    extraction["fields"].append({**quantity, "field_name": "part_name", "display_name": "品名", "value": "報告番号"})
+    refresh_summary(extraction)
+    md = build_markdown(_doc(info), extraction)
+    assert "- 数量: 発生日" not in md and "- 品名: 報告番号" not in md
+    assert build_json(_doc(info), extraction)["values"]["quantity"] == "発生日"  # JSON には残す
+
+    # 人が直した値は消さない。ラベルでない値はそのまま出す
+    quantity["edited"] = True
+    assert "- 数量: 発生日" in build_markdown(_doc(info), extraction)
+    quantity["edited"], quantity["value"] = False, "3個"
+    assert "- 数量: 3個" in build_markdown(_doc(info), extraction)
+
+
+def test_filename_gets_file_hash_when_the_title_has_no_report_id(standard):
+    """報告番号がタイトルに入らない帳票は同名になりやすい（LightRAG 1.5.x は同名だと HTTP 409）。"""
+    info, _, extraction = standard
+    assert markdown_filename(_doc(info), extraction) == "設備修理報告書_R2026-00123_EQ-001_CMP装置_2026-09-14.md"
+    extraction["pattern"]["title_fields"] = ["equipment_id", "occurred_date"]
+    assert markdown_filename(_doc(info), extraction) == "設備修理報告書_EQ-001_2026-09-14_01234567.md"
+    extraction["pattern"]["title_fields"] = ["occurred_date"]
+    assert markdown_filename(_doc(info), extraction) == "設備修理報告書_2026-09-14_01234567.md"
+
+
+def test_title_adds_the_source_file_name_when_it_has_no_identifier(standard):
+    """識別番号も設備も入らないタイトル（工程異常連絡票のような様式）は、元ファイル名で帳票を特定できるようにする。"""
+    info, _, extraction = standard
+    extraction["pattern"]["title_fields"] = ["occurred_date"]
+    assert build_markdown(_doc(info), extraction).startswith("# 設備修理報告書 2026-09-14｜修理報告書_標準\n")
+    extraction["pattern"]["title_fields"] = ["equipment_id", "occurred_date"]
+    assert build_markdown(_doc(info), extraction).startswith("# 設備修理報告書 EQ-001｜2026-09-14\n")
+
+
+def test_person_columns_and_empty_total_rows_are_not_written():
+    """人名の列（担当・氏名）は出さない。数字のない合計行は記録にならないので書かない（design.md 6.1）。"""
+    from export.formats import table_markdown_lines
+    from pattern.dictionary import is_person_field, is_person_label
+
+    value = {"columns": ["日時", "対応内容", "担当"],
+             "rows": [["9:10", "電極を交換", "中村"], ["合計", "", ""]]}
+    assert table_markdown_lines(value) == ["- 日時: 9:10／対応内容: 電極を交換／担当: 中村"]
+    assert table_markdown_lines(value, omit_person=True) == ["- 日時: 9:10／対応内容: 電極を交換"]
+    # 数字のある合計行はこれまでどおり「- 合計: …」で書く
+    assert table_markdown_lines({"columns": ["ロットNo.", "投入数"], "rows": [["合計", "50"]]}) == ["- 合計: 投入数: 50"]
+
+    # 押印欄の「確認」「作成」も人名の項目。「効果確認」「作成日」は違う
+    assert is_person_field("field_3", "確認") and is_person_field("field_4", "作成")
+    assert not is_person_field("field_5", "効果確認") and not is_person_field("field_6", "作成日")
+    assert is_person_label("担当") and is_person_label("氏名") and not is_person_label("確認")  # 表の「確認」は判定の列
+
+
+# ---- 利用者の判断（2026-09-19）: 丸数字を残す・積み重なった列見出しをすべて出す ----
+
+def test_enclosed_numbers_are_kept_as_written(standard):
+    """丸数字（①②）は NFKC で囲みを外さない。「①破損…」が「1破損…」になると番号と本文の区切りが消える。"""
+    info, _, extraction = standard
+    _field(extraction, "repair")["value"] = "①破損ウェーハ片を回収\n②Ｈｅａｄ３ メンブレン交換"
+    _field(extraction, "cause")["value"] = "㈱テスト製 ⑴ ﾎﾟﾝﾌﾟの劣化"
+    md = build_markdown(_doc(info), extraction)
+    assert "## 修理内容\n①破損ウェーハ片を回収\n②Head3 メンブレン交換\n" in md
+    # 囲みが外れても区切りが残る表記（㈱・⑴）は、これまでどおり NFKC でそろえる
+    assert "## 原因\n(株)テスト製 (1) ポンプの劣化\n" in md
+    assert "\\" not in md.split("## 修理内容\n")[1].split("\n")[0]  # 行頭の①はエスケープしない
+
+
+def test_stacked_table_rows_keep_their_own_column_headings(standard):
+    """積み重なった列見出しをまとめた明細表は、行ごとに自分の組の列見出しだけを書く（空の欄は書かない）。"""
+    info, _, extraction = standard
+    value = {"columns": ["人", "機械", "材料", "方法", "測定", "環境"],
+             "rows": [["①日常点検での見落とし", "軸受の摩耗", "", "", "", ""],
+                      ["", "", "", "点検手順に記載なし", "", "室温の変動"]]}
+    extraction["fields"].insert(5, _table_field(value, name="fishbone", display="特性要因（4M+2）"))
+    refresh_summary(extraction)
+    md = build_markdown(_doc(info), extraction)
+    assert ("\n## 特性要因(4M+2)\n"  # 見出しの全角かっこは今までどおり NFKC で半角に
+            "- 人: ①日常点検での見落とし／機械: 軸受の摩耗\n"
+            "- 方法: 点検手順に記載なし／環境: 室温の変動\n") in md
+    assert "|" not in md
