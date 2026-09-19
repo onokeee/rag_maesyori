@@ -126,6 +126,12 @@ def test_verify_accepts_research_example():
     (lambda r: r["incident"]["parts"][0].update(model="ENC"), "incident.parts[0]", "identifier"),
     (lambda r: r["incident"]["temporary_actions"][0].update(v="4/1 10:20に原点復帰"), "incident.temporary_actions[0]", "date"),
     (lambda r: r["incident"]["temporary_actions"][0].update(v="翌日に再起動"), "incident.temporary_actions[0]", "date"),
+    # 相対の日付（来月・月末など）も日付として扱う
+    (lambda r: r["incident"]["temporary_actions"][0].update(v="来月に再起動"), "incident.temporary_actions[0]", "date"),
+    (lambda r: r["incident"]["temporary_actions"][0].update(v="月末に再起動"), "incident.temporary_actions[0]", "date"),
+    # 漢数字＋「度」も回数として照合する
+    (lambda r: r["incident"]["temporary_actions"][0].update(v="再起動を五度実施"), "incident.temporary_actions[0]",
+     "quantity"),
     (lambda r: r["incident"]["permanent_actions"][0].update(v="エンコーダケーブル交換済", src=["e4"]),
      "incident.permanent_actions[0]", "flip_added"),
     (lambda r: r["incident"]["permanent_actions"][0].update(v="ケーブル交換", src=["e4"]),
@@ -179,6 +185,48 @@ def test_verify_final_state_and_recurrence_follow_evidence():
     rep = verify_log_result(dict(base, incident={"final_state": {"v": "経過観察中", "src": ["e2"]}}), parse2, sent2,
                             spec=STAGE)
     assert "incident.final_state" in rep.ok_items, rep.issues
+
+
+def test_verify_done_and_no_recurrence_need_real_evidence():
+    """「手配済」「入荷待ち」は完了の根拠にしない。「復旧しない」のような別の否定は再発なしの根拠にしない。"""
+    def run(line, final_state=None, recurrence=None):
+        parse = parse_log(f"4/7 佐藤：{line}")
+        sent = prompts.build_log_messages(parse, {}, STAGE)[-1]["content"]
+        inc = {k: v for k, v in (("final_state", final_state), ("recurrence", recurrence)) if v}
+        res = {"entries": [{"id": "e1", "segs": ["s1"], "t": ["メモ"]}], "incident": inc}
+        return verify_log_result(res, parse, sent, spec=STAGE)
+
+    for line in ("部品手配済、入荷待ち", "ケーブル手配済（納期2週間）", "メーカーへ問い合わせ済", "交換済、部品入荷待ち"):
+        rep = run(line, final_state={"v": "完了", "src": ["e1"]})
+        assert "incident.final_state" in rep.failed_items, line
+    for line in ("ケーブル交換済", "部品入荷待ちだったが交換完了", "対応完了"):
+        rep = run(line, final_state={"v": "完了", "src": ["e1"]})
+        assert "incident.final_state" in rep.ok_items, (line, rep.issues)
+    for line in ("リセットしても復旧しない", "原因が分からない", "再起動せず様子見"):
+        rep = run(line, recurrence={"v": "なし", "src": ["e1"]})
+        assert "incident.recurrence" in rep.failed_items, line
+    for line in ("再発なし", "その後異常なし", "以降、再発していない", "交換後問題なし"):
+        rep = run(line, recurrence={"v": "なし", "src": ["e1"]})
+        assert "incident.recurrence" in rep.ok_items, (line, rep.issues)
+
+
+def test_gas_formulas_and_vacuum_units_are_not_model_numbers():
+    """N2・1slm・1.2mTorr を型番として扱わない（取りこぼし・でっち上げの判定に使わない）。"""
+    from logproc.extract import extract_identifiers, extract_quantities
+
+    for text in ("1.2mTorr", "N2パージ", "He 5sccm", "1slm", "NF3を流す"):
+        assert extract_identifiers(text) == [], text
+    assert extract_quantities("N2を1slmで流し、到達圧力1.2mTorrを確認") == ["1slm", "1.2mTorr"]
+    # アラームコードの E1 は型番のまま
+    assert extract_identifiers("E1 発生") == ["E1"]
+
+    cell = CELL_412.replace("納期1週間）", "納期1週間）N2を1slmで流し、到達圧力1.2mTorrを確認。")
+    assert cell != CELL_412
+    people = PeopleIndex(STAGE["people"], column_names=["佐藤", "田中"])
+    parse = parse_log(cell, date(2024, 4, 1), people)
+    sent = prompts.build_log_messages(parse, {}, STAGE)[-1]["content"]
+    rep = verify_log_result(_good_412(), parse, sent, spec=STAGE, people_names=people.names() + ["大野"])
+    assert rep.status() == "ok", rep.issues
 
 
 def inc_len(inc):
@@ -689,6 +737,25 @@ def test_chat_raw_non_api_body_is_fatal(ai_app, fake):
         with pytest.raises(llm.LLMCallError) as e:
             llm.chat_raw(llm.job_client_settings(), [{"role": "user", "content": "x"}])
     assert e.value.kind == "fatal" and "APIの形式" in str(e.value)
+
+
+def test_ask_json_non_api_body_says_so(ai_app, fake):
+    """帳票側の ask_json も、200 の HTML は Python の内部エラーではなく接続先の確認を促す文にする。"""
+    from tests.fake_servers import Reply
+    fake.responder = lambda body, srv: Reply(html="<!doctype html><html><body>blocked</body></html>")
+    with ai_app.app_context():
+        with pytest.raises(ValueError) as e:
+            llm.ask_json("system", "user")
+    assert "APIの形式" in str(e.value) and "choices" not in str(e.value)
+
+
+def test_cache_key_includes_endpoint():
+    """接続先を別のサーバーに変えたら、同じモデル名でも前の応答を使わない（末尾の / は同じ扱い）。"""
+    msgs = [{"role": "user", "content": "a"}]
+    a = cache.cache_key(msgs, "m", {}, None, "json_object", "http://127.0.0.1:8000/v1/chat/completions")
+    assert a == cache.cache_key(msgs, "m", {}, None, "json_object", "http://127.0.0.1:8000/v1/chat/completions/")
+    assert a != cache.cache_key(msgs, "m", {}, None, "json_object", "http://10.0.0.5:8000/v1/chat/completions")
+    assert cache.cache_key(msgs, "m", {}, None, "json_object") == cache.cache_key(msgs, "m", {}, None, "json_object", "")
 
 
 def _second_import(app, template_id, rows) -> int:

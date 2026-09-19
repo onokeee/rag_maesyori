@@ -516,6 +516,7 @@ def _column_row(index: int, header: str, col=None, sugg=None, use: bool = True) 
         "inferred_type_label": TYPE_LABELS.get(getattr(sugg, "inferred_type", "") if sugg is not None else "",
                                                getattr(sugg, "inferred_type", "") if sugg is not None else ""),
         "auto_omit": sugg is not None and getattr(sugg, "md", "") == "omit",
+        "omit_reason": getattr(sugg, "omit_reason", "") if sugg is not None else "",
         "matched_by": MATCHED_LABELS.get(getattr(sugg, "matched_by", "") if sugg is not None else "", ""),
     }
 
@@ -871,6 +872,11 @@ def preview(import_id: int):
     issues = pipeline.load_issues(import_id)
     files = pipeline.ready_preview_files(import_id, imp, spec)
     if files is None:  # 初回は件数分の md を作るのに時間がかかるので、ジョブにして待ち画面を出す
+        ai_job = jobs.latest_job("table_import", import_id, kind="ai_format")
+        if ai_job and ai_job["status"] in jobs.ACTIVE_STATUSES:
+            # 一時停止中の AI整形の後ろに下書きのジョブを並べると、黙って待ち続けてしまう
+            flash("AI整形が動いています（一時停止中を含む）。AI整形の画面で再開するか中止してから確認してください", "error")
+            return redirect(url_for("tables.ai", import_id=import_id))
         if request.args.get("retry") == "1":
             _preview_job(import_id, imp, spec, retry=True)
             return redirect(url_for("tables.preview", import_id=import_id))  # 待ち画面の再読み込みで何度も作り直さない
@@ -893,8 +899,16 @@ def preview(import_id: int):
     return render_template(
         "tables/preview.html", imp=imp, spec=spec, stats=stats, issues=issues[:ISSUES_SHOWN], issue_total=len(issues),
         counts=count_levels(issues), blocking=has_blocking(issues), files=files, data_rows=data_rows, page=page,
-        total_pages=total_pages, columns=[(c.key, c.display) for c in spec.columns],
+        total_pages=total_pages, columns=[(c.key, _display_with_unit(c)) for c in spec.columns],
         confirmed=imp["status"] == "confirmed", delete_note=DELETE_ON_DOWNLOAD_NOTE, **_steps_ctx(6))
+
+
+def _display_with_unit(col) -> str:
+    """データ表の見出し。Markdown は「停止時間: 5分」と単位を付けて書くので、見出しにも単位を添える。"""
+    unit = (col.unit or "").strip()
+    if unit and unit not in col.display:
+        return f"{col.display}（{unit}）"
+    return col.display
 
 
 @bp.get("/imports/<int:import_id>/preview/file")

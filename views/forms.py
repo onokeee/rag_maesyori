@@ -22,6 +22,7 @@ from core import purge
 from core.files import UploadError, original_name, precheck_excel, remove_upload, save_upload, upload_path
 from excel.extractor import apply_manual_values, extract_document, is_blank_value, refresh_summary
 from excel.tables import clean_table_value, is_table_value, parse_table_text, table_text_lines
+from excel.text import EXCEL_ERROR_WARNING
 from excel.workbook import WorkbookInfo, load_workbook_info
 from export.formats import build_json, build_markdown, markdown_filename
 from models import database as db
@@ -133,7 +134,9 @@ def _apply_values(extraction: dict, values: dict, confirmed: dict | None = None)
         text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
         if f["data_type"] == "table":
             parsed, warning = parse_table_text(text)
-            if warning is None and parsed == clean_table_value(f["value"]):
+            # 行の無い表（列見出しだけ）と空の値は同じもの（空の明細表で行を足して消しただけで「手で修正」にしない）
+            if warning is None and (parsed == clean_table_value(f["value"])
+                                    or (is_blank_value(parsed) and is_blank_value(f["value"]))):
                 continue
         elif _same_text(text, _display_text(f["value"])):
             continue
@@ -160,7 +163,9 @@ def _restore_confirmed_fields(extraction: dict, confirmed: dict | None) -> None:
     before = {f["field_name"]: f for f in confirmed.get("fields", [])}
     for i, f in enumerate(extraction["fields"]):
         old = before.get(f["field_name"])
-        if (old is not None and old != f and old.get("value") == f.get("value")
+        same_value = old is not None and (old.get("value") == f.get("value") or (
+            f.get("data_type") == "table" and is_blank_value(old.get("value")) and is_blank_value(f.get("value"))))
+        if (old is not None and old != f and same_value
                 and (old.get("unit") or "") == (f.get("unit") or "")
                 and {k: v for k, v in old.items() if k not in _EDIT_KEYS}
                 == {k: v for k, v in f.items() if k not in _EDIT_KEYS}):
@@ -194,8 +199,15 @@ def _field_status(f: dict) -> dict:
     unit_issue = f["data_type"] == "number" and str(f.get("warning") or "").startswith(_UNIT_WARNING_PREFIXES)
     # 日付の警告（年が無い・日付として読めない）は、手で直した値でも入力した文字から出し直しているので要確認のまま
     date_issue = f["data_type"] == "date" and bool(f.get("warning"))
-    issue = (f["required"] and blank) or (not blank and bool(f.get("warning"))
-                                          and (source == "auto" or unit_issue or date_issue))
+    # 数値の読み取りの警告（「約90分」の数値の部分だけ読んだ・数値として読めない）も、手で入力した値でも要確認のまま
+    value = f["value"]
+    number_issue = f["data_type"] == "number" and (
+        "数値の部分だけ" in str(f.get("warning") or "")
+        or not isinstance(value, (int, float)) or isinstance(value, bool))
+    # Excel のエラー値（「#REF!」）は値を空にしてあるが、元のファイルの数式を確かめるまで要確認
+    error_value = source == "blank" and str(f.get("warning") or "").startswith(EXCEL_ERROR_WARNING)
+    issue = (f["required"] and blank) or error_value or (
+        not blank and bool(f.get("warning")) and (source == "auto" or unit_issue or date_issue or number_issue))
     return {"source": source, "issue": bool(issue), "blank": blank,
             "missing_required": bool(f["required"] and blank)}
 
@@ -548,6 +560,24 @@ def _is_stale(doc: dict) -> bool:
     return bool(sent) and str(sent) != _version(doc)
 
 
+# 途中保存をした画面の目印（doc_id → (保存後の版, 画面の目印)）。
+# 同じ画面の保存は順番に送られるので、途中保存の応答が届く前に画面を離れたときの送信（beacon）は
+# 古い版を持っている。今の版がその画面自身の保存でできたものなら、別の画面の変更ではないので受け付ける。
+_DRAFT_TOKENS: dict[int, tuple[str, str]] = {}
+
+
+def _page_token() -> str:
+    payload = request.get_json(force=True, silent=True)
+    token = payload.get("page_token") if isinstance(payload, dict) else None
+    return str(token)[:64] if token else ""
+
+
+def _saved_by_same_page(doc_id: int, doc: dict) -> bool:
+    token = _page_token()
+    saved = _DRAFT_TOKENS.get(doc_id)
+    return bool(token) and saved is not None and saved == (_version(doc), token)
+
+
 def _json_values() -> dict:
     payload = request.get_json(force=True, silent=True)
     if isinstance(payload, dict):
@@ -563,7 +593,7 @@ def draft(doc_id: int):
     extraction = _data(doc)
     if extraction is None:
         return jsonify(error="まだ読み取りをしていません"), 409
-    if _is_stale(doc):
+    if _is_stale(doc) and not _saved_by_same_page(doc_id, doc):
         return jsonify(error=STALE_MESSAGE), 409
     version = _version(doc)
     if _apply_values(extraction, _json_values(), _data(doc, "confirmed_json")):
@@ -571,6 +601,9 @@ def draft(doc_id: int):
         new_json = _dumps(extraction)
         db.save_draft(doc_id, new_json, title=title)
         version = _version({"data_json": new_json})
+        token = _page_token()
+        if token:
+            _DRAFT_TOKENS[doc_id] = (version, token)
     # 画面は次の保存・確定でこの版を送る
     return "", 204, {"X-Doc-Version": version}
 

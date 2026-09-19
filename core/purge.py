@@ -50,17 +50,52 @@ def _delete_jobs(db, ref_type: str, ref_id: int) -> int:
     return db.execute("DELETE FROM jobs WHERE ref_type = ? AND ref_id = ?", (ref_type, ref_id)).rowcount
 
 
-def _delete_orphan_llm_calls(db) -> int:
-    """どの ai_items からも参照されていない AI の生の応答を消す（試し実行の分もここで消える）。"""
+_UNREFERENCED_LLM_CALLS = ("cache_key NOT IN (SELECT cache_key FROM ai_items WHERE cache_key IS NOT NULL)")
+
+
+def _ai_work_alive(db) -> bool:
+    """まだある取り込みに、AI整形の結果かAI整形のジョブ（一時停止・中断を含む）が残っているか。
+
+    ai_items が覚えているのは最後に使った応答のキーだけで、再依頼で直した行の1回目の応答や、
+    一時停止の直前に受け取った応答（ai_items の行がまだ無い）は、どこからも参照されない。
+    それでも再実行・再開ではキャッシュとして引く（引けないと再課金になる）ので、
+    AI整形が残っている取り込みがある間は、参照されない応答を「持ち主なし」とみなして消さない。
+    """
     return db.execute(
-        "DELETE FROM llm_calls WHERE cache_key NOT IN "
-        "(SELECT cache_key FROM ai_items WHERE cache_key IS NOT NULL)").rowcount
+        "SELECT 1 FROM ai_items WHERE import_id IN (SELECT id FROM table_imports) "
+        "UNION ALL SELECT 1 FROM jobs WHERE kind = 'ai_format' AND ref_type = 'table_import' "
+        "AND ref_id IN (SELECT id FROM table_imports) LIMIT 1").fetchone() is not None
+
+
+def _delete_orphan_llm_calls(db, keys=()) -> int:
+    """どの ai_items からも参照されていない AI の生の応答を消す（試し実行の分もここで消える）。
+
+    keys: 消した取り込みが使っていた応答のキー。ほかの行が使っていなければ、いつでもすぐ消す。
+    それ以外の参照されない応答は、AI整形が残っている取り込みが1件も無いときだけ消す（_ai_work_alive）。
+    """
+    removed = 0
+    keys = sorted({k for k in keys if k})
+    for start in range(0, len(keys), 500):
+        chunk = keys[start:start + 500]
+        marks = ", ".join("?" for _ in chunk)
+        removed += db.execute(f"DELETE FROM llm_calls WHERE cache_key IN ({marks}) AND {_UNREFERENCED_LLM_CALLS}",
+                              chunk).rowcount
+    if not _ai_work_alive(db):
+        removed += db.execute(f"DELETE FROM llm_calls WHERE {_UNREFERENCED_LLM_CALLS}").rowcount
+    return removed
 
 
 def delete_orphan_ai_items(db) -> int:
-    """もう無い取り込みを指す AI整形の結果を消す（取り込みを消したあとに、動いていた AI の書き込みが残った分など）。"""
-    return db.execute("DELETE FROM ai_items WHERE import_id IS NOT NULL "
-                      "AND import_id NOT IN (SELECT id FROM table_imports)").rowcount
+    """もう無い取り込みを指す AI整形の結果を消す（取り込みを消したあとに、動いていた AI の書き込みが残った分など）。
+
+    import_id の無い行（古いDBの分。持ち主の取り込みが分からない）は、その取り込み設定の取り込みが
+    1件も残っていなければ消す（残っていれば、その取り込みを消すときに purge_table_import が消す）。
+    """
+    removed = db.execute("DELETE FROM ai_items WHERE import_id IS NOT NULL "
+                         "AND import_id NOT IN (SELECT id FROM table_imports)").rowcount
+    removed += db.execute("DELETE FROM ai_items WHERE import_id IS NULL AND template_id NOT IN "
+                          "(SELECT template_id FROM table_imports WHERE template_id IS NOT NULL)").rowcount
+    return removed
 
 
 def sweep_orphan_ai(db) -> int:
@@ -167,6 +202,12 @@ def purge_table_import(import_id: int) -> int:
         shutil.rmtree(import_dir(import_id), ignore_errors=True)
         return 0
     # DB の行を先に消し、ファイルはそのあと（purge_documents と同じ理由。残ったフォルダ・ファイルは起動時に片付く）
+    # この取り込みが使っていた AI の応答のキー（行を消す前に控える。消したあと、ほかで使われていなければ消す）
+    keys = [r[0] for r in db.execute("SELECT cache_key FROM ai_items WHERE import_id = ? AND cache_key IS NOT NULL",
+                                     (import_id,))]
+    if row["template_id"] is not None:
+        keys += [r[0] for r in db.execute("SELECT cache_key FROM ai_items WHERE template_id = ? AND import_id IS NULL "
+                                          "AND cache_key IS NOT NULL", (row["template_id"],))]
     _delete_by_columns(db, IMPORT_REF_COLUMNS, import_id)
     _delete_jobs(db, "table_import", import_id)
     removed = db.execute("DELETE FROM table_imports WHERE id = ?", (import_id,)).rowcount
@@ -176,7 +217,7 @@ def purge_table_import(import_id: int) -> int:
     if row["template_id"] is not None:
         db.execute("DELETE FROM ai_items WHERE template_id = ? AND import_id IS NULL", (row["template_id"],))
     delete_orphan_ai_items(db)
-    _delete_orphan_llm_calls(db)
+    _delete_orphan_llm_calls(db, keys)
     db.commit()
     remove_upload(row["stored_path"])
     folder = import_dir(import_id)
@@ -195,9 +236,24 @@ def _shrink(db) -> None:
     - wal_checkpoint(TRUNCATE): 消す前後の内容が残る app.db-wal を切り詰める（強制終了時に拾われないように）
     - VACUUM: 解放したページを手放してファイルの大きさも戻す（中身は PRAGMA secure_delete で消えている）
     どちらも他の接続が使っていると実行できない。そのときは次に消したときに縮む。
+
+    VACUUM は DB 全体を書き直すあいだ書き込みを止める。大きな app.db だと busy_timeout より長くなり、
+    動いている AI整形などのジョブの書き込みが「database is locked」で失敗する。なので、待機中・実行中・
+    一時停止中のジョブがあるときは VACUUM をしない（消した中身は secure_delete で上書き済み。
+    ファイルの大きさは、ジョブが無いときの次の削除か起動時の片付けで戻る）。
     """
-    for statement in ("PRAGMA wal_checkpoint(TRUNCATE)", "VACUUM"):
+    statements = ["PRAGMA wal_checkpoint(TRUNCATE)"]
+    if not _jobs_active(db):
+        statements.append("VACUUM")
+    for statement in statements:
         try:
             db.execute(statement)
         except sqlite3.Error:
             pass
+
+
+def _jobs_active(db) -> bool:
+    try:
+        return db.execute("SELECT 1 FROM jobs WHERE status IN ('queued', 'running', 'paused') LIMIT 1").fetchone()             is not None
+    except sqlite3.Error:
+        return True   # 確かめられないときは、動いているかもしれないジョブを止めない側に倒す

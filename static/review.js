@@ -250,6 +250,8 @@
   // 画面を開いたときの作業データの版。保存・確定で送り、別の画面で変わっていたら 409 で止まる
   const versionInput = form.querySelector("[data-version-input]");
   const currentVersion = () => root.dataset.version || "";
+  // この画面の目印。途中保存の応答が届く前に画面を離れたとき、自分の保存とぶつからないように送る
+  const pageToken = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
   function setVersion(v) {
     if (!v) return;
     root.dataset.version = v;
@@ -275,7 +277,7 @@
     if (saving) await saving;  // 前の保存が終わってから（同じ版を2回送って自分の保存とぶつからないように）
     if (!dirty) return;
     dirty = false;
-    const body = { values: values(), version: currentVersion() };
+    const body = { values: values(), version: currentVersion(), page_token: pageToken };
     setStatus("保存中…");
     saving = (async () => {
       try {
@@ -321,7 +323,7 @@
   window.addEventListener("beforeunload", () => {
     if (submitting || !dirty) return;
     try {
-      const blob = new Blob([JSON.stringify({ values: values(), version: currentVersion() })], { type: "application/json" });
+      const blob = new Blob([JSON.stringify({ values: values(), version: currentVersion(), page_token: pageToken })], { type: "application/json" });
       navigator.sendBeacon(root.dataset.draftUrl, blob);
     } catch (e) { /* 送れなくても次回の入力で保存される */ }
   });

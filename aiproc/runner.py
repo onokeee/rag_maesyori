@@ -375,7 +375,8 @@ def assign_keys(works: list[StageWork], settings: dict, mode: str) -> None:
     for w in works:
         if w.route == "ai":
             w.key = cache.cache_key(w.messages, settings.get("model", ""), settings.get("params") or {},
-                                    w.schema if mode == "json_schema" else None, mode)
+                                    w.schema if mode == "json_schema" else None, mode,
+                                    settings.get("chat_url"))
 
 
 def selected(work: StageWork, item: dict | None, template_version_id, scope: str, forced: bool) -> bool:
@@ -489,7 +490,8 @@ def _repair_request(work: StageWork, text: str, problems: list, settings: dict, 
     """再依頼のメッセージとキャッシュキー。"""
     r_messages = prompts.build_repair_messages(work.messages, text, problems)
     return r_messages, cache.cache_key(r_messages, settings.get("model", ""), settings.get("params") or {},
-                                       work.schema if mode == "json_schema" else None, mode)
+                                       work.schema if mode == "json_schema" else None, mode,
+                                       settings.get("chat_url"))
 
 
 def cached_usable(work: StageWork, settings: dict, mode: str, key: str | None = None) -> bool:

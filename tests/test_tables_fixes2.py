@@ -362,3 +362,35 @@ def test_retention_note_does_not_ask_for_the_csv_first():
     from views.tables import DELETE_ON_DOWNLOAD_NOTE
 
     assert "より先" not in DELETE_ON_DOWNLOAD_NOTE and "管理用_RAGには入れない" in DELETE_ON_DOWNLOAD_NOTE
+
+
+def test_confirmed_import_can_be_deleted_from_home_and_done_page(app, client):
+    import_id = _confirmed_import(app, client)
+    action = f'action="/tables/imports/{import_id}/delete"'
+    assert action in client.get("/").get_data(as_text=True)
+    assert action in client.get(f"/tables/imports/{import_id}/done").get_data(as_text=True)
+    res = client.post(f"/tables/imports/{import_id}/delete", data={"next": "/"})
+    assert res.status_code == 302
+    with app.app_context():
+        assert store.get_import(import_id) is None
+
+
+def test_preview_headers_show_the_unit_and_template_list_label(app, client):
+    import_id = _confirmed_import(app, client)
+    html = client.get(f"/tables/imports/{import_id}/preview").get_data(as_text=True)
+    assert "<th>停止時間（分）</th>" in html
+    listing = client.get("/settings/table-templates").get_data(as_text=True)
+    assert "まだダウンロードしていない取り込み（件）" in listing
+    assert "ダウンロード待ちの取り込み" not in listing
+
+
+def test_404_for_a_missing_setting_does_not_blame_a_download(client):
+    for path, back in (("/settings/form-types/999", "/settings/form-types"),
+                       ("/tables/templates/999", "/settings/table-templates")):
+        res = client.get(path)
+        assert res.status_code == 404
+        html = res.get_data(as_text=True)
+        assert "この設定は見つかりません" in html and "ダウンロード済み" not in html
+        assert f'href="{back}' in html
+    html = client.get("/tables/imports/999/done").get_data(as_text=True)
+    assert "ダウンロード済み" in html and "この設定は見つかりません" not in html

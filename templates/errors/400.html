@@ -5,9 +5,17 @@
   <div class="card-head">
     <h1 class="card-title">このページは開けません</h1>
   </div>
+  {% if host_refused %}
+  {#- このPC以外の名前（PC名・hosts の別名など）で開かれた。同じアドレスのホームへ戻しても断られるので、開けるアドレスを示す -#}
+  <p>このアドレスでは開けません。このアプリは <strong>{{ home_url }}</strong> で開いてください。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ home_url }}">{{ home_url }} を開く</a>
+  </div>
+  {% else %}
   <p>このページは再読み込みや古いアドレスからは開けません。ホームから開き直してください。</p>
   <div class="btn-row">
     <a class="btn primary" href="{{ url_for('home.index') }}">ホームへ</a>
   </div>
+  {% endif %}
 </div>
 {% endblock %}

@@ -40,7 +40,7 @@ _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _SHEETDATA_START = re.compile(rb"<((?:[A-Za-z_][\w.\-]*:)?)sheetData\b[^>]*?(/?)>")
 _SHEETDATA_END = re.compile(rb"</(?:[A-Za-z_][\w.\-]*:)?sheetData\s*>")
 _CHUNK = 1024 * 1024
-_STAT_KEYS = ("cell_count", "max_row", "max_col", "ordered")
+_STAT_KEYS = ("cell_count", "max_row", "max_col", "ordered", "uncached_formulas")
 _OPEN_ERROR = "Excelファイルとして開けませんでした。.xlsx 形式で保存し直してください"
 
 
@@ -158,7 +158,7 @@ def _sheet_extras(wb, zf: zipfile.ZipFile, ws_ro, shared_strings, table_names: s
 
 def _scan_cells(f, extra: dict, shared_strings) -> dict:
     """WorkSheetParser と同じ規則で、値のある最終行・最終列・セル数・行の並びを調べる。"""
-    ROW, V, IS = f"{_MAIN_NS} row", f"{_MAIN_NS} v", f"{_MAIN_NS} is"
+    ROW, V, IS, F = f"{_MAIN_NS} row", f"{_MAIN_NS} v", f"{_MAIN_NS} is", f"{_MAIN_NS} f"
     depth = 0
     row_depth = cell_depth = is_depth = r_depth = 0
     row_no = col_no = 0
@@ -176,17 +176,22 @@ def _scan_cells(f, extra: dict, shared_strings) -> dict:
     rich: list = []
     text: list[str] = []
     capture = 0  # 1: v 2: is/t 3: is/r/t
+    has_formula = False
+    # Excel で計算されていない（値が保存されていない）数式のセルの数。列番号（1始まり）→ 数
+    uncached: dict[int, int] = {}
 
     def local(name: str) -> str:
         return name[name.rfind(" ") + 1:]
 
     def start(name, attrs):
         nonlocal depth, row_depth, cell_depth, is_depth, r_depth, row_no, col_no, last_row, ordered
-        nonlocal cell_row, cell_col, cell_type, v_state, v_text, is_found, plain, rich, capture
+        nonlocal cell_row, cell_col, cell_type, v_state, v_text, is_found, plain, rich, capture, has_formula
         depth += 1
         if cell_depth:
             if depth == cell_depth + 1:
-                if name == V and v_state == 0:
+                if name == F:
+                    has_formula = True
+                elif name == V and v_state == 0:
                     v_state, capture = 1, 1
                     text.clear()
                 elif name == IS and not is_found:
@@ -218,6 +223,7 @@ def _scan_cells(f, extra: dict, shared_strings) -> dict:
                     cell_row, cell_col = row_no, col_no
                 cell_type = attrs.get("t", "n")
                 v_state, v_text, is_found, plain, capture = 0, None, False, None, 0
+                has_formula = False
                 rich = []
             return
         if name == ROW:
@@ -253,6 +259,10 @@ def _scan_cells(f, extra: dict, shared_strings) -> dict:
             is_depth = 0
         elif cell_depth and depth == cell_depth:
             count += 1
+            # 値のない数式（プログラムが書いて Excel で保存していないファイル）。
+            # 空文字列を返す数式は Excel が t="str" と空の v で保存するので数えない
+            if has_formula and not (v_state == 2 and (v_text or cell_type == "str")):
+                uncached[cell_col] = uncached.get(cell_col, 0) + 1
             if cell_type == "inlineStr":
                 value = (plain or "") + "".join(t for t in rich if t) if is_found else None
             else:
@@ -291,7 +301,8 @@ def _scan_cells(f, extra: dict, shared_strings) -> dict:
         if key in seen_extra or isinstance(m, MergedCell) or m._value is None or m._value == "":
             continue
         max_row, max_col = max(max_row, key[0]), max(max_col, key[1])
-    return {"cell_count": count + len(extra) - len(seen_extra), "max_row": max_row, "max_col": max_col, "ordered": ordered}
+    return {"cell_count": count + len(extra) - len(seen_extra), "max_row": max_row, "max_col": max_col, "ordered": ordered,
+            "uncached_formulas": {str(c): n for c, n in sorted(uncached.items())}}
 
 
 # ---- シートの XML: セルの値（WorkSheetParser） ----
@@ -388,7 +399,8 @@ class ExcelSource:
         sheets: dict[str, dict] = {}
         table_names: set[str] = set()
         zf = wb._archive
-        use_known = bool(known_stats) and set(known_stats) == set(wb.sheetnames)
+        use_known = (bool(known_stats) and set(known_stats) == set(wb.sheetnames)
+                     and all(isinstance(v, dict) and set(_STAT_KEYS) <= set(v) for v in known_stats.values()))
         for ws in wb.worksheets:
             self._shared_strings = ws._shared_strings
             extras = _sheet_extras(wb, zf, ws, ws._shared_strings, table_names)
@@ -403,6 +415,10 @@ class ExcelSource:
     def sheet_stats(self) -> dict[str, dict]:
         """シートごとの値のある範囲・セル数・行の並び（JSON にできる形。次に開くときの options["sheet_stats"]）。"""
         return {name: {k: meta[k] for k in _STAT_KEYS} for name, meta in self._sheets.items()}
+
+    def uncached_formulas(self, sheet: str) -> dict[int, int]:
+        """Excel で計算されていない数式のセルの数（列番号1始まり → 数）。"""
+        return {int(c): n for c, n in (self._meta(sheet).get("uncached_formulas") or {}).items()}
 
     def close(self) -> None:
         pass

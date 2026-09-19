@@ -121,7 +121,8 @@ def as_date(value) -> str | None:
     if not text:
         return None
     parsed, warning = to_date(text, text)
-    if warning is None and parsed:
+    # 日付のあとに「（再点検）」などが続く記入は、日付の部分で採点する（アプリは要確認にして日付を読む）
+    if parsed and (warning is None or warning.startswith("日付のあとに")):
         return parsed[:10]  # 時刻付き（「2023-07-10 23:08」）も日付の一致で採点する
     # 「24/8/25」「6/19 0時43分」のような年が2桁・無しの表記は日付として扱わない（比較は文字列で行う）
     return None

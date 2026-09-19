@@ -44,6 +44,9 @@ class ColumnSuggestion:
     log: bool = False
     matched_by: str = ""  # template/dictionary/similar/none
     inferred_type: str = ""  # 値から推定した型（type と違えば画面で知らせる）
+    # md が "omit" になった理由（画面の説明用）: person（人名）/dictionary（管理用の列）/blank（空欄だけ）/
+    # code（値がコードだけ）/template（取り込み設定のとおり）
+    omit_reason: str = ""
 
 
 def suggest_columns(headers: list[str], sample_rows, template_spec=None) -> list[ColumnSuggestion]:
@@ -72,6 +75,9 @@ def suggest_columns(headers: list[str], sample_rows, template_spec=None) -> list
             )
         else:
             found = lookup_header(header)
+            if found and found[1] == "similar" and found[0].role == "person" and _looks_like_prose(values, stats):
+                # 「対応」「作業」が似た語の「対応者」「作業者」に当たっても、値が文章なら人名の列ではない
+                found = None
             if found:
                 std, how = found
                 s = ColumnSuggestion(
@@ -87,15 +93,18 @@ def suggest_columns(headers: list[str], sample_rows, template_spec=None) -> list
                     examples=stats["examples"], type_error_rate=0.0, blank_rate=stats["blank_rate"],
                     md="body" if role == "text" else "attribute", matched_by="none", inferred_type=stats["type"],
                 )
+        if s.md == "omit":
+            s.omit_reason = ("template" if s.matched_by == "template"
+                             else "person" if s.role == "person" else "dictionary")
         s.type_error_rate = _type_error_rate(values, s.type)
         if stats["log_like"] and s.role in ("text", "log", "attribute") and s.type == "text":
             s.role, s.log = "log", True
         if s.role == "log":
             s.log = True
         if s.blank_rate >= 1.0 and s.matched_by != "template":
-            s.md = "omit"
+            s.md, s.omit_reason = "omit", "blank"
         if _is_opaque_code(header, s, stats):
-            s.md = "omit"
+            s.md, s.omit_reason = "omit", "code"
         if s.matched_by != "template" and s.role in ("entity", "entity_label") and _looks_filled_down(values):
             s.fill_down_blank = True
         out.append(s)
@@ -232,6 +241,14 @@ def _is_blank(value, text: str) -> bool:
     if value is _MERGED:
         return False
     return not text or text.strip() in NA_TOKENS
+
+
+def _looks_like_prose(values: list[tuple[object, str]], stats: dict) -> bool:
+    """値が人名ではなく文章か（長文、または平均で人名より明らかに長い）。"""
+    if stats["type"] == "text":
+        return True
+    texts = [t for v, t in values if not _is_blank(v, t) and v is not _MERGED]
+    return bool(texts) and sum(len(t) for t in texts) / len(texts) > 15
 
 
 def _column_stats(values: list[tuple[object, str]]) -> dict:

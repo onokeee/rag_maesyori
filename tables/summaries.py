@@ -14,6 +14,9 @@ from decimal import ROUND_HALF_UP, Decimal
 from tables.spec import SummarySpec, TableSpec
 
 MAX_COVERAGE_MONTHS = 600  # 取り込み範囲がこれより長ければ、記録のある月だけを使う
+# 記録のある月どうしがこれより離れていれば、間の0件の月は作らない（打ち間違えた遠い年の1件で、
+# 空の月次集計が何百ファイルもできるのを防ぐ）
+MAX_EMPTY_GAP_MONTHS = 12
 
 
 # ---- 書式 -----------------------------------------------------------------------------
@@ -254,7 +257,13 @@ def coverage_months(coverage: dict | None, records: list[dict], spec: TableSpec)
     rng = month_range(start, end)
     if len(rng) > MAX_COVERAGE_MONTHS:
         return months
-    return sorted(set(rng) | {m for m in months if start <= m <= end})
+    inside = [m for m in months if start <= m <= end]
+    skip: set[str] = set()
+    for a, b in zip(inside, inside[1:]):
+        gap = month_range(month_add(a, 1), month_add(b, -1))
+        if len(gap) > MAX_EMPTY_GAP_MONTHS:
+            skip.update(gap)
+    return sorted((set(rng) - skip) | set(inside))
 
 
 def _breakdown(rows: list[dict], cat_key: str | None, sum_key: str | None) -> list[dict]:

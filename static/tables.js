@@ -266,13 +266,14 @@
         toast("外部に送信されることを確認して、チェックを入れてください。", "err");
         return;
       }
-      event.currentTarget.disabled = true;
+      const button = event.currentTarget;  // await のあとでは event.currentTarget が null になる
+      button.disabled = true;
       try {
         await postJson(aiPage.dataset.runUrl, { ...runOptions(), confirm_external: Boolean(external?.checked) });
         window.location.reload();
       } catch (e) {
         toast(e.message, "err");
-        event.currentTarget.disabled = false;
+        button.disabled = false;
       }
     });
 

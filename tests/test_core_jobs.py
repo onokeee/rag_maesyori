@@ -270,6 +270,39 @@ def test_a_paused_ai_job_does_not_hold_up_other_imports(core_app):
         assert jobs.wait_job(same, timeout=5)["status"] == "done"
 
 
+def test_a_job_waiting_behind_a_paused_ai_job_says_what_it_waits_for(core_app):
+    """一時停止中の AI整形の後ろで待つジョブは、理由（何を待っているか・どうすれば動くか）を出す。"""
+    def ai(ctx):
+        while True:
+            if not ctx.wait_if_paused():
+                return None
+            time.sleep(0.01)
+
+    with core_app.app_context():
+        ai_job = jobs.start_job("ai_format", "table_import", 11, ai)
+        _wait_until(lambda: jobs.get_job(ai_job)["status"] == "running")
+        jobs.request_pause(ai_job)
+        _wait_until(lambda: jobs.get_job(ai_job)["status"] == "paused")
+
+        same = jobs.start_job("table_preview", "table_import", 11, lambda ctx: {"files": 1})
+        other_ai = jobs.start_job("ai_format", "table_import", 12, lambda ctx: {"rows": 1})
+        time.sleep(0.3)
+        waiting = jobs.get_job(same)
+        assert waiting["status"] == "queued"
+        assert "この取り込みのAI整形が一時停止中" in waiting["message"] and "再開するか中止" in waiting["message"]
+        assert waiting["waiting_for"]["job_id"] == ai_job and waiting["waiting_for"]["same_ref"]
+        behind = jobs.latest_job("table_import", 12, kind="ai_format")
+        assert behind["status"] == "queued"
+        assert "別の取り込みのAI整形が一時停止中" in behind["message"]
+        assert behind["waiting_for"]["ref_id"] == 11 and not behind["waiting_for"]["same_ref"]
+        assert "message" not in jobs.get_job(ai_job) or "待っています" not in jobs.get_job(ai_job)["message"]
+
+        jobs.request_cancel(ai_job)
+        assert jobs.wait_job(same, timeout=5)["status"] == "done"
+        assert jobs.wait_job(other_ai, timeout=5)["status"] == "done"
+        assert jobs.get_job(same).get("waiting_for") is None
+
+
 def test_a_job_whose_last_status_write_fails_ends_as_failed(core_app, monkeypatch):
     import sqlite3
 

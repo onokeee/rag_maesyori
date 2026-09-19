@@ -76,6 +76,15 @@ def sniff_csv(path) -> CsvSniff:
             f"文字コードを選び直すか、「読めない文字を{REPLACEMENT_CHAR}に置き換える」を選んでください"
         )
 
+    if encoding in ("cp932", "shift_jis_2004"):
+        utf8_lines = _utf8_lines(path)
+        if utf8_lines:
+            listed = "・".join(str(n) for n in utf8_lines[:5]) + ("…" if len(utf8_lines) > 5 else "")
+            warnings.append(
+                f"UTF-8 の行が混ざっています（{listed}行目）。{encoding.upper()} として読むと、その行の字が化けます。"
+                "文字コードをそろえてから取り込み直してください"
+            )
+
     truncated = path.stat().st_size > len(head)
     text = _decode_head(head, encoding)
     delimiter, ratio, records = _detect_delimiter(text, truncated, path.suffix.lower() == ".tsv")
@@ -174,6 +183,26 @@ def _full_decode_error(path: Path, encoding: str) -> tuple[int, int] | None:
                 return None
             consumed += len(chunk)
             newlines += chunk.count(b"\n")
+
+
+def _utf8_lines(path: Path, limit: int = 6) -> list[int]:
+    """Shift_JIS 系と判定したファイルで、UTF-8 として正しく読める日本語の行（2つのファイルをつないだ等）の行番号。
+
+    UTF-8 の日本語のバイト列は CP932 としてもほぼ読めてしまい、エラーにならずに字が化けるため、行ごとに確かめる。
+    """
+    found: list[int] = []
+    with path.open("rb") as f:
+        for n, line in enumerate(f, 1):
+            if line.isascii():
+                continue
+            try:
+                line.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            found.append(n)
+            if len(found) >= limit:
+                break
+    return found
 
 
 def _full_decode_error_line(path: Path, encoding: str) -> int | None:
@@ -379,8 +408,11 @@ class CsvSource:
             raise UploadError(f"文字コード {self.encoding} は使えません。文字コードを選び直してください") from e
         except csv.Error as e:
             # 「field larger than field limit」など。" の閉じ忘れで残りのファイル全体が1つの値になったときに起きる
+            # 英語の例外文は画面に出さず、原因の見当を日本語で示す（元の例外は from e で残す）
+            hint = ("1つの値が大きすぎます。\" の閉じ忘れの可能性があります" if "field larger" in str(e)
+                    else "区切り文字や \" の置き方が崩れています")
             raise UploadError(
-                f"{index + 1}行目付近から、\" が閉じていないなどの理由で CSV として読めません（{e}）。ファイルを確認してください"
+                f"{index + 1}行目付近から、\" が閉じていないなどの理由で CSV として読めません（{hint}）。ファイルを確認してください"
             ) from e
         except UnicodeError as e:
             # UTF-16 の「BOM が無い」などは UnicodeDecodeError ではなく UnicodeError で上がる

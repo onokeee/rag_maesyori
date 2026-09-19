@@ -466,6 +466,95 @@ def test_ai_results_of_an_import_that_is_gone_are_swept(app, client, tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
 
 
+def _llm_call(conn, cache_key: str) -> None:
+    conn.execute("INSERT INTO llm_calls (cache_key, raw_text, created_at) VALUES (?, 'あ', '2026-09-19')",
+                 (cache_key,))
+
+
+def _llm_keys(conn) -> list[str]:
+    return sorted(r[0] for r in conn.execute("SELECT cache_key FROM llm_calls"))
+
+
+def test_purging_one_import_keeps_the_unreferenced_responses_another_import_still_uses(app, client):
+    """再依頼で直した行の1回目の応答は ai_items から参照されないが、再実行でキャッシュとして引く。
+    別の取り込みを消したときに巻き添えで消すと、再実行で再課金になる。その取り込みが無くなれば消える。"""
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        template_id = store.get_import(import_id)["template_id"]
+        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"}, template_id,
+                                    store.get_template(template_id)["current_version_id"])
+        conn = db.get_db()
+        _ai_row(conn, template_id, import_id, "TR-001", "K1")
+        _ai_row(conn, template_id, other, "TR-900", "K2-repair")
+        _llm_call(conn, "K2-first")   # 別の取り込みの、再依頼で直した行の1回目の応答（どこからも参照されない）
+        conn.commit()
+
+    assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
+    with app.app_context():
+        assert _llm_keys(db.get_db()) == ["K2-first", "K2-repair"]   # 消した取り込みの K1 だけ消える
+        purge.purge_table_import(other)
+        assert _llm_keys(db.get_db()) == []
+
+
+def test_a_response_saved_just_before_a_pause_survives_the_startup_sweep(app, client, tmp_path):
+    """一時停止の直前に受け取った応答は ai_items の行がまだ無い。起動時の片付けで消すと、再開で再課金になる。"""
+    from app import create_app
+    from tests.conftest import make_config
+
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        conn = db.get_db()
+        conn.execute("INSERT INTO jobs (kind, ref_type, ref_id, status, created_at, updated_at) "
+                     "VALUES ('ai_format', 'table_import', ?, 'interrupted', '2026-09-19', '2026-09-19')", (import_id,))
+        _llm_call(conn, "PAUSED")
+        conn.commit()
+        config = {"DATABASE": app.config["DATABASE"], "UPLOAD_DIR": app.config["UPLOAD_DIR"],
+                  "DATA_DIR": app.config["DATA_DIR"], "TABLES_DIR": app.config["TABLES_DIR"]}
+    restarted = create_app(make_config(tmp_path, **config))
+    with restarted.app_context():
+        assert _llm_keys(db.get_db()) == ["PAUSED"]
+        purge.purge_table_import(import_id)
+        assert _llm_keys(db.get_db()) == []
+
+
+def test_old_ai_rows_without_an_import_are_swept_once_their_template_has_no_import(app, client):
+    """古いDBの import_id の無い ai_items（と、その応答）は、その取り込み設定に取り込みが残っていなければ消す。"""
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        template_id = store.get_import(import_id)["template_id"]
+        conn = db.get_db()
+        conn.execute("""INSERT INTO ai_items (template_id, stage_id, row_key, cache_key, status, updated_at)
+                        VALUES (?, 'log', 'TR-OLD', 'OLD', 'ok', '2026-09-19')""", (template_id,))
+        _llm_call(conn, "OLD")
+        conn.commit()
+        purge.sweep_orphan_ai(conn)
+        assert _llm_keys(conn) == ["OLD"]   # 取り込みが残っている間は、持ち主かもしれないので残す
+        conn.execute("UPDATE table_imports SET template_id = NULL WHERE id = ?", (import_id,))
+        conn.commit()
+        purge.sweep_orphan_ai(conn)
+        assert conn.execute("SELECT COUNT(*) FROM ai_items").fetchone()[0] == 0
+        assert _llm_keys(conn) == []
+
+
+def test_purge_does_not_vacuum_while_a_job_is_running(app):
+    """VACUUM は DB 全体の書き込みを止める。動いているジョブの書き込みを「database is locked」で落とさない。"""
+    with app.app_context():
+        conn = db.get_db()
+        seen: list[str] = []
+        conn.set_trace_callback(seen.append)
+        conn.execute("INSERT INTO jobs (kind, ref_type, ref_id, status, created_at, updated_at) "
+                     "VALUES ('ai_format', 'table_import', 1, 'running', '2026-09-19', '2026-09-19')")
+        conn.commit()
+        purge._shrink(conn)
+        assert any("wal_checkpoint" in s for s in seen) and not any(s.strip() == "VACUUM" for s in seen)
+        conn.execute("UPDATE jobs SET status = 'done'")
+        conn.commit()
+        seen.clear()
+        purge._shrink(conn)
+        assert any(s.strip() == "VACUUM" for s in seen)
+        conn.set_trace_callback(None)
+
+
 # ---- 他サイトのページからのダウンロード（＝削除）を断る -----------------------------------------------
 # ダウンロードはデータを消すので、GET でも他サイト発なら断る（<img> や別サイトのリンクで消されないように）。
 

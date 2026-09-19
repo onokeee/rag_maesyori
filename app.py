@@ -89,17 +89,32 @@ def create_app(overrides: dict | None = None) -> Flask:
         # 127.0.0.1 で待ち受けても、攻撃者のドメインが 127.0.0.1 を指していれば
         # そのページと同一オリジンになり、画面の中身を読み取られてしまう（DNSリバインディング）。
         try:
-            host = urlsplit(f"//{request.host}").hostname   # ポート番号・[] を外したホスト名
+            parts = urlsplit(f"//{request.host}")
+            host, port = parts.hostname, parts.port   # ポート番号・[] を外したホスト名
         except ValueError:
-            host = None
+            host, port = None, None
         if not _is_loopback(host):
-            abort(400)
+            # 汎用の 400 画面（ホームへ = 同じアドレスの / ）では、また断られるだけで開き方が分からない。
+            # 開けるアドレスを示す（ポートは送られてきた Host のもの。読めなければ起動時の PORT）
+            home_url = f"http://127.0.0.1:{port or PORT}/"
+            text = f"このアドレスでは開けません。このアプリは {home_url} で開いてください"
+            if request.accept_mimetypes.best == "application/json" or request.is_json:
+                return jsonify(error=text), 400
+            return render_template("errors/400.html", host_refused=True, home_url=home_url), 400
 
     @app.before_request
     def _refuse_cross_site_write():
         # 他のサイトのページから、利用者のブラウザ経由で書き込ませない（views.is_cross_site_write のとおり）。
         if is_cross_site_write(request):
             abort(403)
+
+    @app.after_request
+    def _no_store(response):
+        # 画面・JSON には取り込んだ値や Markdown が載る。ダウンロードでサーバー側から消しても（design.md 3.3）、
+        # ブラウザのキャッシュ（戻る・再表示）に残らないよう、保存させない。静的ファイル（CSS・JS）は除く
+        if request.endpoint != "static":
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.errorhandler(403)
     def _forbidden(_exc):

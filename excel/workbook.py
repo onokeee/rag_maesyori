@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import MAC_EPOCH
 
 from excel.image_detector import detect_images
-from excel.text import (MAX_LABEL_LENGTH, cell_text, label_base, label_parts, normalize_label, paren_stripped,
+from excel.text import (MAX_LABEL_LENGTH, cell_text, format_unit, label_base, label_parts, normalize_label, paren_stripped,
                         section_stripped, split_inline)
 
 
@@ -32,6 +32,7 @@ class Cell:
     fill: str = ""  # 塗りつぶし色の識別キー（"rgb:FFDDEEFF" / "theme:4:0.6" など。塗りなしは ""）
     alt_norm: str = ""  # 先頭の項番を除いたラベル（「３．暫定対策」→「暫定対策」）。無ければ ""
     part_norms: tuple[str, ...] = ()  # 「ライン／工程」のように2つのラベルをまとめた見出しの各部分
+    fmt_unit: str = ""  # 数値のセルの表示形式に書かれた単位（「#,##0"分"」→「分」）。無ければ ""
 
     @property
     def coord(self) -> str:
@@ -81,6 +82,8 @@ class SheetGrid:
                 fill=fill_key(xl),
                 alt_norm=section_stripped(text) if _label_like(xl.value, text) else "",
                 part_norms=label_parts(text) if _label_like(xl.value, text) else (),
+                fmt_unit=(format_unit(xl.number_format)
+                          if isinstance(xl.value, (int, float)) and not isinstance(xl.value, bool) else ""),
             )
             self.max_row = max(self.max_row, bottom)
             self.max_col = max(self.max_col, right)

@@ -36,18 +36,12 @@ ZIP_RATIO_MIN_BYTES = 16 * 1024 * 1024
 # シート全体の結合（A1:XFD1048576 など）が1つあるだけで、上のサイズ制限より前に固まる（数秒〜終わらない）。
 # 行全体の結合（A1:XFD1 = 16,384 セル）や列全体の結合（A:A = 約105万セル）は通す。
 MAX_MERGED_CELLS = 2_000_000
-# シートの置き場所は workbook.xml.rels で自由に決められるので、場所を決め打ちせず .xml の部品をすべて見る
-# （文字列の中の < は &lt; になっているので、共有文字列などに書かれた文字は拾わない）
-_XML_PART = re.compile(r".+\.xml", re.IGNORECASE)
-_MERGE_REF = re.compile(rb"<(?:\w+:)?mergeCell\b[^>]*?\bref=[\"']([A-Za-z]{1,3}\d{1,7})(?::([A-Za-z]{1,3}\d{1,7}))?[\"']")
 # セル数の上限（ブック全体の <c> の数）。openpyxl は開くときにセルを1つずつ作るので、
 # 圧縮すると小さいが展開すると大量のセルがあるブック（64KB で 100万セルなど）は、上のサイズ制限を通っても固まる。
 # 一覧表は tables.excel_source が別に上限（EXCEL_MAX_CELLS）を持ち「CSVで保存」と案内するので、ここは最後の砦の値。
 MAX_CELLS = 1_000_000
-# <c> と <x:c> だけを数える（グラフの <c:chart> などは数えない）
-_CELL_TAG = re.compile(rb"<(?:\w+:)?c(?=[\s/>])")
-# チャンクの境目で切れたタグを次のチャンクと合わせて読むために残すバイト数（タグ1つより長ければよい）
-_MERGE_TAIL = 512
+# セルとして数える要素の名前空間（SpreadsheetML 本体の <c> だけ。グラフの <c:chart> などは名前空間が違う）
+_SHEET_NAMESPACES = ("http://schemas.openxmlformats.org/spreadsheetml/2006/main", STRICT_NS)
 # workbook.xml の名前空間判定で読む先頭バイト数
 _WORKBOOK_HEAD_BYTES = 64 * 1024
 # 掴まれているファイルを消すときの再試行（ウイルス対策のスキャンなどは短時間で終わる）
@@ -155,8 +149,9 @@ def precheck_excel(path, max_cells: int | None = None) -> None:
                 raise UploadError("Excelファイル（.xlsx / .xlsm）ではありません（ブックの情報が見つかりません）")
             with zf.open(workbook) as wb:
                 text = wb.read(_WORKBOOK_HEAD_BYTES).decode("utf-8", errors="ignore")
-            _check_sheet_parts(zf, [n for n in sorted(names) if _XML_PART.fullmatch(n)],
-                               max_cells or MAX_CELLS)
+            # シートの置き場所と名前（拡張子）は workbook.xml.rels で自由に決められる（sheet1.dat でも開ける）ので、
+            # 名前で選ばずに部品をすべて見る（XML でない部品は、読み始めてすぐ読めなくなって終わる）
+            _check_sheet_parts(zf, sorted(names), max_cells or MAX_CELLS)
     # zlib.error / EOFError: 圧縮データが壊れている（zipfile はこれらを包まずにそのまま投げる）
     except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, RuntimeError, NotImplementedError,
             zlib.error, EOFError) as exc:
@@ -173,48 +168,74 @@ def precheck_excel(path, max_cells: int | None = None) -> None:
         raise UploadError("シートがないブックです。シートのあるブックを選んでください")
 
 
-def _merged_area(start: bytes, end: bytes | None) -> int:
+def _merged_area(ref: str | None) -> int:
     from openpyxl.utils.cell import range_boundaries
 
-    ref = start.decode("ascii") + (":" + end.decode("ascii") if end else "")
     try:
-        min_col, min_row, max_col, max_row = range_boundaries(ref.upper())
+        min_col, min_row, max_col, max_row = range_boundaries(str(ref or "").strip().upper())
     except (ValueError, TypeError):
         return 0   # 読めない範囲は openpyxl 側で扱いが決まる（ここでは数えない）
+    if None in (min_col, min_row, max_col, max_row):
+        return 0
     return (abs(max_col - min_col) + 1) * (abs(max_row - min_row) + 1)
 
 
-def _check_sheet_parts(zf: zipfile.ZipFile, sheet_parts: list[str], max_cells: int) -> None:
-    """シートの XML を分割して読み、結合範囲の面積の合計とセル数を数え、上限を超えたら UploadError。
+class _PartCounter:
+    """XML の部品1つを分割して読み、結合範囲の面積とセル数を数える（xml.parsers.expat）。
+
+    文字列を正規表現で探すのではなく XML として読むので、ref = "..."（= の前後の空白）、文字参照（&#88;）、
+    どんな名前空間の接頭辞（<x.y:c> など）でも、openpyxl（xml.etree＝同じ expat）と同じ解釈で数える。
+    """
+
+    def __init__(self, merged: int, cells: int, max_cells: int):
+        from xml.parsers import expat
+
+        self.merged, self.cells, self.max_cells = merged, cells, max_cells
+        self.parser = expat.ParserCreate(namespace_separator=" ")
+        self.parser.StartElementHandler = self._start
+        # DTD で実体を定義して大量に展開させる細工は、正しいブックには無いので断る
+        self.parser.EntityDeclHandler = self._entity
+
+    def _start(self, name: str, attrs: dict) -> None:
+        namespace, _, local = name.rpartition(" ")
+        if local == "mergeCell":
+            self.merged += _merged_area(attrs.get("ref"))
+            if self.merged > MAX_MERGED_CELLS:
+                raise UploadError("結合セルの範囲が大きすぎます（シート全体・列全体の結合など）。"
+                                  "不要な結合を解除して保存し直してください")
+        elif local == "c" and namespace in _SHEET_NAMESPACES:
+            self.cells += 1
+            if self.cells > self.max_cells:
+                raise UploadError(f"セル数が上限（{self.max_cells:,} セル）を超えています。"
+                                  "不要なシート・範囲を削除して保存し直してください")
+
+    def _entity(self, *_args) -> None:
+        raise UploadError("Excelファイルとして読み込めません（不正なファイルの可能性があります）")
+
+
+def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int) -> None:
+    """部品の XML を分割して読み、結合範囲の面積の合計とセル数を数え、上限を超えたら UploadError。
 
     openpyxl で開く前に確かめる（開いた時点で結合範囲のセルと、すべてのセルが作られてしまうため）。
-    チャンクの境目で切れたタグを数え損ねないよう、末尾 _MERGE_TAIL バイトは次のチャンクと合わせて読む。
-    そのとき二重に数えないよう、末尾に残す範囲より前で始まるタグだけをその回で数える。
+    XML として読めなくなった部品は、そこまでの分だけ数える（画像などの XML でない部品はすぐ終わる）。
+    openpyxl も同じ expat で読むので、読めない部品のその先の結合・セルは作られない（開くこと自体が失敗する）。
     """
+    from xml.parsers import expat
+
     merged = 0
     cells = 0
-    for part in sheet_parts:
-        buf = b""
+    for part in parts:
+        counter = _PartCounter(merged, cells, max_cells)
         with zf.open(part) as f:
-            while True:
-                chunk = f.read(CHUNK_SIZE)
-                buf += chunk
-                # 読み終わったら残りをすべて数える。途中なら末尾を残す
-                cut = len(buf) if not chunk else len(buf) - _MERGE_TAIL
-                if cut > 0:
-                    for m in _MERGE_REF.finditer(buf):
-                        if m.start() < cut:
-                            merged += _merged_area(m.group(1), m.group(2))
-                    cells += sum(1 for m in _CELL_TAG.finditer(buf) if m.start() < cut)
-                    buf = buf[cut:]
-                if merged > MAX_MERGED_CELLS:
-                    raise UploadError("結合セルの範囲が大きすぎます（シート全体・列全体の結合など）。"
-                                      "不要な結合を解除して保存し直してください")
-                if cells > max_cells:
-                    raise UploadError(f"セル数が上限（{max_cells:,} セル）を超えています。"
-                                      "不要なシート・範囲を削除して保存し直してください")
-                if not chunk:
-                    break
+            try:
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    counter.parser.Parse(chunk, not chunk)
+                    if not chunk:
+                        break
+            except expat.ExpatError:
+                pass
+        merged, cells = counter.merged, counter.cells
 
 
 def _check_zip_limits(infos: list[zipfile.ZipInfo]) -> None:

@@ -1,6 +1,7 @@
 """llm_calls：AIの生の応答のキャッシュ。
 
-- キーは sha256(実際に送る messages 全文＋モデル＋パラメータ＋スキーマ＋方式)。
+- キーは sha256(実際に送る messages 全文＋モデル＋パラメータ＋スキーマ＋方式＋接続先URL)。
+  接続先を別のサーバーに変えたら、同じモデル名でも前の応答は使わない。
 - 受け取ったらその場で1件ずつコミットする（落ちても払い済みの呼び出しを失わない）。
 - 照合と描画は読み出すたびにやり直す（閾値や md の形を変えても再課金しない）。
 - conn を渡さなければ database.connect() で開いて閉じる（app_context が必要）。
@@ -14,7 +15,7 @@ from models import database
 
 
 def cache_key(messages: list[dict], model: str, params: dict | None = None, schema: dict | None = None,
-              structured_mode: str | None = None) -> str:
+              structured_mode: str | None = None, endpoint: str | None = None) -> str:
     payload = {
         "messages": [{"role": m.get("role"), "content": m.get("content")} for m in messages],
         "model": model or "",
@@ -22,6 +23,9 @@ def cache_key(messages: list[dict], model: str, params: dict | None = None, sche
         "schema": schema,
         "structured_mode": structured_mode or "",
     }
+    ep = str(endpoint or "").strip().rstrip("/")
+    if ep:   # 接続先の指定が無いときは従来と同じキー（既存のキャッシュを無駄にしない）
+        payload["endpoint"] = ep
     return sha256_json(payload)
 
 

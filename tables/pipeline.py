@@ -293,8 +293,9 @@ def _preview_signature(import_id: int, imp: dict, spec) -> str:
 
     rows_path = import_files(import_id)["rows"]
     row = database.get_db().execute(
-        "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM ai_items WHERE template_id = ?",
-        (imp.get("template_id") or 0,)).fetchone()
+        # この取り込みの AI の結果だけ（usable_ai_results が読む範囲と同じ）。同じ設定の別の取り込みでは変わらない
+        "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM ai_items WHERE template_id = ? AND import_id = ?",
+        (imp.get("template_id") or 0, import_id)).fetchone()
     return json.dumps([spec_hash(spec), rows_path.stat().st_mtime_ns if rows_path.exists() else 0, list(row)])
 
 

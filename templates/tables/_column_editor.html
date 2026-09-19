@@ -62,7 +62,13 @@
           <td><select data-field="role" aria-label="役割">{% for v, label in roles %}<option value="{{ v }}" {{ 'selected' if v == r.role }}>{{ label }}</option>{% endfor %}</select></td>
           <td class="center"><input type="checkbox" data-field="fill_down_blank" {{ 'checked' if r.fill_down_blank }} aria-label="空欄は上と同じ"></td>
           <td><select data-field="md" aria-label="mdでの扱い">{% for v, label in md_modes %}<option value="{{ v }}" {{ 'selected' if v == r.md }}>{{ label }}</option>{% endfor %}</select>
-            {%- if r.md == 'omit' and r.auto_omit %}<br><small class="muted">値がコードだけなので、はじめから「出さない」にしています</small>{% endif %}</td>
+            {%- if r.md == 'omit' and r.auto_omit %}<br><small class="muted">
+              {%- if r.omit_reason == 'person' %}人名なので、はじめから「出さない」にしています
+              {%- elif r.omit_reason == 'blank' %}空欄だけなので、はじめから「出さない」にしています
+              {%- elif r.omit_reason == 'dictionary' %}記録に不要な管理用の列なので、はじめから「出さない」にしています
+              {%- elif r.omit_reason == 'code' %}値がコードだけなので、はじめから「出さない」にしています
+              {%- else %}取り込み設定のとおり「出さない」にしています
+              {%- endif %}</small>{% endif %}</td>
           <td class="center"><input type="checkbox" data-field="ai" {{ 'checked' if r.ai }} aria-label="AI整形の対象"></td>
         </tr>
       {% endfor %}

@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field, replace
 from excel.tables import (MIN_COLUMNS, SAME_COLUMNS_RATIO, Table, find_table, find_table_by_columns, is_table_value,
                           list_header_keys, merge_table_values, parse_table_text, section_heading, seq_header,
                           stacked_tables, table_header_keys)
-from excel.text import (MAX_LABEL_LENGTH, numeric_unit, pick_checked, split_code_name, split_combined_value,
+from excel.text import (EXCEL_ERROR_WARNING, MAX_LABEL_LENGTH, excel_error, numeric_unit, pick_checked, split_code_name, split_combined_value,
                         is_plain_number, to_date, to_number, value_unit, written_unit)
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
 from pattern.dictionary import (COMBINED_EQUIPMENT_NORMS, COMBINED_EQUIPMENT_PARTS, DICTIONARY_NORMS,
@@ -143,9 +143,18 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
             continue
         result.sheet, result.label_cell = name, label.coord
         result.value_cell = values[0].coord if inline_value is None else label.coord
+        error = excel_error(inline_value if inline_value is not None else values[0].text)
+        if error and (inline_value is not None or len(values) == 1):
+            # 「#REF!」「#DIV/0!」を値にしない（数値の項目で 0 と単位「!」に化けない）。要確認にする
+            result.warning = f"{EXCEL_ERROR_WARNING}（{error}）です。元のファイルで数式を確かめて、値を入力してください"
+            return result
         result.value, result.warning = _convert(fd.data_type, values, inline_value, info.date1904, fd.unit)
         if fd.data_type == "number":
-            _apply_number_unit(result, fd, inline_value if inline_value is not None else values[0].text)
+            text = inline_value if inline_value is not None else values[0].text
+            if inline_value is None and values[0].fmt_unit and not written_unit(text):
+                # 表示形式「#,##0"分"」のセル: 画面に見えている単位を、値に書かれた単位として扱う
+                text = f"{text}{values[0].fmt_unit}"
+            _apply_number_unit(result, fd, text)
         return result
     if not result.label_found:
         result.warning = "ラベルが見つかりません"
@@ -177,8 +186,11 @@ def number_unit(value, text: str, spec_unit: str, field_name: str, display_name:
         return unit, warning
     hint = ambiguous_unit_hint(field_name, display_name)
     if hint:
-        warning = (f"単位が書かれていません（{hint}）。"
-                   "「帳票の種類」の画面でこの項目の単位を決めてください")
+        # 先頭の「単位が書かれていません」は views/forms._UNIT_WARNING_PREFIXES が見ているので変えない
+        example = hint.split("か", 1)[0]  # 「分か時間かで…」→「分」
+        warning = (f"単位が書かれていません（{hint}）。値に単位を付けて入力してください（例: {value}{example}）。"
+                   "これから読み取る帳票のためには「帳票の種類」の画面でこの項目の単位を決めてください"
+                   "（読み取り済みの帳票には反映されません）")
     return unit, warning
 
 

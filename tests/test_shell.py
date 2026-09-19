@@ -251,6 +251,31 @@ def test_other_host_is_refused(client):
     assert client.get("/forms/new", headers={"Host": "evil.example:5000"}).status_code == 400
 
 
+def test_a_refused_host_is_told_which_address_works(client):
+    """別の名前（PC名・hosts の別名）で開かれたときは、同じアドレスのホームへではなく、開けるアドレスへ案内する。"""
+    res = client.get("/", headers={"Host": "mypc:5123"})
+    page = res.get_data(as_text=True)
+    assert res.status_code == 400
+    assert "http://127.0.0.1:5123/" in page and 'href="http://127.0.0.1:5123/"' in page
+    assert ">ホームへ</a>" not in page   # 同じアドレスの / へ戻す（また断られる）ボタンは出さない
+    res = client.post("/forms/1/delete", headers={"Host": "mypc", "Accept": "application/json"})
+    assert res.status_code == 400 and "http://127.0.0.1:5000/" in res.get_json()["error"]
+
+
+def test_pages_and_json_are_not_kept_in_the_browser_cache(app, client):
+    """取り込んだ値の載る画面・JSON はブラウザに保存させない（ダウンロードで消したあと、戻るで出さない）。"""
+    from tests.test_retention import _add_confirmed_document
+
+    doc_id, _path = _add_confirmed_document(app, "キャッシュ.xlsx")
+    for url in ("/", f"/forms/{doc_id}/done", "/forms/999", "/api/jobs/999"):
+        res = client.get(url)
+        assert res.status_code == (404 if "999" in url else 200), url
+        assert res.headers.get("Cache-Control") == "no-store", url
+    assert client.get("/", headers={"Host": "evil.example"}).headers.get("Cache-Control") == "no-store"
+    static = client.get("/static/app.js")
+    assert static.status_code == 200 and "no-store" not in (static.headers.get("Cache-Control") or "")
+
+
 def test_startup_removes_orphan_uploads(tmp_path):
     """起動時に、DB から参照されていない取り込み途中の残骸だけを片付ける。"""
     config = make_config(tmp_path)

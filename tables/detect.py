@@ -25,6 +25,8 @@ LOOKAHEAD_ROWS = 300
 KEY_SAMPLE_ROWS = 50
 
 _BLOCK_TITLE_RE = re.compile(r"^\s*[■□◆◇●○▼▽★☆]")
+# 空行の後に1つだけ書かれた「以上」「作成者：…」などの書き添え（表の終わりの印）
+_FOOTER_RE = re.compile(r"^(?:以上[。.]?|(?:作成者|作成日|作成|記入者|承認者?|確認者|出典|備考)\s*[:：\s].*|(?:作成者|作成日|承認|出典|備考)[:：]?)$")
 _NOTE_RE = re.compile(r"^\s*(※|\*\d|（注|\(注|注[記意]?\s*[\d０-９]*\s*[:：)）.．、\s])")
 # 集計の語はラベル全体（前置き＋語＋短い後置き）として見る。「合計カウンタ不良」のような文の一部は合計行にしない
 _TOTAL_RE = re.compile(r"^.{0,15}?(総合計|合計|総計|累計)(件数|数|額|金額|時間|値)?$")
@@ -187,8 +189,11 @@ def classify_rows(source, sheet, layout: LayoutGuess, key_columns: list[int] | N
     if layout.data_end < layout.data_start:
         return
     limit = layout.data_end - layout.data_start + 1
+    after_blank = False
     for row in source.rows(sheet, layout.data_start, limit):
-        yield row, _classify(row, ctx)
+        rc = _classify(row, ctx, after_blank)
+        after_blank = rc.kind == "blank"
+        yield row, rc
 
 
 def sample_data_rows(source, sheet, layout: LayoutGuess, n: int = 200) -> list[SourceRow]:
@@ -379,8 +384,29 @@ def _pair_is_header(top: SourceRow, bottom: SourceRow, after: SourceRow | None, 
         # 結合のないCSV: 上段がまばらで、上段の値の真下にも下段の値がある
         if len(top_cells) >= 2 and len(top_cells) <= 0.6 * len(bottom_cells):
             positions = [i for i, c in enumerate(top.cells) if c.text]
-            return all(i < len(bottom.cells) and bottom.cells[i].text for i in positions)
+            if all(i < len(bottom.cells) and bottom.cells[i].text for i in positions):
+                return True
+        # 結合した2段見出しを書き出したCSV: 上段の見出しは横に広がる列の左端にだけあり、右隣の空欄の下に下段がある
+        return _csv_spanned_pair(top, bottom)
     return False
+
+
+def _csv_spanned_pair(top: SourceRow, bottom: SourceRow) -> bool:
+    """「管理No,発生,,設備,,停止時間」の下に「,日付,時刻,番号,名称,」がある形か。"""
+    def text(row: SourceRow, i: int) -> str:
+        return row.cells[i].text if i < len(row.cells) else ""
+
+    under_blank = 0
+    for i, c in enumerate(bottom.cells):
+        if not c.text:
+            continue
+        if not _is_header_cell(c):
+            return False
+        if not text(top, i):
+            under_blank += 1
+        elif text(top, i + 1) or not text(bottom, i + 1):
+            return False  # 上段の見出しの右隣が空いていない（横に広がっていない）
+    return under_blank >= 1
 
 
 def _build_headers(by_index: dict[int, SourceRow], rows_h: list[int], is_csv: bool
@@ -518,7 +544,8 @@ def _row_has_own_key(cells: list, before: list, key_cols: list[int], label_col: 
                and value_kind(cells[k].value, cells[k].text) != "number" for k in key_cols)
 
 
-def _classify(row: SourceRow, ctx: _Ctx) -> RowClass:
+def _classify(row: SourceRow, ctx: _Ctx, after_blank: bool = False) -> RowClass:
+    """行の種類。after_blank: 直前が空行か（空行の後の書き添え・継続行の扱いに使う）。"""
     width = ctx.width or len(row.cells)
     cells = row.cells[:width]
     nonempty = [c for c in cells if c.text]
@@ -544,12 +571,18 @@ def _classify(row: SourceRow, ctx: _Ctx) -> RowClass:
         return RowClass(row.index, "note", "注記")
     if len(nonempty) <= 2 and at_left and _BLOCK_TITLE_RE.match(first):
         return RowClass(row.index, "title", "表題")
+    if after_blank and len(nonempty) == 1 and len(first) <= 20             and _FOOTER_RE.match(unicodedata.normalize("NFKC", first).strip()):
+        return RowClass(row.index, "note", "表の下の書き添え")
     agg = _aggregate_label(row, width, ctx.key_cols)
     if agg:
         return RowClass(row.index, "subtotal", "合計" if agg == "total" else "小計")
     if ctx.is_csv and width >= 4 and len(row.cells) < 0.5 * width and len(nonempty) <= 2:
         return RowClass(row.index, "excluded", "列数が見出しと合わない")
     if ctx.key_cols and all(not _filled(row, k) for k in ctx.key_cols):
+        if _has_own_values(row, ctx) or after_blank:
+            # キー列（日付など）を書き省いただけの行。数値・日付を持つので別の記録。
+            # 空行を挟んだ行も前の記録の続きとは限らないので、黙って混ぜずに1件として出す
+            return RowClass(row.index, "data")
         return RowClass(row.index, "continuation", "キー列が空で文章だけの行")
     if ctx.key_cols and _keys_merged_from_above(row, ctx):
         return RowClass(row.index, "continuation", "キー列が上の行から縦に結合された行")
@@ -582,11 +615,14 @@ def _keys_merged_from_above(row: SourceRow, ctx: _Ctx) -> bool:
             merged += 1
     if not merged:
         return False
+    return not _has_own_values(row, ctx)
+
+
+def _has_own_values(row: SourceRow, ctx: _Ctx) -> bool:
+    """キー列以外に数値・日付・時刻の値があるか（＝前の記録の続きではなく、この行だけの記録の印）。"""
     keys = set(ctx.key_cols)
-    for i, c in enumerate(row.cells[:ctx.width or len(row.cells)]):
-        if i not in keys and c.text and value_kind(c.value, c.text) in ("number", "date", "datetime", "time"):
-            return False
-    return True
+    return any(i not in keys and c.text and value_kind(c.value, c.text) in ("number", "date", "datetime", "time")
+               for i, c in enumerate(row.cells[:ctx.width or len(row.cells)]))
 
 
 def _auto_key_columns(source, sheet, data_start: int, ctx: _Ctx) -> list[int]:
@@ -658,6 +694,7 @@ def _scan(source, sheet, head: list[SourceRow], ctx: _Ctx, data_start: int, data
     stop_reason = ""
     scanned = 0
     after_rows: list[SourceRow] = []
+    prev_blank = False
     for row in source.rows(sheet, data_start):
         if end is not None:
             after_rows.append(row)
@@ -665,7 +702,8 @@ def _scan(source, sheet, head: list[SourceRow], ctx: _Ctx, data_start: int, data
                 break
             continue
         scanned += 1
-        rc = _classify(row, ctx)
+        rc = _classify(row, ctx, prev_blank)
+        prev_blank = rc.kind == "blank"
         if data_end is not None:
             if row.index > data_end:
                 end = data_end
@@ -708,8 +746,10 @@ def _scan(source, sheet, head: list[SourceRow], ctx: _Ctx, data_start: int, data
         counts.pop("blank", None)
     # 終わりより後の行（先頭60行の表示用と、別の表があるかの確認）
     other_table_row = None
+    prev_blank = True
     for row in after_rows:
-        rc = _classify(row, ctx)
+        rc = _classify(row, ctx, prev_blank)
+        prev_blank = rc.kind == "blank"
         if rc.kind == "blank":
             kind, reason = "blank", ""
         elif rc.kind in ("note", "title"):

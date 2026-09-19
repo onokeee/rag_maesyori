@@ -8,13 +8,15 @@ from logproc.text import shadow
 _ID_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9](?:[A-Za-z0-9._\-]*[A-Za-z0-9])?")
 _UNITS = sorted(
     "個 本 枚 台 回 件 箇所 ヶ所 か所 カ所 セット 式 袋 缶 巻 m mm cm μm MPa kPa Pa ℃ °C V kV mA A kW W L mL ml "
-    "分 秒 時間 日間 週間 か月 ヶ月 カ月 kg g t MΩ Ω M % rpm Hz P 万円 円 人".split(),
+    "分 秒 時間 日間 週間 か月 ヶ月 カ月 kg g t MΩ Ω M % rpm Hz P 万円 円 人 Torr mTorr sccm slm degC".split(),
     key=len, reverse=True,
 )
 _UNIT_ALT = "|".join(re.escape(u) for u in _UNITS)
 # 英字で終わる単位は後ろに英字が続かないこと（「5mm」と「5mmHg」などの区別）。和文の単位は制限しない
 _QTY_UNIT = "(?:" + "|".join(re.escape(u) + ("(?![A-Za-z])" if u[-1].isascii() and u[-1].isalpha() else "") for u in _UNITS) + ")"
 _ASCII_UNIT_RE = re.compile(rf"\d+(?:\.\d+)?(?:E[-+]?\d+)?(?:{_UNIT_ALT})", re.IGNORECASE)
+# ガス・化学式（N2パージ、NF3 など）は型番ではない。E1・P2 のようなアラームコードと区別できないので、決まった一覧だけ除く
+_FORMULAS = frozenset("N2 O2 H2 NF3 CF4 SF6 CO2 H2O NH3 Cl2 C4F8 C2F6 CHF3 CH4 SiH4 WF6 BCl3 N2O O3 H2O2".split())
 # 識別子にしない形（日付・時刻・和暦・番号・マスク）
 _NOT_ID_RES = [
     re.compile(r"[RHS]\d{1,2}(?:\.\d{1,2}){2}"),
@@ -41,7 +43,7 @@ def identifier_spans(text: str) -> list[tuple[int, int, str]]:
         tok = m.group(0)
         if not (re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok)):
             continue
-        if _ASCII_UNIT_RE.fullmatch(tok) or any(r.fullmatch(tok) for r in _NOT_ID_RES):
+        if tok in _FORMULAS or _ASCII_UNIT_RE.fullmatch(tok) or any(r.fullmatch(tok) for r in _NOT_ID_RES):
             continue
         out.append((m.start(), m.end(), tok))
     return out

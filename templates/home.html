@@ -79,7 +79,7 @@
       <li>
         <div class="item-main">
           <span class="item-title">{{ d.title or d.file_name }}</span>
-          <span class="item-sub">{{ d.pattern_name or "種類未選択" }} ・ {{ d.created_at | replace("T", " ") }}</span>
+          <span class="item-sub">{{ d.pattern_name or d.extraction_pattern_name or "種類未選択" }} ・ {{ d.created_at | replace("T", " ") }}</span>
         </div>
         <div class="cluster">{{ ui.badge(d.state) }}<a class="btn small" href="{{ d.href }}">続きを開く</a>
           {{ ui.confirm_delete_form(url_for('forms.delete', doc_id=d.id),
@@ -127,7 +127,7 @@
       <li>
         <div class="item-main">
           <a class="item-title" href="{{ d.href }}">{{ d.title or d.file_name }}</a>
-          <span class="item-sub">{{ d.pattern_name or "" }} ・ {{ (d.confirmed_at or "") | replace("T", " ") }}</span>
+          <span class="item-sub">{{ d.pattern_name or d.extraction_pattern_name or "" }} ・ {{ (d.confirmed_at or "") | replace("T", " ") }}</span>
         </div>
         <div class="cluster">{{ ui.badge(d.state, label="修正中（確定済みの版あり）" if d.state == "modified" else None) }}
           <a class="btn small" href="{{ url_for('forms.download_md', doc_id=d.id) }}"
@@ -184,6 +184,9 @@
         <a class="btn small" href="{{ url_for('tables.download_zip', import_id=t.id) }}"
            data-confirm="ダウンロードすると、この取り込みのデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
            data-confirm-ok="ダウンロードして消す">zipをダウンロード</a>
+        {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=t.id),
+             "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。",
+             label="削除", next=url_for('home.index')) }}
       </li>
       {% endfor %}
     </ul>

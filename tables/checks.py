@@ -87,6 +87,7 @@ def run_checks(records, spec, stats) -> list[Issue]:
         undated = sum(1 for rec in records if not _values(rec).get(date_key))
         if undated:
             issues.append(Issue("warning", "undated", f"日付が空の行が{undated}件あります（「日付なし」のファイルに入れます）"))
+        issues += _date_outliers(records, date_key)
 
     # 許可値
     for col in spec.columns:
@@ -117,6 +118,12 @@ def run_checks(records, spec, stats) -> list[Issue]:
         issues.append(Issue("warning", "included_rows", f"非表示・取り消し線の行を{st['included_hidden']}行取り込みました"))
     if st.get("error_values"):
         issues.append(Issue("warning", "excel_error", f"Excelのエラー値（#N/A など）を空欄として扱ったセルが{st['error_values']}個あります"))
+    if st.get("uncached_formulas"):
+        by_col = st["uncached_formulas"]
+        names = "、".join(f"「{k}」" for k in list(by_col)[:5])
+        issues.append(Issue("warning", "uncached_formula",
+                            f"Excelで計算されていない数式のセルが{sum(by_col.values())}個あります（列{names}）。"
+                            "値が空欄として読まれています。Excelで開いて保存し直してから取り込んでください"))
     if st.get("unclosed_quote_row"):
         row = st["unclosed_quote_row"]
         issues.append(Issue("error", "unclosed_quote",
@@ -145,6 +152,29 @@ def run_checks(records, spec, stats) -> list[Issue]:
     if not records and not any(i.level == "error" for i in issues):
         issues.append(Issue("warning", "no_records", "取り込める行がありません"))
     return issues
+
+
+DATE_OUTLIER_YEARS = 5  # 記録の年の中央値からこれより離れた日付は、打ち間違いの疑い
+
+
+def _date_outliers(records, date_key: str) -> list[Issue]:
+    """ほかの記録から何年も離れた日付（2025年のデータに 2052年 など）。遠い月まで0件の月次集計ができる原因になる。"""
+    dated = []
+    for rec in records:
+        s = str(_values(rec).get(date_key) or "")
+        if len(s) >= 4 and s[:4].isdigit():
+            dated.append((int(s[:4]), s[:10], (_get(rec, "source") or {}).get("row")))
+    if len(dated) < 3:
+        return []
+    years = sorted(y for y, _d, _r in dated)
+    median = years[len(years) // 2]
+    far = [(d, r) for y, d, r in dated if abs(y - median) > DATE_OUTLIER_YEARS]
+    if not far:
+        return []
+    sample = "、".join(f"{r}行目（{d}）" if r else d for d, r in far[:5]) + ("など" if len(far) > 5 else "")
+    return [Issue("warning", "date_outlier",
+                  f"ほかの記録から{DATE_OUTLIER_YEARS}年より離れた日付が{len(far)}件あります: {sample}。"
+                  "年の打ち間違いでないか確認してください", row=far[0][1])]
 
 
 def _num(value) -> str:

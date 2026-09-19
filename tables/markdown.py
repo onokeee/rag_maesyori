@@ -533,7 +533,18 @@ def _coverage(coverage: dict | None, records: list[dict], spec: TableSpec) -> di
     if counts["months"]:
         start = min(start, counts["months"][0]) if start else counts["months"][0]
         end = max(end, counts["months"][-1]) if end else counts["months"][-1]
-    return {"start": start, "end": end}
+    # 最初と最後の記録の日（月の途中で始まる・終わるデータを、月全体と書かないため）
+    first = counts["date_min"] if len(str(counts["date_min"] or "")) == 10 else None
+    last = counts["date_max"] if len(str(counts["date_max"] or "")) == 10 else None
+    return {"start": start, "end": end, "first_date": first, "last_date": last}
+
+
+def _period_text(start_month: str, end_month: str, coverage: dict) -> str:
+    """start_month〜end_month の期間。取り込んだ記録の最初・最後の月なら、実際の最初・最後の日で書く。"""
+    first, last = coverage.get("first_date"), coverage.get("last_date")
+    a = first if first and first[:7] == start_month else month_first_day(start_month)
+    b = last if last and last[:7] == end_month else month_last_day(end_month)
+    return f"{a}〜{b}"
 
 
 def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names: _Names) -> list[MdFile]:
@@ -623,7 +634,7 @@ def _range_text(coverage: dict) -> str:
     start, end = coverage.get("start"), coverage.get("end")
     if not start or not end:
         return "日付なし"
-    return f"{month_first_day(start)}〜{month_last_day(end)}"
+    return _period_text(start, end, coverage)
 
 
 def render_dataset_card(spec: TableSpec, records: list[dict], coverage: dict) -> str:
@@ -735,7 +746,7 @@ def _render_month_summary(spec: TableSpec, item: dict, coverage: dict) -> str:
     head = f"# {name} 月次集計 {ml}"
     body = [
         f"- データ種別: {name}からアプリが計算した集計値（AIは使っていません）",
-        f"- 集計対象: {month_first_day(month)}〜{month_last_day(month)} の記録（{name}の取り込み範囲: {_range_text(coverage)}）",
+        f"- 集計対象: {_period_text(month, month, coverage)} の記録（{name}の取り込み範囲: {_range_text(coverage)}）",
     ]
     overview = ["## 概要", f"- {ml}の{name}の記録は{item['count']:,}件です。"]
     for key, total in item["sums"].items():
@@ -785,7 +796,7 @@ def _render_entity_fy(spec: TableSpec, item: dict, coverage: dict) -> str:
     body += md_bullet(entity.display, eid)
     if label is not None and item["name"]:
         body += md_bullet(label.display, item["name"])
-    body.append(f"- 集計対象: {month_first_day(start)}〜{month_last_day(end)} の記録（{name}の取り込み範囲: {_range_text(coverage)}）")
+    body.append(f"- 集計対象: {_period_text(start, end, coverage)} の記録（{name}の取り込み範囲: {_range_text(coverage)}）")
     overview = ["## 概要"]
     metrics = item["metrics"]
     overview.append(f"- {eid}の{fy}年度（{period_words}）の記録は{item['count']:,}件です。")

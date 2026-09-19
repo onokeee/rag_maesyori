@@ -47,6 +47,8 @@ _workers: dict[str, threading.Thread] = {}
 _worker_lock = threading.Lock()
 # 各列がいま実行している取り込み（ref_type, ref_id）。同じ取り込みのジョブを別の列で同時に動かさないため
 _executing: dict[str, tuple] = {}
+# 各列がいま実行しているジョブ（DB のパス, job_id）。待機中のジョブに「何を待っているか」を出すため
+_executing_job: dict[str, tuple[str, int]] = {}
 # このプロセスが登録したジョブ（DB のパス, job_id）。これ以外で heartbeat が古いものは持ち主がいない
 _owned: set[tuple[str, int]] = set()
 
@@ -178,7 +180,7 @@ def start_job(kind: str, ref_type: str, ref_id: int | None, fn: Callable[[JobCon
     with _worker_lock:
         _owned.add((_db_key(), job_id))
         q = _queues.setdefault(lane, queue.Queue())
-    q.put((app, job_id, fn, ref))
+    q.put((app, job_id, fn, ref, _db_key()))
     _ensure_worker(lane)
     return job_id
 
@@ -213,6 +215,7 @@ def _next_item(lane: str, pending: list):
             for i, item in enumerate(pending):
                 if item[3] is None or item[3] not in busy:
                     _executing[lane] = item[3]
+                    _executing_job[lane] = (item[4], item[1])
                     return pending.pop(i)
         try:
             pending.append(q.get(timeout=PAUSE_POLL if pending else None))
@@ -223,7 +226,7 @@ def _next_item(lane: str, pending: list):
 def _worker_loop(lane: str = "main") -> None:
     pending: list = []
     while True:
-        app, job_id, fn, _ref = _next_item(lane, pending)
+        app, job_id, fn, _ref, _db = _next_item(lane, pending)
         try:
             _run(app, job_id, fn)
         except Exception:  # ワーカーは止めない
@@ -235,6 +238,7 @@ def _worker_loop(lane: str = "main") -> None:
         finally:
             with _worker_lock:
                 _executing.pop(lane, None)
+                _executing_job.pop(lane, None)
 
 
 def _fail_left_open(app, job_id: int) -> None:
@@ -368,10 +372,52 @@ def _reap_orphan(conn, row):
     return conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
 
 
+KIND_LABELS = {"ai_format": "AI整形"}
+
+
+def _waiting_note(conn, job: dict | None) -> dict | None:
+    """待機中のジョブに、何が終わるのを待っているかを付ける（job["waiting_for"] と、空なら job["message"]）。
+
+    AI整形は一時停止している間も列と取り込みを使ったままなので、その後ろのジョブは「待機中」のまま動かない。
+    理由が画面に出ないと、利用者は止まっているのか分からない（再開・中止すれば動き出すことも伝える）。
+    """
+    if job is None or job["status"] != "queued":
+        return job
+    lane = LANE_OF_KIND.get(job["kind"], "main")
+    ref = (job.get("ref_type") or "", job.get("ref_id")) if job.get("ref_id") is not None else None
+    db_key = _db_key()
+    with _worker_lock:
+        running = dict(_executing)
+        running_jobs = dict(_executing_job)
+    blocker, same_ref = None, False
+    for other, other_ref in running.items():   # 同じ取り込みを別の列が実行中
+        if other != lane and ref is not None and other_ref == ref and running_jobs.get(other, ("",))[0] == db_key:
+            blocker, same_ref = running_jobs[other][1], True
+            break
+    if blocker is None and running_jobs.get(lane, ("",))[0] == db_key and running_jobs[lane][1] != job["id"]:
+        blocker = running_jobs[lane][1]           # 同じ列で前のジョブが動いている
+    if blocker is None:
+        return job
+    row = conn.execute("SELECT id, kind, ref_type, ref_id, status FROM jobs WHERE id = ?", (blocker,)).fetchone()
+    if row is None or row["status"] not in ACTIVE_STATUSES:
+        return job
+    job["waiting_for"] = {"job_id": row["id"], "kind": row["kind"], "ref_type": row["ref_type"],
+                          "ref_id": row["ref_id"], "status": row["status"], "same_ref": same_ref}
+    if not job.get("message"):
+        label = KIND_LABELS.get(row["kind"], "前の処理")
+        whose = "この取り込みの" if same_ref else ("別の取り込みの" if row["kind"] in KIND_LABELS else "")
+        if row["status"] == "paused":
+            job["message"] = (f"{whose}{label}が一時停止中のため待っています。"
+                              f"{label}の画面で再開するか中止すると始まります")
+        else:
+            job["message"] = f"{whose}{label}が終わるのを待っています"
+    return job
+
+
 def get_job(job_id: int) -> dict | None:
     """ジョブ1件（params / progress / result / status_label / finished を付けて返す）。"""
-    return _with_conn(lambda c: _decode(_reap_orphan(
-        c, c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())))
+    return _with_conn(lambda c: _waiting_note(c, _decode(_reap_orphan(
+        c, c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()))))
 
 
 def latest_job(ref_type: str, ref_id: int, kind: str | None = None) -> dict | None:
@@ -379,7 +425,8 @@ def latest_job(ref_type: str, ref_id: int, kind: str | None = None) -> dict | No
     if kind:
         sql += " AND kind = ?"
         args.append(kind)
-    return _with_conn(lambda c: _decode(_reap_orphan(c, c.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone())))
+    return _with_conn(lambda c: _waiting_note(c, _decode(_reap_orphan(
+        c, c.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()))))
 
 
 def _request(job_id: int, sets: str, statuses=ACTIVE_STATUSES) -> bool:

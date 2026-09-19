@@ -26,13 +26,14 @@ ACTION_GROUPS = [
 _DATE_RE = re.compile(
     r"\d{1,4}\s*[/／]\s*\d{1,2}(?:\s*[/／]\s*\d{1,4})?|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}日|\d{1,2}月"
     r"|\d{1,2}日(?!間)|\d{1,2}\s*[:：]\s*\d{2}|\d{1,2}時(?!間)|令和|平成|昭和"
-    r"|翌日|翌週|翌月|翌朝|前日|昨日|本日|今日|今朝|明日|先週|来週|週明け|同日|\d+日後|\d+日前|午前|午後"
+    r"|翌日|翌週|翌月|翌朝|前日|昨日|本日|今日|今朝|明日|先週|来週|今週|先月|来月|今月|月末|月初|週末|年内|週明け|同日"
+    r"|\d+日後|\d+日前|午前|午後"
 )
 _HONORIFIC_RE = re.compile(r"(?<![お皆各])([一-鿿々ァ-ヶー]{1,6})(さん|様|氏|殿)")
 _HONORIFIC_OK = {"客", "業者", "メーカー", "先方", "担当者", "ご担当者", "皆", "各位"}
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 _KANJI_DIGITS = {"〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
-_KANJI_NUM_RE = re.compile(r"([一二三四五六七八九十]{1,3})(?=本|個|回|枚|台|件|箇所|ヶ所|か所|セット|式|袋|缶|巻|人|日|時間|分|秒|週|か月|ヶ月)")
+_KANJI_NUM_RE = re.compile(r"([一二三四五六七八九十]{1,3})(?=本|個|回|度|枚|台|件|箇所|ヶ所|か所|セット|式|袋|缶|巻|人|日|時間|分|秒|週|か月|ヶ月)")
 _VAGUE_COUNT = ("数回", "複数", "何回", "数本", "数個", "数枚", "数台", "何度")
 # 最後の状態（final_state.v）ごとに、根拠のエントリに書かれているはずの語（どれか1つ）。
 # 選択肢にない独自の状態と「不明」は照合しない
@@ -46,6 +47,15 @@ FINAL_STATE_WORDS = {
     "未着手": ["未"],
 }
 _NOT_DONE_RE = re.compile(r"未(?:完了|解決|終了|済)")          # 「未完了」を「完了」の根拠にしない
+# 「手配済」「発注済」「連絡済」は段取りが済んだだけで、不具合の対応の完了ではない
+_ARRANGED_RE = re.compile(r"(?:手配|発注|連絡|依頼|申請|問い?合わ?せ|注文|見積)\s*済み?")
+# 「済」だけが根拠のとき、「完了」と両立しない、まだ終わっていないことを示す語
+_PENDING_RE = re.compile(r"待ち|入荷待|納期")
+# 「再発なし」の根拠になる言い方（「復旧しない」のような別の否定は根拠にしない）
+_RECUR_NO_RE = re.compile(
+    r"再発\s*(?:なし|無し|無|せず|しない|していない|しておらず|ない|は?見られ(?:ない|ず))"
+    r"|(?:以降|その後|以後|現在|今のところ)[^。]{0,8}?(?:異常|問題|不具合|症状|発生|再発)\s*(?:なし|無し|無|ない|せず|しない|していない)"
+    r"|(?:異常|問題|不具合|症状)\s*(?:なし|無し)")
 # 再発の記録（「再発なし」「再発せず」「再発防止」は除く）
 _RECUR_YES_RE = re.compile(r"再発(?!\s*(?:なし|無し|無|せず|しない|していない|しておらず|ない|防止|対策))|再度|再び|再燃")
 
@@ -528,7 +538,7 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
         if ev:
             segs, text = ev
             _check_quote(cx, path, "count_q", rec.get("count_q"), text, issues)
-            if v == "なし" and not _has_word(text, "なし") and "せず" not in text and "ない" not in text:
+            if v == "なし" and not _RECUR_NO_RE.search(nfkc(text)):
                 issues.append(VerifyIssue("error", path, f"{path}.v「なし」の根拠が書かれていません。", "flip_added"))
             # 「あり」は根拠に再発の記録（「再発なし」「再発せず」ではないもの）か、根拠にある回数の引用が要る
             count_q = str(rec.get("count_q") or "").strip()
@@ -549,7 +559,12 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
         elif ev:
             words = _final_state_words(v, cx.glossary)
             ev_text = norm(ev[1] if v == "未着手" else _NOT_DONE_RE.sub(" ", nfkc(ev[1]))).upper()
-            if words and not any(norm(w).upper() in ev_text for w in words):
+            if v == "完了":
+                ev_text = _ARRANGED_RE.sub(" ", ev_text)
+            hits = [w for w in words if norm(w).upper() in ev_text]
+            if v == "完了" and hits == ["済"] and _PENDING_RE.search(ev_text):
+                hits = []   # 「済」だけで「入荷待ち」も書かれている根拠は、完了の根拠にしない
+            if words and not hits:
                 issues.append(VerifyIssue("error", path, f"{path}.v「{v}」の根拠が書かれていません（根拠のエントリに"
                                                          f"「{words[0]}」などの語がありません）。", "flip_added"))
         if _finish(rep, path, issues):

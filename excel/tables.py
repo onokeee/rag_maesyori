@@ -302,12 +302,22 @@ def list_header_keys(grid: SheetGrid) -> set[tuple[int, int]]:
     for table in detect_tables(grid):
         if not table.has_room:
             continue
-        need = 2 if table.anchor is not None else 3
+        # 見出しの無い表でも、日付だけの行の無い表（水平展開先の「確認｜対象設備｜設備名…」が2行）は一覧とみなす
+        need = 2 if table.anchor is not None or not _has_date_row(table) else 3
         for i, h in enumerate(table.header):
             cells = [row[i] for row in table.rows if i < len(row) and row[i] is not None]
             if sum(1 for c in cells if c.col >= h.col and c.max_col <= h.max_col) >= need:
                 keys.add((h.row, h.col))
     return keys
+
+
+def _has_date_row(table: Table) -> bool:
+    """押印欄（承認｜確認｜作成 の下に印、その下に「6/5」のような日付）らしい、日付・数字だけの行があるか。"""
+    for row in table.rows:
+        cells = [c for c in row if c is not None]
+        if cells and all(not isinstance(c.value, str) or _NUMBER_LIKE.match(c.norm) for c in cells):
+            return True
+    return False
 
 
 def seq_header(cell: Cell) -> bool:

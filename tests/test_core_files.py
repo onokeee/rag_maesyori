@@ -302,6 +302,81 @@ def test_precheck_counts_cells_split_across_read_chunks_once(tmp_path, monkeypat
         precheck_excel(path, max_cells=existing - 1)  # 1つでも多ければ断る（数え落とさない）
 
 
+def _xlsx_with_sheet_xml(path, edit, *, rename: str | None = None):
+    """ふつうの xlsx のシートの XML を edit(bytes) で書き換える（rename: シートの部品の名前を変える）。"""
+    src = _xlsx(path.with_name("src_" + path.name))
+    sheet = "xl/worksheets/sheet1.xml"
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            name = info.filename
+            if name == sheet:
+                data = edit(data)
+                name = rename or name
+            elif rename and name in ("xl/_rels/workbook.xml.rels", "[Content_Types].xml"):
+                data = data.replace(b"worksheets/sheet1.xml", rename.removeprefix("xl/").encode())
+            zout.writestr(name, data)
+    return path
+
+
+def _add_merge(ref_attr: bytes):
+    def edit(data: bytes) -> bytes:
+        merge = b"<mergeCells count=\"1\"><mergeCell " + ref_attr + b"/></mergeCells>"
+        if b"<sheetData/>" in data:
+            return data.replace(b"<sheetData/>", b"<sheetData/>" + merge, 1)
+        return data.replace(b"</sheetData>", b"</sheetData>" + merge, 1)
+    return edit
+
+
+def _add_cells(row: bytes):
+    """<row> を1つシートに書き足す（sheetData が空要素でも中身があっても）。"""
+    def edit(data: bytes) -> bytes:
+        data, n = re.subn(rb"<sheetData\s*/>", b"<sheetData>" + row + b"</sheetData>", data, count=1)
+        return data if n else data.replace(b"</sheetData>", row + b"</sheetData>", 1)
+    return edit
+
+
+def test_precheck_reads_a_sheet_part_whatever_its_name(tmp_path):
+    """シートの部品の名前は workbook.xml.rels で決まる（.xml で終わらなくても openpyxl は開く）。"""
+    import openpyxl
+
+    small = _xlsx_with_sheet_xml(tmp_path / "small.xlsx", _add_merge(b'ref="C3:E5"'),
+                                 rename="xl/worksheets/sheet1.dat")
+    precheck_excel(small)
+    assert [str(r) for r in openpyxl.load_workbook(small).active.merged_cells.ranges] == ["C3:E5"]
+    big = _xlsx_with_sheet_xml(tmp_path / "big.xlsx", _add_merge(b'ref="C3:XFD1048576"'),
+                               rename="xl/worksheets/sheet1.dat")
+    with pytest.raises(UploadError, match="結合セルの範囲が大きすぎます"):
+        precheck_excel(big)
+    cells = _xlsx_with_sheet_xml(tmp_path / "cells.xlsx", _add_cells(b'<row r="9">' + b'<c s="0"/>' * 50 + b"</row>"),
+                                 rename="xl/worksheets/sheet1.dat")
+    with pytest.raises(UploadError, match="セル数が上限"):
+        precheck_excel(cells, max_cells=40)
+
+
+def test_precheck_reads_merge_refs_the_way_an_xml_parser_does(tmp_path):
+    """= の前後の空白・文字参照（&#88; = X）も、XML として正しい書き方なので openpyxl は読む。数え落とさない。"""
+    import openpyxl
+
+    for i, attr in enumerate((b'ref = "C3:XFD1048576"', b'ref="C3:&#88;FD1048576"', b"ref\n=\n'C3:XFD1048576'")):
+        path = _xlsx_with_sheet_xml(tmp_path / f"m{i}.xlsx", _add_merge(attr))
+        with pytest.raises(UploadError, match="結合セルの範囲が大きすぎます"):
+            precheck_excel(path)
+    small = _xlsx_with_sheet_xml(tmp_path / "small.xlsx", _add_merge(b'ref = "C3:&#69;5"'))
+    precheck_excel(small)
+    assert [str(r) for r in openpyxl.load_workbook(small).active.merged_cells.ranges] == ["C3:E5"]
+
+
+def test_precheck_counts_cells_under_any_namespace_prefix(tmp_path):
+    """<x.y:c> のような接頭辞でも、SpreadsheetML の名前空間の <c> ならセルとして数える。"""
+    main = b"http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    row = b'<row r="9" xmlns:x.y-z="' + main + b'">' + b'<x.y-z:c s="0"/>' * 50 + b"</row>"
+    path = _xlsx_with_sheet_xml(tmp_path / "prefixed.xlsx", _add_cells(row))
+    with pytest.raises(UploadError, match="セル数が上限"):
+        precheck_excel(path, max_cells=40)
+    precheck_excel(path, max_cells=100)
+
+
 def test_save_upload_and_precheck_messages_carry_no_file_name_or_class_name(app, tmp_path):
     """flash に入るメッセージにはファイル名も例外の種類名も入れない（design.md 3.3）。"""
     from werkzeug.datastructures import FileStorage
@@ -316,3 +391,12 @@ def test_save_upload_and_precheck_messages_carry_no_file_name_or_class_name(app,
     with pytest.raises(UploadError) as err:
         precheck_excel(broken)
     assert "BadZipFile" not in str(err.value) and "壊れている" in str(err.value)
+
+
+def test_precheck_refuses_entity_definitions(tmp_path):
+    """DTD で実体を定義して展開させる細工（正しいブックには無い）は、数える前に断る。"""
+    def edit(data: bytes) -> bytes:
+        return b'<!DOCTYPE worksheet [<!ENTITY a "aaaaaaaaaa">]>' + data.split(b"?>", 1)[-1]
+
+    with pytest.raises(UploadError, match="不正なファイル"):
+        precheck_excel(_xlsx_with_sheet_xml(tmp_path / "entity.xlsx", edit))

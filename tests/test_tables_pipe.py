@@ -359,7 +359,7 @@ def test_list_markdown_and_determinism(tmp_path):
     assert "- CVD-201の2026年度（2026年8月〜2026年8月）の記録は2件です。" in fy
     assert "- 停止時間の合計は150分（2.5時間）、1件あたり平均75分です。" in fy
     card = files[0].text
-    assert "- 取り込み範囲: 2026-08-01〜2026-08-31（記録 4件）" in card and "- 担当者" not in card
+    assert "- 取り込み範囲: 2026-08-03〜2026-08-20（記録 4件）" in card and "- 担当者" not in card
 
     # 決定的: 入力の順番を変えても同じバイト列
     shuffled = list(aug)

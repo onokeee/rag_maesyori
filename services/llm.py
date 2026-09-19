@@ -378,6 +378,11 @@ def ask_json(system: str, user: str, what: str = "AIの応答", model: str | Non
     if _cfg("OPENAI_MAX_TOKENS") is not None:
         kwargs["max_tokens"] = _cfg("OPENAI_MAX_TOKENS")
     resp = _create(**kwargs)
+    if not hasattr(resp, "choices"):
+        # 200 でも HTML（プロキシのブロック画面・接続先URLの誤り）などは SDK が文字列のまま返す
+        raise ValueError("AIの接続先がAPIの形式で応答しませんでした（接続先URLやプロキシを確認してください）。")
+    if not resp.choices or not resp.choices[0].message:
+        raise ValueError("AIの応答が空でした。")
     content = resp.choices[0].message.content or ""
     m = re.search(r"\{.*\}", content, re.DOTALL)
     if not m:

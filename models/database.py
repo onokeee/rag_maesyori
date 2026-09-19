@@ -422,7 +422,8 @@ def list_patterns() -> list[dict]:
         SELECT p.*,
                (SELECT COUNT(*) FROM pattern_fields f WHERE f.pattern_id = p.id) AS field_count,
                (SELECT COUNT(*) FROM pattern_samples s WHERE s.pattern_id = p.id) AS sample_count,
-               (SELECT COUNT(*) FROM documents d WHERE d.pattern_id = p.id AND d.confirmed_json IS NOT NULL) AS document_count
+               (SELECT COUNT(*) FROM documents d WHERE d.pattern_id = p.id AND d.confirmed_json IS NOT NULL) AS document_count,
+               (SELECT COUNT(*) FROM documents d WHERE d.pattern_id = p.id AND d.confirmed_json IS NULL) AS working_count
         FROM patterns p ORDER BY p.name, p.version
     """)
 
@@ -581,7 +582,10 @@ def get_document(doc_id: int) -> dict | None:
 _LIST_COLUMNS = f"""
         SELECT d.id, d.file_name, d.file_hash, d.stored_path, d.pattern_id, d.title, d.batch_id, d.batch_order,
                d.created_at, d.confirmed_at, {_STATE_SQL} AS state,
-               p.name AS pattern_name, p.version AS pattern_version
+               p.name AS pattern_name, p.version AS pattern_version,
+               -- 帳票の種類が削除されても、読み取ったときの種類名を表示に使う
+               CASE WHEN json_valid(d.data_json) THEN json_extract(d.data_json, '$.pattern.name') END
+                   AS extraction_pattern_name
         FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id"""
 
 

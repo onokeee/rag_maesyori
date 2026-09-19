@@ -43,7 +43,8 @@
           </form>
           {% endif %}
           {{ ui.confirm_delete_form(url_for('form_types.delete', pattern_id=p.id),
-               "帳票の種類「" ~ p.name ~ "」と見本ファイルを削除します。元に戻せません。\n確定済みの帳票" ~ p.document_count ~ "件は削除されずに残ります（読み取り直しには使えなくなります）。") }}
+               "帳票の種類「" ~ p.name ~ "」と見本ファイルを削除します。元に戻せません。\n確定済みの帳票" ~ p.document_count ~ "件は削除されずに残ります（読み取り直しには使えなくなります）。"
+               ~ ("\n作業中の帳票" ~ p.working_count ~ "件は読み取った内容のまま確定できますが、読み取り直しはできなくなります。" if p.working_count else "")) }}
         </div>
       </td>
     </tr>

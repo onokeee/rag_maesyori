@@ -467,7 +467,8 @@ def test_date_without_a_year_keeps_the_original_text_and_warns():
         assert value == text, text
         assert warning and warning.startswith("年が書かれていません"), text
     # 年のある日付・年が2桁の書き方・そもそも日付でない記入は、今までどおり
-    assert to_date("2026/2/12 3時17分", "2026/2/12 3時17分") == ("2026-02-12", None)
+    # 年のある日付は時刻（「3時17分」）も残す（F3-2: 以前は時刻を黙って落としていた）
+    assert to_date("2026/2/12 3時17分", "2026/2/12 3時17分") == ("2026-02-12 03:17", None)
     assert to_date("24/8/25", "24/8/25")[1] == "日付として解釈できません"
     assert to_date("未復旧（対応中）", "未復旧（対応中）")[1] == "日付として解釈できません"
     assert to_date("13/40", "13/40")[1] == "日付として解釈できません"  # 月日として成り立たない数
@@ -504,6 +505,9 @@ def test_number_without_a_unit_is_flagged_only_when_the_unit_changes_the_meaning
     assert values["downtime"] == 390 and fields["downtime"]["unit"] == ""
     assert "単位が書かれていません" in fields["downtime"]["warning"]
     assert "「帳票の種類」の画面" in fields["downtime"]["warning"]  # 直し方を書く
+    # 読み取り済みの帳票はその場で直せる（値に単位を付けて入力）ことを先に書く。種類の単位は読み取り済みに反映されない
+    assert "値に単位を付けて入力してください（例: 390分）" in fields["downtime"]["warning"]
+    assert "読み取り済みの帳票には反映されません" in fields["downtime"]["warning"]
     assert values["count"] == 3 and not fields["count"]["warning"]      # 件数は単位が無くて当たり前
     assert values["work_hours"] == 2.5 and fields["work_hours"]["unit"] == "時間"  # セルの「h」から補う
     assert not fields["work_hours"]["warning"]

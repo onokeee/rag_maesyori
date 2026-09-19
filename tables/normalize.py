@@ -32,7 +32,9 @@ _EXCEL_ERRORS = {"#N/A", "#DIV/0!", "#REF!", "#VALUE!", "#NAME?", "#NUM!", "#NUL
 _SPACES = re.compile(r"[^\S\n]+")
 _ALL_SPACES = re.compile(r"\s+")
 _WEEKDAY = re.compile(r"\s*[(（]\s*[月火水木金土日](?:曜日?)?\s*[)）]\s*")
-_TIME_PART = r"(?:\s*T?\s*(\d{1,2})\s*[:時]\s*(\d{1,2})\s*(?:[:分]\s*(\d{1,2})\s*秒?)?分?)?"
+# 秒の小数（SQL Server などの「.000」）と時差（「Z」「+09:00」）は読み捨てる（秒までで足り、時刻は書かれたまま）
+_TIME_PART = (r"(?:\s*T?\s*(\d{1,2})\s*[:時]\s*(\d{1,2})\s*(?:[:分]\s*(\d{1,2})(?:\.\d{1,7})?\s*秒?)?分?"
+              r"(?:\s*(?:Z|[+\-]\d{2}:?\d{2}))?)?")
 _YMD = re.compile(r"^(\d{4})\s*[/\-.年]\s*(\d{1,2})\s*[/\-.月]\s*(\d{1,2})\s*日?" + _TIME_PART + r"$")
 _ERA_YMD = re.compile(r"^(令和|平成|昭和|R|H|S)\s*(\d{1,2}|元)\s*[./年\-]\s*(\d{1,2})\s*[./月\-]\s*(\d{1,2})\s*日?"
                       + _TIME_PART + r"$", re.I)
@@ -103,6 +105,7 @@ class ImportStats:
     duplicate_keys: dict = field(default_factory=dict)
     reconcile: list = field(default_factory=list)
     replaced_rows: list = field(default_factory=list)
+    uncached_formulas: dict = field(default_factory=dict)  # 列の表示名 → Excel で計算されていない数式のセルの数
     unclosed_quote_row: int | None = None  # CSV の " が閉じていないため、以降を1つの値として読んだ行
     long_record_row: int | None = None  # CSV の1つの値がとても多くの行にまたがる行（閉じ忘れの疑い）
     date_min: str | None = None
@@ -422,6 +425,9 @@ def convert_cell(value, text: str, col, cctx: ConvertContext, number_format: str
 
 def _convert_date(value, text, type_, cctx):
     label = _TYPE_LABELS[type_]
+    if isinstance(value, date) and value.year < 1900:
+        # 日付の表示形式のセルに 0 や負の数（空の計算結果など）。1899年の日付にせず、変換できない値として知らせる
+        return text, f"「{text}」を{label}に変換できません", None
     if isinstance(value, datetime):
         d, tm = value.date().isoformat(), (_fmt_time(value.time()) if value.time() != time(0) else None)
         return _join_dt(d, tm, type_), None, None
@@ -631,6 +637,10 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
         key_columns = sorted(pos for c, pos in columns if c.role in ("key", "date"))
     if not key_columns:
         key_columns = list(layout.key_columns or [])
+    if not opts.get("key_columns"):
+        # 「空欄は上の値」の列は空欄が当たり前なので、継続行の判定には使わない
+        fill_down = {pos for c, pos in columns if c.fill_down_blank}
+        key_columns = [k for k in key_columns if k not in fill_down]
     stats.key_columns = key_columns
     for n, (row, rc) in enumerate(classify_rows(source, sheet, layout, key_columns=key_columns)):
         stats.rows_scanned += 1
@@ -701,6 +711,13 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
         pending.append(record)
         last_record = record
 
+    uncached = getattr(source, "uncached_formulas", None)
+    if callable(uncached):
+        by_col = uncached(sheet)
+        for col, pos in columns:
+            n = by_col.get(pos + 1)
+            if n:
+                stats.uncached_formulas[col.display] = stats.uncached_formulas.get(col.display, 0) + n
     replaced = getattr(source, "replaced_rows", None)
     if replaced:
         stats.replaced_rows = list(replaced)

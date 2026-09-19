@@ -58,6 +58,10 @@
     {{ ui.progress(job, url=(url_for('tables.api_job', job_id=job.id) if job_active else None), label="AI整形の進み具合") }}
     <p class="hint" data-ai-detail>{% if job.progress %}OK {{ job.progress.ok or 0 }}／要確認 {{ job.progress.flagged or 0 }}／エラー {{ job.progress.error or 0 }}／ルールのみ {{ job.progress.rule_only or 0 }}{% endif %}</p>
     {% if job.status == 'failed' and job.message %}<div class="flash flash-error" role="alert">{{ job.message }}</div>{% endif %}
+    {% set waiting = job.waiting_for if job.status == 'queued' else None %}
+    {% if waiting and waiting.kind == 'ai_format' and not waiting.same_ref and waiting.ref_type == 'table_import' %}
+    <p class="hint">先に動いている<a href="{{ url_for('tables.ai', import_id=waiting.ref_id) }}">別の取り込みのAI整形</a>が終わると始まります。</p>
+    {% endif %}
     {% if job_active %}
     <div class="btn-row">
       {% if job.status == 'paused' %}
@@ -92,7 +96,11 @@
 
 <div class="form-actions">
   <a class="btn ghost" href="{{ url_for('tables.layout', import_id=imp.id) }}">表の範囲に戻る</a>
+  {% if job_active %}
+  <span class="hint">AI整形が動いている間（一時停止中を含む）は確認に進めません。再開して終わらせるか、中止してください。</span>
+  {% else %}
   <a class="btn primary" href="{{ url_for('tables.preview', import_id=imp.id) }}">内容とファイルを確認する</a>
+  {% endif %}
 </div>
 </div>
 {% endblock %}
