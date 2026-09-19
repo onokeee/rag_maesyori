@@ -57,6 +57,24 @@ def _delete_orphan_llm_calls(db) -> int:
         "(SELECT cache_key FROM ai_items WHERE cache_key IS NOT NULL)").rowcount
 
 
+def delete_orphan_ai_items(db) -> int:
+    """もう無い取り込みを指す AI整形の結果を消す（取り込みを消したあとに、動いていた AI の書き込みが残った分など）。"""
+    return db.execute("DELETE FROM ai_items WHERE import_id IS NOT NULL "
+                      "AND import_id NOT IN (SELECT id FROM table_imports)").rowcount
+
+
+def sweep_orphan_ai(db) -> int:
+    """持ち主の無い AI整形の結果と、どこからも使われない AI の生の応答を消して縮める（戻り値: 消した件数）。
+
+    取り込み設定を消したとき（ai_items は消えるが llm_calls が残る）や起動時の片付けで使う。
+    """
+    removed = delete_orphan_ai_items(db) + _delete_orphan_llm_calls(db)
+    db.commit()
+    if removed:
+        _shrink(db)
+    return removed
+
+
 def purge_after_send(response, fn, *args):
     """本文を最後まで送り終えてから消す（design.md 3.3）。
 
@@ -67,6 +85,10 @@ def purge_after_send(response, fn, *args):
     send_file の応答は direct_passthrough が立っていて、そのままだと WSGI が close のときの
     呼び出し（call_on_close）を拾わないので、ここで解除して本文を包み直す。
     """
+    if response.status_code != 200:
+        # 206（Range で一部だけ）・304 などは本文の全部を渡していない。ダウンロードマネージャーや
+        # 途中からの再開、ウイルス対策のプロキシが送ってくることがある。消すと残りを取り戻せないので消さない。
+        return response
     app = current_app._get_current_object()
     body = response.response
     sent: list[bool] = []
@@ -106,14 +128,17 @@ def purge_documents(doc_ids) -> int:
         return 0
     db = database.get_db()
     marks = ", ".join("?" for _ in ids)
-    for row in db.execute(f"SELECT stored_path FROM documents WHERE id IN ({marks})", ids).fetchall():
-        remove_upload(row[0])
+    stored = [row[0] for row in db.execute(f"SELECT stored_path FROM documents WHERE id IN ({marks})", ids)]
+    # DB の行を先に消す。ファイルを先に消すと、DB の削除が失敗したとき（ロック・強制終了）に
+    # 「ファイルの無い帳票」が作業中として残ってしまう。逆なら残るのは行の無いファイルで、起動時に片付く。
     removed = 0
     for doc_id in ids:
         _delete_by_columns(db, DOCUMENT_REF_COLUMNS, doc_id)
         _delete_jobs(db, "document", doc_id)
         removed += db.execute("DELETE FROM documents WHERE id = ?", (doc_id,)).rowcount
     db.commit()
+    for path in stored:
+        remove_upload(path)
     _shrink(db)
     return removed
 
@@ -141,8 +166,7 @@ def purge_table_import(import_id: int) -> int:
         # DB の行が無くてもフォルダが残っていることがあるので、そこだけ片付ける
         shutil.rmtree(import_dir(import_id), ignore_errors=True)
         return 0
-    remove_upload(row["stored_path"])
-    shutil.rmtree(import_dir(import_id), ignore_errors=True)
+    # DB の行を先に消し、ファイルはそのあと（purge_documents と同じ理由。残ったフォルダ・ファイルは起動時に片付く）
     _delete_by_columns(db, IMPORT_REF_COLUMNS, import_id)
     _delete_jobs(db, "table_import", import_id)
     removed = db.execute("DELETE FROM table_imports WHERE id = ?", (import_id,)).rowcount
@@ -151,8 +175,16 @@ def purge_table_import(import_id: int) -> int:
     # import_id が無い行は古いDBの分（持ち主が分からない）なので、その設定の分をまとめて消す。
     if row["template_id"] is not None:
         db.execute("DELETE FROM ai_items WHERE template_id = ? AND import_id IS NULL", (row["template_id"],))
+    delete_orphan_ai_items(db)
     _delete_orphan_llm_calls(db)
     db.commit()
+    remove_upload(row["stored_path"])
+    folder = import_dir(import_id)
+    shutil.rmtree(folder, ignore_errors=True)
+    if folder.exists():
+        # Windows で別のスレッド・プロセスがファイルを掴んでいると消し残る。黙って成功扱いにせず記録する
+        # （DB の行はもう無いので、残ったフォルダは次の起動時に remove_orphan_import_dirs が片付ける）
+        log.warning("取り込みのフォルダを消し切れませんでした（次の起動時に片付けます）: imports/%s", import_id)
     _shrink(db)
     return removed
 

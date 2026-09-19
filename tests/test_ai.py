@@ -139,3 +139,21 @@ def test_fill_missing_does_not_send_table_fields(monkeypatch):
     extraction = {"sheets": [], "fields": [{"field_name": "parts", "display_name": "交換部品", "data_type": "table",
                                             "value": None, "unit": ""}]}
     assert ai_assist.fill_missing(None, extraction) == []
+
+
+def test_ai_filled_number_is_judged_against_the_unit_set_on_the_form_type(ai_app, monkeypatch):
+    """読み取りで unit が書かれた単位（時間）に置き換わっていても、AIの値は種類で決めた単位（分）で判定する。"""
+    from services import ai_assist
+
+    class _Info:
+        date1904 = False
+        grids: dict = {}
+
+    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: {"values": {"downtime": {"value": "894"}}})
+    extraction = {"sheets": [], "fields": [{"field_name": "downtime", "display_name": "停止時間",
+                                            "data_type": "number", "value": None, "unit": "時間",
+                                            "spec_unit": "分"}]}
+    with ai_app.app_context():
+        assert ai_assist.fill_missing(_Info(), extraction) == ["停止時間"]
+    f = extraction["fields"][0]
+    assert f["value"] == 894 and f["unit"] == "分"

@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import math
 import re
+import unicodedata
 from collections import Counter, defaultdict
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -17,6 +19,8 @@ MAX_COVERAGE_MONTHS = 600  # 取り込み範囲がこれより長ければ、記
 # ---- 書式 -----------------------------------------------------------------------------
 
 def round_half_up(value: float, digits: int = 0) -> float | int:
+    if not math.isfinite(value):
+        return value  # 桁あふれした合計（inf）は丸めない（Decimal の quantize が落ちるため）
     q = Decimal(1).scaleb(-digits)
     d = Decimal(str(value)).quantize(q, rounding=ROUND_HALF_UP)
     return int(d) if digits == 0 else float(d)
@@ -34,6 +38,8 @@ def fmt_number(value, max_decimals: int = 2) -> str:
         f = float(value)
     except (TypeError, ValueError):
         return str(value)
+    if not math.isfinite(f):
+        return str(value)  # 桁あふれした合計などで、丸め（Decimal）を落とさない
     if f.is_integer():
         return f"{int(f):,}"
     r = round_half_up(f, max_decimals)
@@ -60,7 +66,11 @@ def fmt_average(total: float, count: int, integer_values: bool) -> int | float:
     if not count:
         return 0
     avg = total / count
-    return round_half_up(avg, 0) if integer_values else round_half_up(avg, 1)
+    if integer_values:
+        rounded = round_half_up(avg, 0)
+        if rounded != 0 or total == 0:
+            return rounded  # 整数だけの列でも、0 に丸まるときは小数1桁で出す（0 と書くと事実と違う）
+    return round_half_up(avg, 1)
 
 
 def month_label(month: str) -> str:
@@ -70,6 +80,8 @@ def month_label(month: str) -> str:
 def month_add(month: str, n: int) -> str:
     y, m = int(month[:4]), int(month[5:7])
     total = y * 12 + (m - 1) + n
+    if total // 12 > 9999:
+        return "9999-12"  # 日付にできる最後の月で止める（9999年度の終わりなど）
     return f"{total // 12:04d}-{total % 12 + 1:02d}"
 
 
@@ -78,7 +90,10 @@ def month_range(start: str, end: str) -> list[str]:
     cur = start
     while cur <= end and len(out) <= MAX_COVERAGE_MONTHS:
         out.append(cur)
-        cur = month_add(cur, 1)
+        nxt = month_add(cur, 1)
+        if nxt == cur:
+            break
+        cur = nxt
     return out
 
 
@@ -87,11 +102,12 @@ def month_first_day(month: str) -> str:
 
 
 def month_last_day(month: str) -> str:
-    nxt = month_add(month, 1)
-    from datetime import date, timedelta
+    # 翌月を経由しない（9999-12 の翌月は日付にできない。9999/12/31 は「期限なし」によく使われる）
+    import calendar
+    from datetime import date
 
-    d = date(int(nxt[:4]), int(nxt[5:7]), 1) - timedelta(days=1)
-    return d.isoformat()
+    y, m = int(month[:4]), int(month[5:7])
+    return date(y, m, calendar.monthrange(y, m)[1]).isoformat()
 
 
 def fiscal_year_of(month: str, start_month: int) -> int:
@@ -147,16 +163,21 @@ _NAME_CODE_PAREN = re.compile(r"^(.+?)[ 　]*[（(][ 　]*([0-9A-Za-z][0-9A-Za-z
 _HAS_DIGIT = re.compile(r"\d")
 _HAS_ALPHA = re.compile(r"[A-Za-z]")
 _CODE_ONLY = re.compile(r"^[0-9A-Za-z][0-9A-Za-z\-_/.]*$")
+# 番号の後ろの括弧が名前ではなく但し書きのとき（「IMP-602（推定）」）。番号だけを残す
+_QUALIFIERS = {"推定", "仮", "予定", "調査中", "不明", "未定", "確認中", "暫定", "候補", "要確認", "代替", "予備", "旧", "新"}
+# 設備の列の値がこれだけなら、設備が決まっていない（設備別の集計・ファイル分けに入れない）
+_PLACEHOLDER_ENTITIES = {"推定", "仮", "予定", "調査中", "不明", "未定", "確認中", "暫定", "要確認"}
 
 
 def split_entity_code(text) -> tuple[str, str]:
     """「ETC-302(OXIDEエッチャ 2号機)」「CVD-203 W-CVD 3号機」「Oxideエッチャ 2号機（ETC-302）」→ (設備番号, 名前)。
 
-    分けられなければ (原文, "")。設備名の列がない台帳で、同じ設備が「番号だけ」「番号＋名前」「名前＋番号」と
+    「IMP-602（推定）」のように括弧が但し書きなら (番号, "")。分けられなければ (原文, "")。設備名の列がない台帳で、同じ設備が「番号だけ」「番号＋名前」「名前＋番号」と
     揺れると集計とファイル分けが割れるため、番号にそろえる。
     """
     s = " ".join(str(text or "").split())
-    for pattern in (_CODE_NAME_PAREN, _CODE_NAME_SPACE, _NAME_CODE_PAREN):
+    # 後ろの括弧の番号を先に見る: 「Fab1 OHTシステム（OHT-801）」の番号は Fab1 ではなく OHT-801
+    for pattern in (_NAME_CODE_PAREN, _CODE_NAME_PAREN, _CODE_NAME_SPACE):
         m = pattern.match(s)
         if not m:
             continue
@@ -166,6 +187,8 @@ def split_entity_code(text) -> tuple[str, str]:
             code, name = m.group(1), m.group(2).strip()
         if not name or not _HAS_DIGIT.search(code) or not _HAS_ALPHA.search(code):
             continue
+        if pattern is _CODE_NAME_PAREN and name in _QUALIFIERS:
+            return code, ""  # 番号は残し、但し書きは設備名にしない
         if all(_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
             continue  # 名前の側も番号だけ（「CMP-101 / CMP-102」）なら分けない
         return code, name
@@ -178,11 +201,13 @@ def entity_value(values: dict, spec: TableSpec) -> tuple[str, str]:
     if entity is None:
         return "", ""
     raw = " ".join(str(values.get(entity.key) or "").split())
+    if unicodedata.normalize("NFKC", raw).strip("（）() ") in _PLACEHOLDER_ENTITIES:
+        return "", ""  # 「調査中」だけの値は設備ではない（記録の本文には原文のまま出る）
     if label is not None:
         return raw, " ".join(str(values.get(label.key) or "").split())
     if entity.type == "code" and raw:
         code, name = split_entity_code(raw)
-        if name:
+        if name or code != raw:
             return code, name
     return raw, ""
 
@@ -352,9 +377,9 @@ def entity_fiscal_year_summaries(records: list[dict], spec: TableSpec, coverage:
                                key=lambda v: (v[k], -int((_month(v, spec) or "0000-00").replace("-", ""))))
                 max_item = {"month": _month(best_row, spec), "value": best_row[k]}
             n = len(vals)
-            avg_base = len(rows)
+            avg_base = n  # 平均は値のある記録だけで割る（空欄は「データなし」で 0 ではない）
             stats[k] = {
-                "sum": total, "n": n,
+                "sum": total, "n": n, "rows": len(rows),
                 "avg": fmt_average(float(total), avg_base, _integer_values(vals)) if avg_base else None,
                 "max": max_item,
             }

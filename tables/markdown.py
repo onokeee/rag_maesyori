@@ -792,9 +792,13 @@ def _render_entity_fy(spec: TableSpec, item: dict, coverage: dict) -> str:
     for key in item["keys"]:
         display, unit = mm.get(key, (key, ""))
         st = item["stats"][key]
+        if not st["n"]:
+            overview.append(f"- {display}の値はありません。")  # 空欄は 0 ではない
+            continue
         text = f"- {display}の合計は{fmt_measure(st['sum'], unit, with_hours=True)}"
         if key in metrics["avg"] and st["avg"] is not None:
-            text += f"、1件あたり平均{fmt_measure(st['avg'], unit)}"
+            base = f"（値のある{st['n']:,}件）" if st["n"] < st.get("rows", st["n"]) else ""
+            text += f"、1件あたり平均{base}{fmt_measure(st['avg'], unit)}"
         overview.append(text + "です。")
         if key in metrics["max"] and st["max"]:
             overview.append(f"- 1件の{display}の最大は{fmt_measure(st['max']['value'], unit)}（{month_label(st['max']['month'])}）です。")
@@ -808,7 +812,10 @@ def _render_entity_fy(spec: TableSpec, item: dict, coverage: dict) -> str:
         for key in item["keys"]:
             display, unit = mm.get(key, (key, ""))
             if key in metrics["sum"]:
-                parts.append(f"{display} {fmt_measure(mi['sums'][key], unit)}")
+                if mi["count"] and not mi["has_value"][key]:
+                    parts.append(f"{display} 値なし")  # 記録はあるが値がすべて空欄（0 と書かない）
+                else:
+                    parts.append(f"{display} {fmt_measure(mi['sums'][key], unit)}")
         months.append(f"- {month_label(mi['month'])}: {'、'.join(parts)}")
     return join_file([_Block(head, body), overview, months])
 

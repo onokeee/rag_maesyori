@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 
+from core import purge
 from models import database
 from tables.spec import TableSpec, spec_from_dict, spec_hash, spec_json
 
@@ -93,7 +94,7 @@ def get_template(template_id: int, conn=None) -> dict | None:
 def list_templates(conn=None) -> list[dict]:
     rows = _db(conn).execute("""
         SELECT t.*, v.version, v.spec_json, v.spec_hash,
-               (SELECT COUNT(*) FROM table_imports i WHERE i.template_id = t.id AND i.status = 'confirmed') AS import_count,
+               (SELECT COUNT(*) FROM table_imports i WHERE i.template_id = t.id) AS import_count,  -- まだダウンロードしていない取り込み（ダウンロードで消える）
                (SELECT MAX(i.confirmed_at) FROM table_imports i WHERE i.template_id = t.id) AS last_confirmed_at
         FROM table_templates t LEFT JOIN table_template_versions v ON v.id = t.current_version_id
         ORDER BY t.name""").fetchall()
@@ -125,7 +126,9 @@ def delete_template(template_id: int, conn=None) -> None:
     db = _db(conn)
     db.execute("DELETE FROM table_templates WHERE id = ?", (template_id,))
     db.execute("DELETE FROM ai_items WHERE template_id = ?", (template_id,))
-    db.commit()
+    # AIの応答の控え（llm_calls）もどこからも使われなくなった分をすぐ消す（起動時まで残さない。design.md 3.3）。
+    # sweep_orphan_ai が commit と DB の縮小までする
+    purge.sweep_orphan_ai(db)
 
 
 # ---- 取り込み ------------------------------------------------------------------------------

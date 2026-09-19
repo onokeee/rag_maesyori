@@ -7,6 +7,7 @@ Markdown は常にデータから作る（確認画面のプレビュー＝作�
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import zipfile
@@ -18,7 +19,7 @@ from flask import (Blueprint, abort, current_app, flash, jsonify, redirect, rend
                    url_for)
 
 from core import purge
-from core.files import UploadError, precheck_excel, remove_upload, save_upload, upload_path
+from core.files import UploadError, original_name, precheck_excel, remove_upload, save_upload, upload_path
 from excel.extractor import apply_manual_values, extract_document, is_blank_value, refresh_summary
 from excel.tables import clean_table_value, is_table_value, parse_table_text, table_text_lines
 from excel.workbook import WorkbookInfo, load_workbook_info
@@ -44,6 +45,8 @@ DELETE_ON_DOWNLOAD_CONFIRM = "ダウンロードすると、この帳票のデ�
 BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳票のデータはこのPCからすべて消えます。"
                         "もう一度ダウンロードすることはできません。")
 MAX_BATCH_FILES = 50
+# 別のタブ・戻るボタンで開いた古い確認画面から保存・確定されたときの案内
+STALE_MESSAGE = "別の画面で内容が変わりました。読み込み直してください"
 
 
 # ---- 共通 -------------------------------------------------------------------------
@@ -113,9 +116,11 @@ def _same_text(a: str, b: str) -> bool:
     return norm(a) == norm(b)
 
 
-def _apply_values(extraction: dict, values: dict) -> bool:
+def _apply_values(extraction: dict, values: dict, confirmed: dict | None = None) -> bool:
     """画面の入力値を反映する。表示中の値と同じ文字列の項目は触らない（勝手に「手で修正」にしない）。
 
+    confirmed（確定済みの版）を渡すと、確定済みと同じ値に戻した項目は確定済みの項目そのものに戻す
+    （「手で修正」の印や警告の違いだけで、いつまでも「修正中」のままにならないように）。
     戻り値: 変わった項目があれば True。
     """
     before = _dumps(extraction)
@@ -135,9 +140,32 @@ def _apply_values(extraction: dict, values: dict) -> bool:
         changed[f"value-{name}"] = text
     if changed:
         apply_manual_values(extraction, changed)
+        _restore_confirmed_fields(extraction, confirmed)
     else:
         refresh_summary(extraction)
     return _dumps(extraction) != before
+
+
+# 手で直すと変わる項目のキー。これ以外（表示名・Markdownへの出し方など、帳票の種類の設定）が違う項目は戻さない
+_EDIT_KEYS = {"value", "unit", "warning", "edited", "ai_filled"}
+
+
+def _restore_confirmed_fields(extraction: dict, confirmed: dict | None) -> None:
+    """確定済みと同じ値（数値は単位も）になった項目を、確定済みの項目の中身に戻す。"""
+    new_pattern, old_pattern = extraction.get("pattern", {}), (confirmed or {}).get("pattern", {})
+    if (not confirmed or old_pattern.get("id") != new_pattern.get("id")
+            or old_pattern.get("version_no") != new_pattern.get("version_no")
+            or confirmed.get("sheets") != extraction.get("sheets")):
+        return  # 別の種類・版・シートで読み直した版は比べない（直した種類の設定を古い設定に戻さない）
+    before = {f["field_name"]: f for f in confirmed.get("fields", [])}
+    for i, f in enumerate(extraction["fields"]):
+        old = before.get(f["field_name"])
+        if (old is not None and old != f and old.get("value") == f.get("value")
+                and (old.get("unit") or "") == (f.get("unit") or "")
+                and {k: v for k, v in old.items() if k not in _EDIT_KEYS}
+                == {k: v for k, v in f.items() if k not in _EDIT_KEYS}):
+            extraction["fields"][i] = json.loads(json.dumps(old))
+    refresh_summary(extraction)
 
 
 def _form_values(form) -> dict:
@@ -146,6 +174,9 @@ def _form_values(form) -> dict:
 
 def _is_blank(value) -> bool:
     return is_blank_value(value)
+
+
+_UNIT_WARNING_PREFIXES = ("この項目の単位は", "単位が書かれていません")
 
 
 def _field_status(f: dict) -> dict:
@@ -159,7 +190,12 @@ def _field_status(f: dict) -> dict:
         source = "blank"
     else:
         source = "auto"
-    issue = (f["required"] and blank) or (not blank and bool(f.get("warning")) and source == "auto")
+    # 単位の食い違い・単位なしの警告は、手で直した値でも Markdown に誤った単位で出るので要確認のまま
+    unit_issue = f["data_type"] == "number" and str(f.get("warning") or "").startswith(_UNIT_WARNING_PREFIXES)
+    # 日付の警告（年が無い・日付として読めない）は、手で直した値でも入力した文字から出し直しているので要確認のまま
+    date_issue = f["data_type"] == "date" and bool(f.get("warning"))
+    issue = (f["required"] and blank) or (not blank and bool(f.get("warning"))
+                                          and (source == "auto" or unit_issue or date_issue))
     return {"source": source, "issue": bool(issue), "blank": blank,
             "missing_required": bool(f["required"] and blank)}
 
@@ -232,7 +268,20 @@ def index():
 @bp.get("/new")
 def new():
     return render_template("forms/new.html", steps=STEPS, active_pattern_count=db.count_active_patterns(),
-                           pattern_count=len(db.list_patterns()))
+                           pattern_count=len(db.list_patterns()), max_files=MAX_BATCH_FILES,
+                           max_mb=(current_app.config.get("MAX_CONTENT_LENGTH") or 0) // (1024 * 1024))
+
+
+def upload_error_text(storage, exc: Exception, position: int | None = None) -> str:
+    """取り込めなかったファイルのメッセージ。ファイル名は出さず、まとめて選んだときは「3件目のファイル」と位置で示す。
+
+    flash はセッションの Cookie に入るので、ファイル名を入れない（design.md 3.3）。
+    """
+    message = str(exc)
+    name = original_name(storage)
+    if name and message.startswith(f"{name}: "):
+        message = message[len(name) + 2:]
+    return f"{position}件目のファイル: {message}" if position else message
 
 
 def _store_document(storage, batch_id: str = "", order: int = 0) -> int:
@@ -241,13 +290,17 @@ def _store_document(storage, batch_id: str = "", order: int = 0) -> int:
     stored = save_upload(storage, "documents", cfg["ALLOWED_EXTENSIONS"], cfg["MAX_CONTENT_LENGTH"])
     try:
         path = upload_path(stored.stored_path)
-        precheck_excel(path)
+        precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"))
         try:
-            load_workbook_info(path)
+            info = load_workbook_info(path)
         except Exception as exc:
-            raise UploadError(f"{stored.file_name}: Excelファイルとして読み込めませんでした（{exc.__class__.__name__}）") from exc
-    except UploadError:
-        remove_upload(stored.stored_path)
+            current_app.logger.warning("帳票を読み込めませんでした: %s", exc.__class__.__name__)
+            raise UploadError("Excelファイルとして読み込めませんでした") from exc
+        if not info.grids:
+            # シートの一覧（<sheets>）が無いブックは precheck_excel では見分けられない。読み取り先が無いので断る
+            raise UploadError("シートがないブックです。シートのあるブックを選んでください")
+    except Exception:
+        remove_upload(stored.stored_path)   # 思わぬエラーでもアップロードしたファイルを残さない（design.md 3.3）
         raise
     return db.create_document(stored.file_name, stored.file_hash, stored.stored_path,
                               batch_id=batch_id, batch_order=order)
@@ -264,7 +317,7 @@ def upload():
         try:
             doc_id = _store_document(storages[0])
         except UploadError as exc:
-            flash(str(exc), "error")
+            flash(upload_error_text(storages[0], exc), "error")
             return redirect(url_for(".new"))
         return redirect(url_for(".type_select", doc_id=doc_id))
 
@@ -277,7 +330,8 @@ def upload():
         try:
             doc_ids.append(_store_document(storage, batch_id=batch_id, order=order))
         except UploadError as exc:
-            errors.append(str(exc))
+            # どのファイルを取り込めなかったかは選んだ順の位置で示す（ファイル名は flash に入れない）
+            errors.append(upload_error_text(storage, exc, order + 1))
     for message in errors:
         flash(message, "error")
     if not doc_ids:
@@ -302,16 +356,51 @@ def _batch_info(doc: dict) -> dict | None:
     position = ids.index(doc["id"]) + 1 if doc["id"] in ids else 0
     pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
     after = [d for d in docs if d["state"] not in CONFIRMED_STATES and ids.index(d["id"]) > position - 1]
+    modified = [d for d in docs if d["state"] == "modified"]
+    confirmed = len(docs) - len(pending)
+    zip_confirm = batch_zip_confirm(docs)
     return {
         "id": batch_id,
         "docs": docs,
         "position": position,
         "total": len(docs),
-        "confirmed": len(docs) - len(pending),
+        "confirmed": confirmed,
         "pending": pending,
+        "modified": modified,
+        "zip_confirm": zip_confirm,
         "all_confirmed": not pending,
         "next": (after or pending or [None])[0],
     }
+
+
+def batch_zip_confirm(docs: list[dict]) -> str:
+    """まとまりの zip ダウンロードの確認文（確認画面・完了画面・ホームで同じ文言にする）。
+
+    修正中の帳票は zip に確定済みの版で入り、確定し直していない変更はダウンロードで消える。確認の文言で名前を出す。
+    """
+    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
+    modified = [d for d in docs if d["state"] == "modified"]
+    confirmed = len(docs) - len(pending)
+    if pending:
+        text = (f"確定済みの{confirmed}件だけを zip でダウンロードします。その{confirmed}件のデータはこのPCから消えます"
+                f"（未確定の{len(pending)}件は残ります）。")
+    else:
+        text = BATCH_DELETE_CONFIRM
+    return _modified_warning(modified) + text if modified else text
+
+
+def _modified_warning(docs: list[dict]) -> str:
+    names = "、".join(d.get("title") or d["file_name"] for d in docs)
+    return (f"修正中の帳票が{len(docs)}件あります（{names}）。確定し直していない変更は zip に入らず、消えます。"
+            "変更を残すときは、先に確定し直してください。")
+
+
+def delete_confirm(doc: dict) -> str:
+    """1件ダウンロードの確認文。修正中なら、確定し直していない変更が入らずに消えることを先に書く。"""
+    if doc["state"] == "modified":
+        return ("この帳票は修正中です。確定し直していない変更は Markdown に入らず、消えます。"
+                + DELETE_ON_DOWNLOAD_CONFIRM)
+    return DELETE_ON_DOWNLOAD_CONFIRM
 
 
 # ---- 2 帳票の種類とシートを確認 -------------------------------------------------------------
@@ -443,7 +532,20 @@ def review(doc_id: int):
         data_types=DATA_TYPES,
         llm_ready=llm.is_configured(),
         batch=_batch_info(doc),
+        version=_version(doc),
     )
+
+
+def _version(doc: dict) -> str:
+    """確認画面を開いたときの作業データの版（古い画面からの保存・確定を見分ける）。"""
+    return hashlib.sha1(str(doc.get("data_json") or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _is_stale(doc: dict) -> bool:
+    """画面が送ってきた版が今の作業データと違うか。版を送らない呼び出し（古い画面など）は比べない。"""
+    payload = request.get_json(force=True, silent=True)
+    sent = payload.get("version") if isinstance(payload, dict) else request.form.get("version")
+    return bool(sent) and str(sent) != _version(doc)
 
 
 def _json_values() -> dict:
@@ -461,10 +563,16 @@ def draft(doc_id: int):
     extraction = _data(doc)
     if extraction is None:
         return jsonify(error="まだ読み取りをしていません"), 409
-    if _apply_values(extraction, _json_values()):
+    if _is_stale(doc):
+        return jsonify(error=STALE_MESSAGE), 409
+    version = _version(doc)
+    if _apply_values(extraction, _json_values(), _data(doc, "confirmed_json")):
         title = None if doc["state"] in CONFIRMED_STATES else _search_title(doc, extraction)
-        db.save_draft(doc_id, _dumps(extraction), title=title)
-    return "", 204
+        new_json = _dumps(extraction)
+        db.save_draft(doc_id, new_json, title=title)
+        version = _version({"data_json": new_json})
+    # 画面は次の保存・確定でこの版を送る
+    return "", 204, {"X-Doc-Version": version}
 
 
 @bp.post("/<int:doc_id>/preview")
@@ -474,7 +582,9 @@ def preview(doc_id: int):
     extraction = _data(doc)
     if extraction is None:
         return jsonify(error="まだ読み取りをしていません"), 409
-    _apply_values(extraction, _json_values())
+    if _is_stale(doc):
+        return jsonify(error=STALE_MESSAGE), 409
+    _apply_values(extraction, _json_values(), _data(doc, "confirmed_json"))
     return jsonify(_summary(doc, extraction))
 
 
@@ -484,7 +594,10 @@ def ai_fill(doc_id: int):
     extraction = _data(doc)
     if extraction is None:
         return redirect(url_for(".type_select", doc_id=doc_id))
-    _apply_values(extraction, _form_values(request.form))  # 画面で入力中の値を先に反映
+    if _is_stale(doc):
+        flash(STALE_MESSAGE, "error")
+        return redirect(url_for(".review", doc_id=doc_id))
+    _apply_values(extraction, _form_values(request.form), _data(doc, "confirmed_json"))  # 画面で入力中の値を先に反映
     info = _load_info(doc)
     filled = None
     if info is None:
@@ -495,6 +608,11 @@ def ai_fill(doc_id: int):
         except Exception as exc:
             flash(f"AIで空欄を探せませんでした: {llm.friendly_error(exc)}", "error")
     refresh_summary(extraction)
+    latest = db.get_document(doc_id)
+    if latest is None or _version(latest) != _version(doc) or latest["state"] != doc["state"]:
+        # AIの応答を待つ間に別のタブで途中保存・確定された。読み込んだときの版で上書きしない
+        flash(STALE_MESSAGE, "error")
+        return redirect(url_for(".review", doc_id=doc_id))
     new_json = _dumps(extraction)
     if new_json != doc["data_json"]:
         db.save_draft(doc_id, new_json)
@@ -511,7 +629,11 @@ def confirm(doc_id: int):
     extraction = _data(doc)
     if extraction is None:
         return redirect(url_for(".type_select", doc_id=doc_id))
-    changed = _apply_values(extraction, _form_values(request.form))
+    if _is_stale(doc):
+        # 別のタブで読み直した・直した内容を、見ていない画面から確定しない
+        flash(STALE_MESSAGE, "error")
+        return redirect(url_for(".review", doc_id=doc_id))
+    changed = _apply_values(extraction, _form_values(request.form), _data(doc, "confirmed_json"))
     new_json = _dumps(extraction) if changed else doc["data_json"]
     if changed:
         db.save_draft(doc_id, new_json)
@@ -538,7 +660,7 @@ def done(doc_id: int):
                            # 識別番号が無くてファイル名の末尾に元ファイルの符号が付いたときだけ、その説明を出す
                            hash_suffix=bool(hash8) and Path(file_name).stem.endswith(hash8),
                            markdown=build_markdown(doc, confirmed), batch=_batch_info(doc),
-                           delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
+                           delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=delete_confirm(doc),
                            batch_confirm=BATCH_DELETE_CONFIRM)
 
 
@@ -561,7 +683,7 @@ def detail(doc_id: int):
         data_types=DATA_TYPES,
         batch=_batch_info(doc),
         delete_note=DELETE_ON_DOWNLOAD_NOTE,
-        delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
+        delete_confirm=delete_confirm(doc),
     )
 
 
@@ -605,7 +727,8 @@ def download_md(doc_id: int):
     body = build_markdown(doc, confirmed).encode("utf-8")
     name = markdown_filename(doc, confirmed)
     # charset は Flask が text/* に付ける。ここで付けると「charset=utf-8」が二重になる
-    response = send_file(io.BytesIO(body), mimetype="text/markdown", as_attachment=True, download_name=name)
+    response = send_file(io.BytesIO(body), mimetype="text/markdown", as_attachment=True, download_name=name,
+                         conditional=False)   # Range でも全体を返す（一部だけ渡して消すことが無いように）
     set_download_name(response, name, "form")
     return purge.purge_after_send(response, purge.purge_documents, [doc_id])
 
@@ -652,7 +775,8 @@ def download_batch(batch_id: str):
                         build_markdown(doc, extraction).encode("utf-8"))
     buffer.seek(0)
     zip_name = f"帳票Markdown_{datetime.now():%Y%m%d_%H%M%S}.zip"
-    response = send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=zip_name)
+    response = send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=zip_name,
+                         conditional=False)   # Range でも全体を返す
     set_download_name(response, zip_name, "forms_markdown")
     if pending:
         return purge.purge_after_send(response, purge.purge_documents, confirmed_ids)

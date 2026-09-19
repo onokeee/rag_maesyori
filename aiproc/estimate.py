@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 
 from aiproc import cache, items
-from aiproc.runner import assign_keys, load_rows_for_ai, prepare_works, selected
+from aiproc.runner import assign_keys, cached_usable, load_rows_for_ai, prepare_works, selected
 from core.mdtext import estimate_tokens
 
 DEFAULT_SEC_PER_CALL = {"local": 15.0, "cloud": 8.0}
@@ -81,7 +81,7 @@ def estimate(import_id: int, trial_stats: list[dict] | None = None, *, scope: st
     data = load_rows_for_ai(import_id)
     works = prepare_works(data, stage_ids)
     template_id = data.template_id or 0
-    existing = {sid: items.items_by_key(template_id, sid) for sid in {w.stage_id for w in works}}
+    existing = {sid: items.items_by_key(template_id, sid, import_id=import_id) for sid in {w.stage_id for w in works}}
     counts = {"ai": 0, "rule_only": 0, "skipped": 0, "already": 0, "duplicates": 0, "cached": 0}
     targets = []
     for w in works:
@@ -101,13 +101,14 @@ def estimate(import_id: int, trial_stats: list[dict] | None = None, *, scope: st
             keys = []
             for m in modes:
                 assign_keys([w], settings, m)
-                keys.append(w.key)
-            dedupe = keys[0]
+                keys.append((m, w.key))
+            dedupe = keys[0][1]
             if dedupe in uniq:
                 counts["duplicates"] += 1
                 continue
             uniq[dedupe] = w
-            if any(cache.exists(k) for k in keys):
+            # 保存済みでも、使えない応答（壊れたJSON・打ち切り）や再依頼の応答が無いものは実行時に AI を呼ぶ
+            if any(cache.exists(k) and cached_usable(w, settings, m, k) for m, k in keys):
                 counts["cached"] += 1
     else:
         for w in targets:

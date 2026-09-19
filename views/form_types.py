@@ -17,6 +17,7 @@ from pattern.forms import parse_pattern_form, pattern_to_meta, pattern_to_rows, 
 from pattern.matcher import match_pattern
 from pattern.model import DATA_TYPES, DIRECTIONS, IMAGE_PROCESSING, RAG_OUTPUTS, PatternDef
 from views import safe_next
+from views.forms import upload_error_text
 
 bp = Blueprint("form_types", __name__, url_prefix="/settings/form-types")
 
@@ -41,24 +42,26 @@ def _confirmed_count(pattern_id: int) -> int:
 def _save_samples(pattern_id: int, files) -> tuple[int, list[str]]:
     cfg = current_app.config
     saved, errors = 0, []
-    for storage in files:
+    for position, storage in enumerate(files, 1):
         if not storage or not storage.filename:
             continue
         try:
             stored = save_upload(storage, "samples", cfg["ALLOWED_EXTENSIONS"], cfg["MAX_CONTENT_LENGTH"])
         except UploadError as exc:
-            errors.append(str(exc))
+            errors.append(upload_error_text(storage, exc, position))
             continue
         try:
             path = upload_path(stored.stored_path)
-            precheck_excel(path)
+            precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"))
             try:
                 load_workbook_info(path)
             except Exception as exc:
-                raise UploadError(f"{stored.file_name}: Excelファイルとして読み込めませんでした（{exc.__class__.__name__}）") from exc
+                current_app.logger.warning("見本を読み込めませんでした: %s", exc.__class__.__name__)
+                raise UploadError("Excelファイルとして読み込めませんでした") from exc
         except UploadError as exc:
             remove_upload(stored.stored_path)
-            errors.append(str(exc) if stored.file_name in str(exc) else f"{stored.file_name}: {exc}")
+            # flash に入るのでファイル名は出さず、選んだ順の位置で示す（design.md 3.3）
+            errors.append(upload_error_text(storage, exc, position))
             continue
         db.add_sample(pattern_id, stored.file_name, stored.file_hash, stored.stored_path)
         saved += 1

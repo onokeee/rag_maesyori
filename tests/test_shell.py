@@ -1,6 +1,8 @@
 """画面の骨組み: ホーム、ナビ、設定（AI接続・LightRAG案内・一覧表の取り込み設定）。"""
 import io
 import json
+import os
+import time
 
 import pytest
 import yaml
@@ -226,6 +228,21 @@ def test_not_found_page_is_japanese(client):
         assert 'href="/"' in page, url
 
 
+def test_method_not_allowed_page_is_japanese(client):
+    """送信専用の URL をアドレス欄から開いても、Werkzeug の英語の画面を出さない（design.md 2）。"""
+    res = client.get("/forms/1/ai-classify")
+    assert res.status_code == 405
+    page = res.get_data(as_text=True)
+    assert "Method Not Allowed" not in page and "ホームから開き直してください" in page and 'href="/"' in page
+    res = client.get("/forms/1/ai-classify", headers={"Accept": "application/json"})
+    assert res.status_code == 405 and "ホームから" in res.get_json()["error"]
+
+
+def test_bad_request_page_is_japanese(client):
+    res = client.get("/", headers={"Host": "evil.example"})
+    assert res.status_code == 400 and "Bad Request" not in res.get_data(as_text=True)
+
+
 def test_other_host_is_refused(client):
     """このPC以外の名前で届いたリクエストは断る（DNSリバインディング対策）。"""
     assert client.get("/", headers={"Host": "127.0.0.1:5000"}).status_code == 200
@@ -242,6 +259,10 @@ def test_startup_removes_orphan_uploads(tmp_path):
     documents.mkdir(parents=True, exist_ok=True)
     orphan = documents / f"{'a' * 32}.xlsx"
     orphan.write_bytes(b"broken")
+    old = time.time() - 3600
+    os.utime(orphan, (old, old))   # 取り込みの途中ではない（できてから時間がたった）残骸
+    fresh = documents / f"{'c' * 32}.xlsx"
+    fresh.write_bytes(b"uploading")   # 別に起動しているアプリが保存したばかり（DB の行を作る前）
     used = documents / f"{'b' * 32}.xlsx"
     used.write_bytes(b"used")
     with app.app_context():
@@ -251,6 +272,7 @@ def test_startup_removes_orphan_uploads(tmp_path):
 
     assert not orphan.exists()
     assert used.exists()
+    assert fresh.exists()   # できたばかりのファイルは消さない
 
 
 def test_home_keeps_modified_forms_in_recent_confirmed(app, client):
@@ -263,11 +285,39 @@ def test_home_keeps_modified_forms_in_recent_confirmed(app, client):
     assert "修正中（確定済みの版あり）" in page
 
 
+def test_home_shows_the_modified_badge_inside_a_batch_row(app, client):
+    """まとめ取り込みの中の修正中の帳票も、確認文を開く前に一覧で分かる。"""
+    with app.app_context():
+        for order, (name, data, title) in enumerate((("1.xlsx", _extraction("EQ-002"), "B-001 直した"),
+                                                     ("2.xlsx", _extraction("EQ-001"), "B-002 そのまま"))):
+            doc_id = db.create_document(name, "0" * 64, f"documents/{name}", batch_id="B", batch_order=order)
+            db.update_document(doc_id, data_json=data, confirmed_json=_extraction("EQ-001"), title=title)
+    page = client.get("/").get_data(as_text=True)
+    assert "まとめ取り込み（2ファイル）" in page
+    row = page[page.index("B-001 直した"):page.index("B-002 そのまま")]
+    assert "修正中（確定済みの版あり）" in row
+    rest = page[page.index("B-002 そのまま"):page.index("zipをダウンロード")]
+    assert "修正中（確定済みの版あり）" not in rest
+
+
 def test_home_ready_list_excludes_forms_without_confirmed_version(app, client):
     _add_document(app, "確認中.xlsx", data=_extraction(), title="R-003 確認中")
     page = client.get("/").get_data(as_text=True)
     assert "ダウンロード待ちの帳票はありません" in page
     assert "R-003 確認中" in page  # 作業中には出る
+
+
+def test_home_says_how_many_are_not_shown_and_can_show_all(app, client):
+    """ホームはこのPCに残っているデータの唯一の一覧。50件を超えた分を黙って切らない。"""
+    for i in range(51):
+        _add_document(app, f"未読{i:02d}.xlsx")
+    _add_document(app, "確定.xlsx", data=_extraction(), confirmed=_extraction(), title="R-900 確定")
+    page = client.get("/").get_data(as_text=True)
+    assert "未読50.xlsx" in page and "未読00.xlsx" not in page   # 新しい順に50件
+    assert "ほかに1件あります" in page and "/?all=1" in page
+    assert page.count("ほかに") == 1                               # 超えていない一覧には出さない
+    page = client.get("/?all=1").get_data(as_text=True)
+    assert "未読00.xlsx" in page and "ほかに1件あります" not in page
 
 
 def test_server_error_page_is_japanese(tmp_path):
@@ -365,3 +415,17 @@ def test_refused_write_answers_json_when_the_screen_asked_for_json(ai_client):
     res = ai_client.post("/settings/ai/test", headers={**CROSS_SITE, "Accept": "application/json"})
     assert res.status_code == 403
     assert "ほかのサイト" in res.get_json()["error"]
+
+
+def test_too_large_upload_page_is_japanese(tmp_path):
+    """MAX_CONTENT_LENGTH を超えた送信は Werkzeug の英語の画面ではなく、日本語の案内とホームへのボタン。"""
+    small = create_app(make_config(tmp_path, MAX_CONTENT_LENGTH=1024))
+    res = small.test_client().post("/forms/upload", data={"files": (io.BytesIO(b"x" * 5000), "大きい.xlsx")},
+                                   content_type="multipart/form-data")
+    body = res.get_data(as_text=True)
+    assert res.status_code == 413
+    assert "ファイルが大きすぎます" in body and "合計 1KB まで" in body and "分けて" in body
+    assert "Request Entity Too Large" not in body and 'href="/"' in body
+    res = small.test_client().post("/forms/upload", data=b"x" * 5000, headers={"Accept": "application/json"},
+                                   content_type="application/json")
+    assert res.status_code == 413 and "大きすぎます" in res.get_json()["error"]

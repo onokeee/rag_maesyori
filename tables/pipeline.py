@@ -236,9 +236,24 @@ def run_read(ctx, import_id: int) -> dict:
 
 
 def start_read_job(import_id: int) -> int:
-    job_id = jobs.start_job("table_read", "table_import", import_id, lambda ctx: run_read(ctx, import_id),
-                            {"import_id": import_id})
-    store.update_import(import_id, status="reading", job_id=job_id)
+    return _start_import_job(import_id, "table_read", "reading", run_read)
+
+
+def _start_import_job(import_id: int, kind: str, status: str, fn) -> int:
+    """取り込みの状態を先に書いてからジョブを始める。
+
+    ジョブを先に始めると、ジョブがすぐ終わって書いた「preview」「confirmed」を、あとの「reading」「confirming」で
+    上書きしてしまい、待ち画面が「途中で止まりました」と誤って出す。job_id だけはジョブを作ってから書く。
+    """
+    before = (store.get_import(import_id) or {}).get("status")
+    store.update_import(import_id, status=status)
+    try:
+        job_id = jobs.start_job(kind, "table_import", import_id, lambda ctx: fn(ctx, import_id), {"import_id": import_id})
+    except Exception:
+        if before is not None:
+            store.update_import(import_id, status=before)
+        raise
+    store.update_import(import_id, job_id=job_id)
     return job_id
 
 
@@ -251,11 +266,11 @@ def usable_ai_results(import_id: int, imp: dict, spec) -> dict:
     from aiproc import items as ai_items
     from aiproc import runner
 
-    accepted = ai_items.results_for_render(imp["template_id"], "log")
+    accepted = ai_items.results_for_render(imp["template_id"], "log", import_id=import_id)
     if not accepted:
         return {}
     data = runner.load_rows_for_ai(import_id)
-    by_key = ai_items.items_by_key(imp["template_id"], "log")
+    by_key = ai_items.items_by_key(imp["template_id"], "log", import_id=import_id)
     out = {}
     for w in runner.prepare_works(data, ["log"], list(accepted)):
         item = by_key.get(w.row_key)
@@ -351,6 +366,9 @@ def preview_files(import_id: int, imp: dict, spec, ctx=None) -> list[dict]:
     if ctx is not None:
         ctx.check_cancel()
         ctx.progress(phase="保存", done=2, total=3)
+    if store.get_import(import_id) is None:
+        # 作っている間に取り込みが削除された。消したフォルダに記録の md を作り直さない（design.md 3.3）
+        raise PipelineError("取り込みが削除されたため、Markdownの下書きは作りませんでした")
     _write_md_dir(base["preview"], files)
     listing = [{"name": f.name, "kind": f.kind, "size": len(f.data),
                 "records": sum(1 for line in f.text.split("\n") if line.startswith("## ")) if f.kind == "records" else None}
@@ -411,10 +429,7 @@ def run_render(ctx, import_id: int) -> dict:
 
 
 def start_render_job(import_id: int) -> int:
-    job_id = jobs.start_job("table_render", "table_import", import_id, lambda ctx: run_render(ctx, import_id),
-                            {"import_id": import_id})
-    store.update_import(import_id, status="confirming", job_id=job_id)
-    return job_id
+    return _start_import_job(import_id, "table_render", "confirming", run_render)
 
 
 # ---- ダウンロード ----------------------------------------------------------------------------

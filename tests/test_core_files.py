@@ -1,6 +1,9 @@
 """core/files.py: 保存（分割読み sha256）と Excel の事前チェック。"""
 import hashlib
 import io
+import os
+import re
+import time
 import zipfile
 from pathlib import Path
 
@@ -155,8 +158,12 @@ def test_remove_orphan_uploads(core_app):
     with core_app.app_context():
         used = save_upload(_storage(b"a" * 100, "使用中.xlsx"), "documents", {".xlsx"}, 10_000)
         orphan = save_upload(_storage(b"b" * 100, "残骸.xlsx"), "tables", {".xlsx"}, 10_000)
+        fresh = save_upload(_storage(b"c" * 100, "保存したばかり.xlsx"), "documents", {".xlsx"}, 10_000)
         other = upload_path("documents/メモ.txt")
         other.write_text("save_upload が作った名前ではないファイル", encoding="utf-8")
+        old = time.time() - 3600
+        for stored in (used, orphan):
+            os.utime(upload_path(stored.stored_path), (old, old))
 
         removed = files.remove_orphan_uploads(core_app.config["UPLOAD_DIR"], [used.stored_path])
 
@@ -164,3 +171,148 @@ def test_remove_orphan_uploads(core_app):
         assert upload_path(used.stored_path).exists()
         assert not upload_path(orphan.stored_path).exists()
         assert other.exists()
+        # できたばかりのファイルは、別に起動しているアプリが DB の行を作る前かもしれないので消さない
+        assert upload_path(fresh.stored_path).exists()
+
+
+# ---- 結合セルの面積（openpyxl で開く前に止める） ------------------------------------------------
+
+def _xlsx_with_merge(path, ref: str, *, pad: int = 0):
+    """ふつうの xlsx を作り、シートの XML に <mergeCell ref="..."> を書き足す（pad: その前に入れる空白の量）。"""
+    src = _xlsx(path.with_name("src_" + path.name))
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                merge = f'{" " * pad}<mergeCells count="1"><mergeCell ref="{ref}"/></mergeCells>'.encode()
+                data = data.replace(b"</sheetData>", b"</sheetData>" + merge, 1)
+                if b"<sheetData/>" in data:
+                    data = data.replace(b"<sheetData/>", b"<sheetData/>" + merge, 1)
+            zout.writestr(info, data)
+    return path
+
+
+def test_precheck_refuses_a_whole_sheet_merge_before_openpyxl(tmp_path):
+    import time
+    path = _xlsx_with_merge(tmp_path / "merge_full.xlsx", "A1:XFD1048576")
+    started = time.monotonic()
+    with pytest.raises(UploadError, match="結合セルの範囲が大きすぎます"):
+        precheck_excel(path)
+    assert time.monotonic() - started < 2
+
+
+def test_precheck_accepts_whole_row_and_whole_column_merges(tmp_path):
+    precheck_excel(_xlsx_with_merge(tmp_path / "row.xlsx", "A1:XFD1"))
+    precheck_excel(_xlsx_with_merge(tmp_path / "col.xlsx", "A1:A1048576"))
+
+
+def test_precheck_finds_a_merge_split_across_read_chunks(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "CHUNK_SIZE", 64)   # タグがチャンクの境目で切れるようにする
+    for pad in range(0, 64, 7):
+        path = _xlsx_with_merge(tmp_path / f"split{pad}.xlsx", "C1:Z200000", pad=pad)
+        with pytest.raises(UploadError, match="結合セル"):
+            precheck_excel(path)
+
+
+def test_precheck_counts_each_merge_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "CHUNK_SIZE", 64)
+    monkeypatch.setattr(files, "MAX_MERGED_CELLS", 100)
+    precheck_excel(_xlsx_with_merge(tmp_path / "exact.xlsx", "A1:J10"))   # ちょうど100セルは通す
+
+
+def test_uploads_with_a_whole_sheet_merge_are_refused_in_japanese(app, client, tmp_path):
+    path = _xlsx_with_merge(tmp_path / "merge_full.xlsx", "A1:XFD1048576")
+    for url in ("/forms/upload", "/tables/upload"):
+        res = client.post(url, data={"file": (io.BytesIO(path.read_bytes()), "結合.xlsx")},
+                          content_type="multipart/form-data", follow_redirects=True)
+        assert "結合セルの範囲が大きすぎます" in res.get_data(as_text=True), url
+    assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
+
+
+def test_precheck_reports_a_damaged_compressed_part(tmp_path):
+    """圧縮データが壊れている（zlib.error）ときも UploadError（500 にしない）。"""
+    path = _xlsx(tmp_path / "ok.xlsx")
+    data = bytearray(path.read_bytes())
+    with zipfile.ZipFile(path) as zf:
+        info = zf.getinfo("xl/workbook.xml")
+    start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+    for i in range(start, start + min(info.compress_size, 64)):
+        data[i] ^= 0xFF
+    broken = tmp_path / "broken.xlsx"
+    broken.write_bytes(bytes(data))
+    with pytest.raises(UploadError, match="壊れている"):
+        precheck_excel(broken)
+
+
+def test_sheetless_workbook_is_refused_for_both_flows(app, client, tmp_path):
+    """シートの無いブックは帳票でも一覧表でも受け付けず、アップロードしたファイルも残さない。"""
+    import re
+
+    path = _xlsx(tmp_path / "s.xlsx")
+    out = io.BytesIO()
+    with zipfile.ZipFile(path) as src, zipfile.ZipFile(out, "w") as z:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "xl/workbook.xml":
+                data = re.sub(rb"<sheets>.*?</sheets>", b"<sheets/>", data, flags=re.S)
+            z.writestr(item, data)
+    sheetless = tmp_path / "sheetless.xlsx"
+    sheetless.write_bytes(out.getvalue())
+    with pytest.raises(UploadError, match="シートがないブック"):
+        precheck_excel(sheetless)
+    precheck_excel(path)   # ふつうのブックは通る
+    for url in ("/forms/upload", "/tables/upload"):
+        res = client.post(url, data={"file": (io.BytesIO(out.getvalue()), "シートなし.xlsx")},
+                          content_type="multipart/form-data", follow_redirects=True)
+        assert "シートがないブックです" in res.get_data(as_text=True), url
+    assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
+
+
+def _xlsx_with_cells(path, count: int):
+    """ふつうの xlsx のシートに、書式だけのセル <c/> を count 個書き足す（圧縮すると小さい）。"""
+    src = _xlsx(path.with_name("src_" + path.name))
+    rows = b'<row r="9999">' + b'<c s="0"/>' * count + b"</row>"
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                data, n = re.subn(rb"<sheetData\s*/>", b"<sheetData>" + rows + b"</sheetData>", data, 1)
+                if not n:
+                    data = data.replace(b"</sheetData>", rows + b"</sheetData>", 1)
+            zout.writestr(info, data)
+    return path
+
+
+def test_precheck_refuses_too_many_cells_in_a_small_file(tmp_path):
+    """圧縮すると小さいが展開すると大量のセルがあるブックは、openpyxl で開く前に断る。"""
+    path = _xlsx_with_cells(tmp_path / "many.xlsx", files.MAX_CELLS + 1)
+    assert path.stat().st_size < 200 * 1024
+    with pytest.raises(UploadError, match="セル数が上限"):
+        precheck_excel(path)
+    precheck_excel(path, max_cells=files.MAX_CELLS + 100)   # 上限を上げれば通る
+
+
+def test_precheck_counts_cells_split_across_read_chunks_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "CHUNK_SIZE", 64)
+    path = _xlsx_with_cells(tmp_path / "exact.xlsx", 500)
+    with zipfile.ZipFile(path) as zf:
+        existing = len(re.findall(rb"<(?:\w+:)?c(?=[\s/>])", zf.read("xl/worksheets/sheet1.xml")))
+    precheck_excel(path, max_cells=existing)          # ちょうど上限は通す（二重に数えない）
+    with pytest.raises(UploadError, match="セル数が上限"):
+        precheck_excel(path, max_cells=existing - 1)  # 1つでも多ければ断る（数え落とさない）
+
+
+def test_save_upload_and_precheck_messages_carry_no_file_name_or_class_name(app, tmp_path):
+    """flash に入るメッセージにはファイル名も例外の種類名も入れない（design.md 3.3）。"""
+    from werkzeug.datastructures import FileStorage
+
+    with app.app_context():
+        for data, allowed in ((b"x", {".csv"}), (b"", {".xlsx"})):
+            with pytest.raises(UploadError) as err:
+                save_upload(FileStorage(io.BytesIO(data), "秘密の名前.xlsx"), "documents", allowed, 1024)
+            assert "秘密の名前" not in str(err.value)
+    broken = tmp_path / "broken.xlsx"
+    broken.write_bytes(b"PK\x03\x04" + b"\x00" * 64)
+    with pytest.raises(UploadError) as err:
+        precheck_excel(broken)
+    assert "BadZipFile" not in str(err.value) and "壊れている" in str(err.value)

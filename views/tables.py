@@ -58,11 +58,13 @@ MATCHED_LABELS = {"template": "設定", "dictionary": "辞書", "similar": "似�
 # ダウンロードでデータが消えることの案内（design.md 3.3）
 DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この取り込みのデータ（元のファイル・読み込んだ内容・"
                            "作った Markdown・AI整形の結果）はこのPCから消えます。同じものをもう一度ダウンロードすることはできません。"
-                           "正規化CSVも要るときは、zip より先にダウンロードしてください。")
+                           "正規化CSVは zip の「管理用_RAGには入れない」フォルダにも入っています。")
 DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込みのデータはこのPCから消えます。"
                               "もう一度ダウンロードすることはできません。")
 ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
-                    ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16")]
+                    ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16"),
+                    ("utf-16-le", "UTF-16LE（BOMなし）"), ("utf-16-be", "UTF-16BE（BOMなし）")]
+BUSY_MESSAGE = "処理中は変更できません。終わるか中止してから変更してください"
 DELIMITER_CHOICES = [(",", "カンマ"), ("\t", "タブ"), (";", "セミコロン"), ("|", "縦棒")]
 
 
@@ -100,6 +102,8 @@ def _sheet(imp: dict, source) -> str:
     if src.get("sheet") in names:
         return src["sheet"]
     visible = [s.name for s in source.sheets() if not s.hidden]
+    if not (visible or names):
+        raise UploadError("シートがないブックです。シートのあるブックを選んでください")
     return (visible or names)[0]
 
 
@@ -145,6 +149,17 @@ def _int_list(value) -> list[int]:
         items = str(value or "").replace("、", ",").replace(" ", ",").split(",")
     out = sorted({n for n in (_int(x) for x in items) if n and n > 0})
     return out
+
+
+def _ai_running(import_id: int) -> bool:
+    job = jobs.latest_job("table_import", import_id, kind="ai_format")
+    return bool(job and not job.get("finished"))
+
+
+def _processing(imp: dict) -> bool:
+    """読み込み中・Markdown作成中・AI整形の実行中か。途中で設定やデータを変えると、古い設定の結果が残ったり、
+    消したはずの AI の結果が書き戻されたりする（design.md 3.3）。"""
+    return imp.get("status") in ("reading", "confirming") or _ai_running(imp["id"])
 
 
 # ---- 待ち画面 ------------------------------------------------------------------------------
@@ -203,6 +218,14 @@ def delete_import(import_id: int):
     if imp["status"] in ("reading", "confirming"):
         flash("処理中の取り込みは削除できません。終わるか中止してから削除してください", "error")
         return redirect(url_for("tables.preview", import_id=import_id))
+    if _ai_running(import_id):
+        flash("AI整形の実行中は削除できません。AI整形を中止してから削除してください", "error")
+        return redirect(url_for("tables.ai", import_id=import_id))
+    preview_job = jobs.latest_job("table_import", import_id, kind="table_preview")
+    if preview_job is not None and not preview_job.get("finished"):
+        # 下書きの作成中に消すと、開いているファイルが消え残ったり、消したあとに記録の md が書き戻されたりする
+        flash("Markdownの下書きを作っている間は削除できません。終わってから削除してください", "error")
+        return redirect(url_for("tables.preview", import_id=import_id))
     purge.purge_table_import(import_id)
     # ファイル名は出さない: flash はブラウザのセッションクッキーに載るので、取引先名や「社外秘」を
     # 含みうる名前をサーバー側から消したあともブラウザに残ってしまう（design.md 3.3）
@@ -240,7 +263,11 @@ def upload():
             precheck_excel(path)
             source = open_source(path, stored.file_name, {"max_cells": cfg.get("EXCEL_MAX_CELLS", 500000)})
             sheets = [s for s in source.sheets() if not s.hidden] or source.sheets()
-            source_info = {"kind": "excel", "sheet": sheets[0].name if sheets else None}
+            if not sheets:
+                raise UploadError("シートがないブックです。シートのあるブックを選んでください")
+            # 開けても値を読めないブック（<v>NaN</v> など）は、取り込みを作る前にここで断る
+            list(source.rows(sheets[0].name, 1, 50))
+            source_info = {"kind": "excel", "sheet": sheets[0].name}
         else:
             source = open_source(path, stored.file_name)
             sniff = source.sniff
@@ -253,6 +280,9 @@ def upload():
         remove_upload(stored.stored_path)
         flash(str(exc), "error")
         return redirect(url_for("tables.new"))
+    except Exception:
+        remove_upload(stored.stored_path)   # 思わぬエラーでもアップロードしたファイルを残さない（design.md 3.3）
+        raise
     import_id = store.create_import(stored.file_name, stored.file_hash, stored.stored_path, source=source_info)
     if source_info.get("kind") == "excel":
         pipeline.import_source(store.get_import(import_id), real=source).sheets()  # シート一覧を控えに入れる
@@ -307,6 +337,9 @@ def source(import_id: int):
 @bp.post("/imports/<int:import_id>/source")
 def save_source(import_id: int):
     imp = _load_import(import_id)
+    if _processing(imp):
+        flash(BUSY_MESSAGE, "error")
+        return redirect(url_for("tables.preview", import_id=import_id))
     src = dict(imp.get("source") or {})
     before = (src.get("sheet"), src.get("encoding"), src.get("delimiter"), src.get("errors"))
     if _is_excel(imp):
@@ -341,8 +374,7 @@ def save_source(import_id: int):
             flash("取り込み設定が見つかりません", "error")
             return redirect(url_for("tables.source", import_id=import_id))
         columns.update(template_id=template["id"], template_version_id=template["current_version_id"])
-    if imp["status"] not in ("reading", "confirming"):
-        columns["status"] = "uploaded"  # 選び直したら読み込みからやり直す
+    columns["status"] = "uploaded"  # 選び直したら読み込みからやり直す
     store.update_import(import_id, **columns)
     return redirect(url_for("tables.layout", import_id=import_id))
 
@@ -412,6 +444,9 @@ def layout_detect(import_id: int):
 @bp.post("/imports/<int:import_id>/layout")
 def save_layout(import_id: int):
     imp = _load_import(import_id)
+    if _processing(imp):
+        flash(BUSY_MESSAGE, "error")
+        return redirect(url_for("tables.preview", import_id=import_id))
     header_rows = _int_list(request.form.get("header_rows"))
     data_end = _int(request.form.get("data_end_row"))
     try:
@@ -577,6 +612,8 @@ def columns(import_id: int):
 @bp.post("/imports/<int:import_id>/columns")
 def save_columns(import_id: int):
     imp = _load_import(import_id)
+    if _processing(imp):
+        return _json_error(BUSY_MESSAGE, 409)
     payload = _payload()
     template = store.get_template(imp["template_id"]) if imp.get("template_id") else None
     base_spec = template["spec"] if template else None
@@ -668,7 +705,8 @@ def ai(import_id: int):
     return render_template(
         "tables/ai.html", imp=imp, spec=spec, log_display=col.display if col else log_key, row_choices=row_choices,
         trial_keys=[k for k, _ in row_choices[:10]], ai_ready=ready, external=external, model=model, job=job,
-        job_active=bool(job and not job.get("finished")), counts=ai_items.counts(imp["template_id"], "log"),
+        job_active=bool(job and not job.get("finished")),
+        counts=ai_items.counts(imp["template_id"], "log", import_id=import_id),
         scopes=SCOPE_LABELS, item_labels=ai_items.STATUS_LABELS, **_steps_ctx(5))
 
 
@@ -713,8 +751,12 @@ def ai_trial(import_id: int):
     spec = _spec_for(imp)
     if spec is None or spec.log_stage is None:
         return _json_error("AI整形の対象の列がありません")
-    row_key = str(_payload().get("row_key") or "")
+    payload = _payload()
+    row_key = str(payload.get("row_key") or "")
     try:
+        settings = llm.job_client_settings()
+        if not llm.is_local_endpoint(settings.get("chat_url") or "") and not payload.get("confirm_external"):
+            return _json_error("対応内容が外部のAIサービスに送信されます。確認のチェックを入れてください")
         data = runner.load_rows_for_ai(import_id)
         result = runner.trial_row(import_id, row_key, stage_ids=["log"], data=data)
     except llm.LLMNotConfigured:
@@ -802,13 +844,16 @@ def ai_control(import_id: int, action: str):
 
 # ---- 6 内容とファイルの確認 ---------------------------------------------------------------------------
 
-def _preview_job(import_id: int, imp: dict, spec) -> dict:
-    """確認画面の md を作るジョブ。同じ入力のジョブがあればそれを見せ、なければ始める。"""
+def _preview_job(import_id: int, imp: dict, spec, retry: bool = False) -> dict:
+    """確認画面の md を作るジョブ。同じ入力のジョブがあればそれを見せ、なければ始める。
+
+    retry: 同じ入力で失敗したジョブを作り直す（［もう一度作る］。ファイルの一時的なロックなどで失敗したとき）。
+    """
     signature = pipeline.preview_signature(import_id, imp, spec)
     job = jobs.latest_job("table_import", import_id, kind="table_preview")
     if job is not None and (job.get("params") or {}).get("signature") == signature:
-        if not job.get("finished") or job["status"] == "failed":
-            return job  # 動いている途中、または同じ入力で失敗したまま（作り直しても同じ結果になる）
+        if not job.get("finished") or (job["status"] == "failed" and not retry):
+            return job  # 動いている途中、または同じ入力で失敗したまま（再読み込みのたびに作り直さない）
     return jobs.get_job(pipeline.start_preview_job(import_id, signature))
 
 
@@ -826,10 +871,16 @@ def preview(import_id: int):
     issues = pipeline.load_issues(import_id)
     files = pipeline.ready_preview_files(import_id, imp, spec)
     if files is None:  # 初回は件数分の md を作るのに時間がかかるので、ジョブにして待ち画面を出す
+        if request.args.get("retry") == "1":
+            _preview_job(import_id, imp, spec, retry=True)
+            return redirect(url_for("tables.preview", import_id=import_id))  # 待ち画面の再読み込みで何度も作り直さない
         job = _preview_job(import_id, imp, spec)
         if job.get("finished") and job["status"] != "done":
-            return render_template("tables/failed.html", imp=imp,
+            return render_template("tables/failed.html", imp=imp, heading="Markdownの下書きを作れませんでした",
                                    error=job.get("message") or "Markdownの下書きを作れませんでした",
+                                   advice=("ファイルが一時的に使えなかったときなどは［もう一度作る］で直ります。"
+                                           "同じエラーが続くときは、列の対応づけ（型・Markdownへの出し方）を見直してください。"),
+                                   retry_url=url_for("tables.preview", import_id=import_id, retry=1),
                                    **_steps_ctx(6))
         return render_template("tables/wait.html", imp=imp, job=job, title="Markdownの下書きを作っています",
                                job_url=url_for("tables.api_job", job_id=job["id"]), **_steps_ctx(6))
@@ -871,6 +922,9 @@ def confirm(import_id: int):
     if spec is None or imp["status"] not in ("preview", "confirmed"):
         flash("この取り込みはまだ確定できる状態ではありません", "error")
         return redirect(url_for("tables.preview", import_id=import_id))
+    if _ai_running(import_id):
+        flash("AI整形の実行中は確定できません。終わるか中止してから確定してください", "error")
+        return redirect(url_for("tables.ai", import_id=import_id))
     if has_blocking(pipeline.load_issues(import_id)):
         flash("エラーが残っているため確定できません。問題一覧を確認して、範囲や列の対応づけを直してください", "error")
         return redirect(url_for("tables.preview", import_id=import_id))
@@ -911,9 +965,17 @@ def download_zip(import_id: int):
     if imp["status"] != "confirmed" or spec is None or not pipeline.md_paths(import_id):
         flash("先に [確定してMarkdownを作成] を押してください", "error")
         return redirect(url_for("tables.preview", import_id=import_id))
-    data = pipeline.build_download(import_id, imp, spec)
+    if _ai_running(import_id):
+        flash("AI整形の実行中はダウンロードできません。終わるか中止してからダウンロードしてください", "error")
+        return redirect(url_for("tables.done", import_id=import_id))
+    try:
+        data = pipeline.build_download(import_id, imp, spec)
+    except FileNotFoundError:
+        # 同時に押した別のダウンロードが渡し終えてデータを消した（ダブルクリックなど）。500 ではなく「ダウンロード済み」
+        abort(404)
     name = f"{_download_base(imp, spec)}.zip"
-    response = send_file(io.BytesIO(data), mimetype="application/zip", as_attachment=True, download_name=name)
+    response = send_file(io.BytesIO(data), mimetype="application/zip", as_attachment=True, download_name=name,
+                         conditional=False)   # Range でも全体を返す（一部だけ渡して消すことが無いように）
     set_download_name(response, name, "records")
     return purge.purge_after_send(response, purge.purge_table_import, import_id)
 
@@ -966,6 +1028,12 @@ def save_template(template_id: int):
 def delete_template(template_id: int):
     if store.get_template(template_id) is None:
         abort(404)
+    if store.list_imports(template_id=template_id, limit=1):
+        # ダウンロードした取り込みは消えているので、残っているのはまだダウンロードしていないデータ。
+        # 設定を消すと確定済みの zip も作れなくなる（design.md 3.3）
+        flash("この取り込み設定を使っている、まだダウンロードしていない取り込みがあります。"
+              "先にその取り込みをダウンロードするか削除してから、設定を削除してください", "error")
+        return redirect(url_for("settings.table_templates"))
     store.delete_template(template_id)
     flash("取り込み設定を削除しました", "success")
     return redirect(url_for("settings.table_templates"))

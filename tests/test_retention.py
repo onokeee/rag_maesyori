@@ -436,3 +436,237 @@ def test_purging_one_import_keeps_the_ai_results_of_another_import(app, client):
         assert [(r["row_key"], r["import_id"]) for r in rows] == [("TR-900", other)]
         assert [r[0] for r in conn.execute("SELECT cache_key FROM llm_calls")] == ["K2"]
         assert store.get_import(other) is not None
+
+
+def test_ai_results_of_an_import_that_is_gone_are_swept(app, client, tmp_path):
+    """消した取り込みを指す AI整形の結果（消したあとに動いていた AI が書いた分など）も残さない。"""
+    from app import create_app
+    from tests.conftest import make_config
+
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        template_id = store.get_import(import_id)["template_id"]
+        conn = db.get_db()
+        _ai_row(conn, template_id, 777, "TR-777", "K7")   # もう無い取り込みの分
+        conn.commit()
+    assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
+    with app.app_context():
+        conn = db.get_db()
+        assert conn.execute("SELECT COUNT(*) FROM ai_items").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
+        # 起動時の片付けでも消える
+        _ai_row(conn, template_id, 778, "TR-778", "K8")
+        conn.commit()
+        config = {"DATABASE": app.config["DATABASE"], "UPLOAD_DIR": app.config["UPLOAD_DIR"],
+                  "DATA_DIR": app.config["DATA_DIR"], "TABLES_DIR": app.config["TABLES_DIR"]}
+    restarted = create_app(make_config(tmp_path, **config))
+    with restarted.app_context():
+        conn = db.get_db()
+        assert conn.execute("SELECT COUNT(*) FROM ai_items").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
+
+
+# ---- 他サイトのページからのダウンロード（＝削除）を断る -----------------------------------------------
+# ダウンロードはデータを消すので、GET でも他サイト発なら断る（<img> や別サイトのリンクで消されないように）。
+
+CROSS_SITE_IMG = {"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "no-cors", "Sec-Fetch-Dest": "image",
+                  "Referer": "http://evil.example/"}
+
+
+def test_a_cross_site_form_download_is_refused_and_keeps_the_data(app, client):
+    doc_id, path = _add_confirmed_document(app, "他サイト.xlsx")
+    res = client.get(f"/forms/{doc_id}/download.md", headers=CROSS_SITE_IMG)
+    assert res.status_code == 403 and "EQ-001" not in res.get_data(as_text=True)
+    assert path.exists() and _rows_for(app, "documents", ("document_id",), doc_id)
+
+
+def test_a_form_download_with_a_foreign_referer_and_no_fetch_headers_is_refused(app, client):
+    """Sec-Fetch-Site を付けないブラウザでも、Referer が別サイトなら断る。"""
+    doc_id, path = _add_confirmed_document(app, "古いブラウザ.xlsx")
+    res = client.get(f"/forms/{doc_id}/download.md", headers={"Referer": "http://evil.example/page"})
+    assert res.status_code == 403
+    assert path.exists() and _rows_for(app, "documents", ("document_id",), doc_id)
+
+
+def test_a_cross_site_batch_zip_download_is_refused_and_keeps_the_data(app, client):
+    first, path1 = _add_confirmed_document(app, "b1.xlsx", value="EQ-001", batch_id="X", order=0)
+    second, path2 = _add_confirmed_document(app, "b2.xlsx", value="EQ-002", batch_id="X", order=1)
+    res = client.get("/forms/batches/X/download.zip", headers=CROSS_SITE_IMG)
+    assert res.status_code == 403 and res.mimetype != "application/zip"
+    assert path1.exists() and path2.exists()
+    for doc_id in (first, second):
+        assert _rows_for(app, "documents", ("document_id",), doc_id)
+
+
+def test_a_cross_site_table_zip_download_is_refused_and_keeps_the_data(app, client):
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        stored = Path(app.config["UPLOAD_DIR"]) / store.get_import(import_id)["stored_path"]
+    res = client.get(f"/tables/imports/{import_id}/download.zip", headers=CROSS_SITE_IMG)
+    assert res.status_code == 403 and res.mimetype != "application/zip"
+    with app.app_context():
+        assert stored.exists() and pipeline.import_dir(import_id).exists()
+    assert _rows_for(app, "table_imports", ("import_id", "table_import_id"), import_id)
+
+
+def test_same_origin_and_typed_downloads_still_work(app, client):
+    """アプリ内のクリック（same-origin）とアドレス欄への入力（none）は、これまでどおりダウンロードして消す。"""
+    doc_id, path = _add_confirmed_document(app, "同じサイト.xlsx")
+    res = client.get(f"/forms/{doc_id}/download.md",
+                     headers={"Sec-Fetch-Site": "same-origin", "Referer": f"http://localhost/forms/{doc_id}/done"})
+    assert res.status_code == 200 and "EQ-001" in res.get_data(as_text=True)
+    assert not path.exists()
+
+    doc_id, path = _add_confirmed_document(app, "手入力.xlsx")
+    res = client.get(f"/forms/{doc_id}/download.md", headers={"Sec-Fetch-Site": "none"})
+    assert res.status_code == 200 and not path.exists()
+
+
+def test_other_cross_site_gets_are_still_allowed(app, client):
+    """消さない GET（画面の表示）は他サイトからのリンクでも開ける。"""
+    assert client.get("/", headers=CROSS_SITE_IMG).status_code == 200
+
+
+# ---- 一部だけのダウンロード（Range）・削除の順番・取り込み設定の削除 -----------------------------------
+
+def test_a_ranged_form_download_keeps_the_data(app, client):
+    """Range 付き（ダウンロードマネージャー・再開）で一部だけ渡したときは消さない。全部渡したときだけ消す。"""
+    doc_id, path = _add_confirmed_document(app, "一部だけ.xlsx")
+    res = client.get(f"/forms/{doc_id}/download.md", headers={"Range": "bytes=0-9"})
+    assert res.status_code in (200, 206)
+    if res.status_code == 206:
+        assert path.exists()
+        with app.app_context():
+            assert db.get_document(doc_id) is not None
+        res = client.get(f"/forms/{doc_id}/download.md")
+        assert res.status_code == 200 and "EQ-001" in res.get_data(as_text=True)
+    assert not path.exists()
+    with app.app_context():
+        assert db.get_document(doc_id) is None
+
+
+def test_a_ranged_table_download_keeps_the_data(app, client):
+    import_id = _confirmed_import(app, client)
+    res = client.get(f"/tables/imports/{import_id}/download.zip", headers={"Range": "bytes=0-99"})
+    assert res.status_code in (200, 206)
+    if res.status_code == 206:
+        with app.app_context():
+            assert store.get_import(import_id) is not None
+        assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
+    with app.app_context():
+        assert store.get_import(import_id) is None
+
+
+def _failing_delete(*_args, **_kwargs):
+    raise RuntimeError("database is locked")
+
+
+def test_files_stay_when_deleting_the_form_rows_fails(app, client, monkeypatch):
+    """DB の削除に失敗したら、ファイルも残す（ファイルの無い帳票が作業中として残らないように）。"""
+    doc_id, path = _add_confirmed_document(app, "消せない.xlsx")
+    monkeypatch.setattr(purge, "_delete_by_columns", _failing_delete)
+    assert client.get(f"/forms/{doc_id}/download.md").status_code == 200
+    assert path.exists()
+    with app.app_context():
+        assert db.get_document(doc_id) is not None
+
+
+def test_files_stay_when_deleting_the_table_rows_fails(app, client, monkeypatch):
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        stored = Path(app.config["UPLOAD_DIR"]) / store.get_import(import_id)["stored_path"]
+        folder = pipeline.import_dir(import_id)
+    monkeypatch.setattr(purge, "_delete_by_columns", _failing_delete)
+    assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
+    assert stored.exists() and folder.exists()
+    with app.app_context():
+        assert store.get_import(import_id) is not None
+    # 失敗が解消すれば、もう一度ダウンロードして消せる
+    monkeypatch.undo()
+    assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
+    assert not stored.exists() and not folder.exists()
+
+
+def test_ai_responses_left_by_a_template_delete_are_swept_at_startup(app, client):
+    """取り込み設定を消すと ai_items は消えるが、生の応答（llm_calls）が残る。起動時の片付けで消す。"""
+    from app import _cleanup_leftovers
+
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        template_id = store.get_import(import_id)["template_id"]
+        conn = db.get_db()
+        _ai_row(conn, template_id, import_id, "TR-001", "K")
+        conn.commit()
+        store.delete_template(template_id)
+        assert conn.execute("SELECT COUNT(*) FROM ai_items").fetchone()[0] == 0
+    _cleanup_leftovers(app)
+    with app.app_context():
+        assert db.get_db().execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
+
+
+def test_sweep_orphan_ai_removes_responses_nobody_uses(app):
+    with app.app_context():
+        conn = db.get_db()
+        conn.execute("INSERT INTO llm_calls (cache_key, raw_text, created_at) VALUES ('Z', ?, '2026-09-19')",
+                     (SECRET,))
+        conn.commit()
+        assert purge.sweep_orphan_ai(conn) == 1
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
+    assert SECRET.encode("utf-8") not in _db_bytes(app)
+
+
+def test_deleting_a_template_removes_the_raw_ai_responses_at_once(app, client):
+    """取り込み設定を消したら、生の応答（llm_calls）も起動を待たずにすぐ消える。"""
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        template_id = store.get_import(import_id)["template_id"]
+        conn = db.get_db()
+        _ai_row(conn, template_id, import_id, "TR-001", "K")
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 1
+        store.delete_template(template_id)
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
+
+
+def test_a_ranged_download_gets_the_whole_file_and_removes_the_item(app, client):
+    """Range 付きでも全体を 200 で返す（一部だけ渡して消すことが無い）。全部渡したので消える。"""
+    doc_id, path = _add_confirmed_document(app, "範囲指定.xlsx")
+    res = client.get(f"/forms/{doc_id}/download.md", headers={"Range": "bytes=0-9"})
+    assert res.status_code == 200 and "EQ-001" in res.get_data(as_text=True)
+    assert not path.exists()
+    import_id = _confirmed_import(app, client)
+    res = client.get(f"/tables/imports/{import_id}/download.zip", headers={"Range": "bytes=0-99"})
+    assert res.status_code == 200
+    assert "RAG投入用/" in " ".join(zipfile.ZipFile(io.BytesIO(res.data)).namelist())
+    with app.app_context():
+        assert store.get_import(import_id) is None
+
+
+def test_purge_after_send_keeps_the_item_for_a_partial_response(app):
+    """206（一部だけ）・304 の応答では、送り終えても消さない。"""
+    from flask import Response
+
+    called = []
+    with app.app_context():
+        for status in (206, 304):
+            res = purge.purge_after_send(Response(b"abc", status=status), called.append, status)
+            list(res.response)
+            res.close()
+        assert called == []
+        res = purge.purge_after_send(Response(b"abc", status=200), called.append, 200)
+        list(res.response)
+        res.close()
+    assert called == [200]
+
+
+def test_a_folder_that_cannot_be_removed_is_logged(app, client, monkeypatch, caplog):
+    """imports/<id>/ を消し切れなかったら、黙って成功扱いにせず記録する。"""
+    import logging
+
+    import_id = _confirmed_import(app, client)
+    monkeypatch.setattr(purge.shutil, "rmtree", lambda *a, **k: None)
+    with app.app_context(), caplog.at_level(logging.WARNING, logger="core.purge"):
+        assert purge.import_dir(import_id).exists()
+        purge.purge_table_import(import_id)
+        assert store.get_import(import_id) is None
+    assert f"imports/{import_id}" in caplog.text

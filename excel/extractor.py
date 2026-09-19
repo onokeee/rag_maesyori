@@ -12,7 +12,7 @@ from excel.tables import (MIN_COLUMNS, SAME_COLUMNS_RATIO, Table, find_table, fi
                           list_header_keys, merge_table_values, parse_table_text, section_heading, seq_header,
                           stacked_tables, table_header_keys)
 from excel.text import (MAX_LABEL_LENGTH, numeric_unit, pick_checked, split_code_name, split_combined_value,
-                        to_date, to_number, value_unit)
+                        is_plain_number, to_date, to_number, value_unit, written_unit)
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
 from pattern.dictionary import (COMBINED_EQUIPMENT_NORMS, COMBINED_EQUIPMENT_PARTS, DICTIONARY_NORMS,
                                 ambiguous_unit_hint)
@@ -41,6 +41,9 @@ class FieldResult:
     edited: bool = False
     ai_filled: bool = False
     unit: str = ""
+    # 帳票の種類で決めた単位。unit は読み取った値（「14.9h」）で書き替わることがあるので、
+    # 手で直したときに元の単位で判断し直せるよう別に持つ
+    spec_unit: str = ""
     rag_output: str = "show"
     # 明細表の列見出し。値が空でも確認・修正画面で表として入力できるようにするために持つ
     table_columns: list[str] = field(default_factory=list)
@@ -102,7 +105,18 @@ def apply_manual_values(extraction: dict, form) -> None:
         elif f["data_type"] == "date" and text:
             value, warning = to_date(text, text)
         elif f["data_type"] == "number" and text:
-            value, warning = to_number(text, text, f.get("unit", ""))
+            # 帳票の種類の単位で判断し直す（読み取りで書き替わった unit を引き継がない）。古いデータは unit で代用
+            spec = f.get("spec_unit", f.get("unit") or "") or ""
+            current = f.get("unit") or ""
+            if current and current != spec and not written_unit(text) and is_plain_number(text):
+                # 「625分」と読んだ項目（種類の単位は時間）の数字だけを直した: 画面の入力欄に単位は出ないので、
+                # 読み取った単位のまま（書かれた単位として）判断する。種類の単位に黙って変えると60倍の値になる
+                text = f"{text}{current}"
+            value, warning = to_number(text, text, spec)
+            unit, warning = number_unit(value, text, spec, f["field_name"], f["display_name"], warning)
+            if value != f["value"] or unit != (f.get("unit") or ""):
+                f["value"], f["unit"], f["warning"], f["edited"], f["ai_filled"] = value, unit, warning, True, False
+            continue
         else:
             value, warning = (text or None), None
         if value != f["value"]:
@@ -112,7 +126,7 @@ def apply_manual_values(extraction: dict, form) -> None:
 
 def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], stop_labels: set[str]) -> FieldResult:
     result = FieldResult(fd.field_name, fd.display_name, fd.data_type, fd.required,
-                         unit=fd.unit, rag_output=fd.rag_output)
+                         unit=fd.unit, spec_unit=fd.unit or "", rag_output=fd.rag_output)
     if fd.data_type == "table":
         result.table_columns = [c for c in (fd.table_columns or []) if str(c).strip()]
         return _extract_table_field(info, fd, sheet_names, stop_labels, result)
@@ -151,12 +165,13 @@ def number_unit(value, text: str, spec_unit: str, field_name: str, display_name:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return spec_unit, warning  # 数値として読めなかった値は、別の警告が出ている
     unit = numeric_unit(text, spec_unit)
-    written = value_unit(str(text or "").replace(",", ""))
+    # 「約90分」「595分（9.9h）」のように前後に言葉がある値も、書かれた単位を見る（種類の単位で上書きしない）
+    written = written_unit(text)
     if written and unit and written != unit:
         # 「停止時間（分）」の欄に「14.9h」と書かれた帳票。勝手に換算せず、書かれたとおりの単位で出して要確認にする
         return written, (f"この項目の単位は「{unit}」ですが、値には「{written}」と書かれています。"
                          f"書かれたとおり「{written}」として出します。どちらが正しいか確かめてください")
-    if written and written == unit and warning and "数値の部分だけ" in warning:
+    if written and written == unit and value_unit(text) and warning and "数値の部分だけ" in warning:
         warning = None  # 「390分」の「分」は単位として取り込んだので、読み落としではない
     if unit or warning:
         return unit, warning

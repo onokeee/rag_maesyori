@@ -227,7 +227,7 @@
       for (let i = 0; i < keys.length; i += 1) {
         status.textContent = `${i + 1} / ${keys.length}行目を処理しています…`;
         try {
-          const res = await postJson(aiPage.dataset.trialUrl, { row_key: keys[i] });
+          const res = await postJson(aiPage.dataset.trialUrl, { row_key: keys[i], confirm_external: Boolean(external?.checked) });
           trials.push(...(res.stats || []));
           result.append(trialCard(res));
         } catch (e) {

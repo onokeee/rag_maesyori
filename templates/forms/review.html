@@ -38,7 +38,7 @@
   <a class="btn small ghost" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード（消えません）</a>
 </div>
 
-<div class="split" id="review" data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}" data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}">
+<div class="split" id="review" data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}" data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}" data-version="{{ version }}">
   <section class="split-pane sticky" aria-label="元のシート">
     <div class="split-pane-head">
       <h2>元のシート</h2>
@@ -83,6 +83,7 @@
     </div>
     <div class="split-pane-body">
       <form method="post" action="{{ url_for('forms.confirm', doc_id=doc.id) }}" id="reviewForm">
+        <input type="hidden" name="version" value="{{ version }}" data-version-input>
         <div data-pane="fields">
           {% for f in extraction.fields %}
           {% set st = summary.fields[f.field_name] %}

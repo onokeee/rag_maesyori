@@ -13,6 +13,7 @@ import io
 import re
 import warnings
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Iterator
 from xml.parsers import expat
@@ -68,9 +69,14 @@ def estimate_cell_count(path) -> int:
                     total += 1
                     continue
                 min_col, min_row, max_col, max_row = range_boundaries(ref)
-                total += (max_row - min_row + 1) * (max_col - min_col + 1)
+                # <dimension> は書式だけのセル（遠くの XFD1048576 など）まで広がるので、シートの XML の大きさで抑える。
+                # <c> 1個は少なくとも約8バイトなので、これより多いセルはありえない（実際の件数は開いたあと数える）
+                total += min((max_row - min_row + 1) * (max_col - min_col + 1), zf.getinfo(name).file_size // 8)
     except (zipfile.BadZipFile, OSError, ValueError):
-        return 0
+        return 0   # zip でない・<dimension> が読めない: 目安なしで進める（開くときに案内する）
+    except (zlib.error, EOFError) as exc:
+        # 圧縮データが壊れている（zipfile は zlib.error / EOFError を包まずに投げる）
+        raise UploadError("Excelファイルとして読み込めません（ファイルが壊れている可能性があります）") from exc
     return total
 
 

@@ -104,9 +104,10 @@ def fill_missing(info: WorkbookInfo, extraction: dict) -> list[str]:
             value, warning = to_date(text, text, info.date1904)
         elif f["data_type"] == "number":
             # 単位の決め方は読み取りと同じにする（種類の設定 → 書かれた値の順。勝手に補わない）
-            value, warning = to_number(text, text, f.get("unit") or "")
-            f["unit"], warning = number_unit(value, text, f.get("unit") or "", f["field_name"], f["display_name"],
-                                             warning)
+            # 読み取りで書かれた単位に置き換わっていることがあるので、種類で決めた単位（spec_unit）で判定する
+            spec = f.get("spec_unit", f.get("unit") or "") or ""
+            value, warning = to_number(text, text, spec)
+            f["unit"], warning = number_unit(value, text, spec, f["field_name"], f["display_name"], warning)
         else:
             value, warning = text, None
         sheet = found.get("sheet") if found.get("sheet") in info.grids else None

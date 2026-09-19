@@ -944,3 +944,49 @@ def test_record_markdown_and_filename_for_a_circled_number(tmp_path):
                equipment_name="CMP研磨装置1号機", action="①フィルター交換 ②流量再校正")
     assert "- 処置: ①フィルター交換 ②流量再校正" in record_block(rec, spec)
     assert md_filename(["トラブル対応一覧", "①"]) == "トラブル対応一覧_1.md"
+
+
+# ---- R1: 番号の分け方・平均の分母・9999/12/31 ----
+
+def test_split_entity_code_prefers_trailing_code_and_drops_qualifiers():
+    """「Fab1 OHTシステム（OHT-801）」の番号は OHT-801。「IMP-602（推定）」の「推定」は設備名にしない。"""
+    assert split_entity_code("Fab1 OHTシステム（OHT-801）") == ("OHT-801", "Fab1 OHTシステム")
+    assert split_entity_code("Fab2 自動倉庫（ストッカ）（STK-831）") == ("STK-831", "Fab2 自動倉庫（ストッカ）")
+    assert split_entity_code("IMP-602（推定）") == ("IMP-602", "")
+    assert split_entity_code("CVD-203 W-CVD 3号機") == ("CVD-203", "W-CVD 3号機")
+    assert split_entity_code("ETC-302(OXIDEエッチャ 2号機)") == ("ETC-302", "OXIDEエッチャ 2号機")
+
+    d = list_spec_dict(group_by="entity_month")
+    d["columns"] = [c for c in d["columns"] if c["key"] != "equipment_name"]
+    spec = spec_from_dict(d)
+    records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="IMP-602（推定）"),
+               _rec("A-2", record_no="A-2", occurred_at="2026-08-10", equipment_id="IMP-602")]
+    names = [f.name for f in render_all(spec, records, {}, {})]
+    assert "トラブル対応一覧_IMP-602_2026-08" + HINT in names
+    assert not any("推定" in n for n in names)
+
+
+def test_fiscal_year_average_uses_only_records_with_a_value():
+    """設備別年度集計の平均は値のある記録だけで割り、整数の列でも 0 に丸めない。"""
+    from tables.summaries import fmt_average
+
+    assert fmt_average(112.0, 375, True) == 0.3 and fmt_average(0, 3, True) == 0
+    spec = spec_from_dict(list_spec_dict())
+    records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="CMP-101", downtime=30),
+               _rec("A-2", record_no="A-2", occurred_at="2026-08-04", equipment_id="CMP-101", downtime=60),
+               _rec("A-3", record_no="A-3", occurred_at="2026-08-05", equipment_id="CMP-101"),
+               _rec("A-4", record_no="A-4", occurred_at="2026-08-06", equipment_id="CMP-101")]
+    fy = next(f for f in render_all(spec, records, {}, {}) if "設備別_CMP-101" in f.name).text
+    assert "- 停止時間の合計は90分（1.5時間）、1件あたり平均（値のある2件）45分です。" in fy
+
+
+def test_far_future_date_does_not_break_summaries():
+    """「期限なし」の 9999/12/31 があっても、月末日の計算で落ちずに md を作れる。"""
+    from tables.summaries import month_last_day
+
+    assert month_last_day("9999-12") == "9999-12-31" and month_last_day("2024-02") == "2024-02-29"
+    spec = spec_from_dict(list_spec_dict())
+    records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="CMP-101", downtime=30),
+               _rec("A-2", record_no="A-2", occurred_at="9999-12-31", equipment_id="CMP-101", downtime=10)]
+    files = render_all(spec, records, {}, {})
+    assert any("設備別_CMP-101_9999年度" in f.name for f in files)

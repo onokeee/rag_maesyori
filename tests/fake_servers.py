@@ -26,6 +26,8 @@ class Reply:
     headers: dict = field(default_factory=dict)
     delay: float = 0.0
     finish_reason: str = "stop"
+    drop: bool = False                   # 何も返さずに接続を切る（要求を送った後の切断）
+    html: str | None = None              # 200 で HTML を返す（プロキシのブロック画面など）
 
 
 class FakeServer:
@@ -94,6 +96,17 @@ class FakeServer:
                         reply = Reply(content=reply)
                     if reply.delay:
                         time.sleep(reply.delay)
+                    if reply.drop:
+                        self.close_connection = True
+                        return
+                    if reply.html is not None:
+                        data = reply.html.encode()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/html; charset=utf-8")
+                        self.send_header("Content-Length", str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
                     if reply.status != 200:
                         return self._send(reply.status, reply.body or {"error": {"message": "error"}}, reply.headers)
                     content = reply.content or ""

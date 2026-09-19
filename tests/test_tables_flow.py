@@ -93,7 +93,8 @@ def test_csv_import_flow(app, client, monkeypatch):
     assert imp["status"] == "confirmed"
     assert "Markdownをまとめてダウンロード" in client.get(f"/tables/imports/{import_id}/done").get_data(as_text=True)
 
-    # 正規化CSV は zip より先に取る（zip をダウンロードするとこの取り込みのデータは消える）
+    # 正規化CSV は単独でも取れる（zip の 管理用_RAGには入れない フォルダにも入る）。
+    # zip をダウンロードするとこの取り込みのデータは消えるので、単独で取るのは zip の前だけ
     assert client.get(f"/tables/imports/{import_id}/normalized.csv").status_code == 200
     zdata = client.get(f"/tables/imports/{import_id}/download.zip").data
     names = zipfile.ZipFile(io.BytesIO(zdata)).namelist()
@@ -369,3 +370,128 @@ def test_markdown_options_are_saved_and_shown_again(app, client):
     page = client.get(f"/tables/templates/{template_id}").get_data(as_text=True)
     assert "checked" not in page.split('data-setting="dedupe_timeline"')[1][:12]
     assert "checked" not in page.split('data-setting="lightrag_hint"')[1][:12]
+
+
+# ---- 処理中の変更・削除を止める（R1） -----------------------------------------------------------
+
+def _queued_job(app, import_id, kind):
+    from models import database
+    with app.app_context():
+        conn = database.get_db()
+        ts = database.now()
+        cur = conn.execute("""INSERT INTO jobs (kind, ref_type, ref_id, status, params_json, progress_json,
+                              created_at, updated_at) VALUES (?, 'table_import', ?, 'queued', '{}', '{}', ?, ?)""",
+                           (kind, import_id, ts, ts))
+        conn.commit()
+        return cur.lastrowid
+
+
+def test_source_is_not_changed_while_reading(app, client):
+    """読み込み中に2画面目を保存しても、文字コード・区切り文字を書き換えない（古い設定の読み込み結果で確定させない）。"""
+    import_id, _job_id = _pending_import(app)
+    res = client.post(f"/tables/imports/{import_id}/source",
+                      data={"encoding": "utf-8", "delimiter": ";", "template": "new", "new_template_name": "x"})
+    assert res.status_code == 302 and res.headers["Location"].endswith("/preview")
+    res = client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "2"})
+    assert res.headers["Location"].endswith("/preview")
+    assert client.post(f"/tables/imports/{import_id}/columns", json={"name": "x", "columns": []}).status_code == 409
+    with app.app_context():
+        imp = store.get_import(import_id)
+        assert imp["status"] == "reading" and imp["source"] == {"encoding": "utf-8"}
+
+
+def test_utf16_without_bom_can_pass_the_source_screen(app, client):
+    """BOMなしの UTF-16 と判定された CSV も、2画面目をそのまま保存して先へ進める。"""
+    data = CSV_TEXT.encode("utf-16-le")
+    res = client.post("/tables/upload", data={"file": (io.BytesIO(data), "u16.csv")}, content_type="multipart/form-data")
+    import_id = int(res.headers["Location"].split("/")[3])
+    with app.app_context():
+        assert store.get_import(import_id)["source"]["encoding"] == "utf-16-le"
+    page = client.get(f"/tables/imports/{import_id}/source").get_data(as_text=True)
+    assert 'value="utf-16-le" selected' in page or 'value="utf-16-le"' in page
+    res = client.post(f"/tables/imports/{import_id}/source",
+                      data={"encoding": "utf-16-le", "delimiter": ",", "template": "new", "new_template_name": "u16"})
+    assert res.headers["Location"].endswith("/layout")
+    assert client.get(f"/tables/imports/{import_id}/layout").status_code == 200
+
+
+def test_delete_and_confirm_are_refused_while_ai_formatting_runs(app, client, monkeypatch):
+    """AI整形の実行中に削除すると、動いている呼び出しが消したあとの DB に結果を書き戻すので、止める。"""
+    from types import SimpleNamespace
+
+    from views import tables as tables_view
+
+    import_id = _uploaded_csv(client, "AI中.csv")
+    with app.app_context():
+        store.update_import(import_id, status="preview")
+    _queued_job(app, import_id, "ai_format")
+    res = client.post(f"/tables/imports/{import_id}/delete")
+    assert res.status_code == 302 and res.headers["Location"].endswith("/ai")
+    with app.app_context():
+        assert store.get_import(import_id) is not None
+
+    monkeypatch.setattr(tables_view, "_spec_for", lambda imp: SimpleNamespace(log_stage=object()))
+    monkeypatch.setattr(pipeline, "start_render_job", lambda *a, **k: pytest.fail("AI整形の実行中に確定した"))
+    res = client.post(f"/tables/imports/{import_id}/confirm")
+    assert res.headers["Location"].endswith("/ai")
+
+
+def test_trial_run_needs_the_external_confirmation(app, client, monkeypatch):
+    """試し実行も、外部の AI に送るときは画面の確認のチェックがなければ送らない（サーバー側で確かめる）。"""
+    from types import SimpleNamespace
+
+    from aiproc import runner
+    from services import llm
+    from views import tables as tables_view
+
+    import_id = _uploaded_csv(client, "試し.csv")
+    monkeypatch.setattr(tables_view, "_spec_for", lambda imp: SimpleNamespace(log_stage=object()))
+    monkeypatch.setattr(llm, "job_client_settings", lambda *a, **k: {"chat_url": "https://api.example.com/v1/chat"})
+    monkeypatch.setattr(runner, "trial_row", lambda *a, **k: pytest.fail("確認なしで外部に送った"))
+    monkeypatch.setattr(runner, "load_rows_for_ai", lambda *a, **k: pytest.fail("確認なしで外部に送った"))
+    res = client.post(f"/tables/imports/{import_id}/ai/trial", json={"row_key": "TR-001"})
+    assert res.status_code == 400 and "外部のAIサービス" in res.get_json()["error"]
+
+
+def test_workbook_without_sheets_is_rejected(app, client, tmp_path):
+    """シートのないブックは取り込みにせず、選び直しの案内を出す（2画面目が 500 にならない）。"""
+    import re
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.save(tmp_path / "s.xlsx")
+    src = zipfile.ZipFile(tmp_path / "s.xlsx")
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "xl/workbook.xml":
+                data = re.sub(rb"<sheets>.*?</sheets>", b"<sheets/>", data, flags=re.S)
+            z.writestr(item, data)
+    res = client.post("/tables/upload", data={"file": (io.BytesIO(out.getvalue()), "シートなし.xlsx")},
+                      content_type="multipart/form-data")
+    assert res.status_code == 302 and res.headers["Location"].endswith("/tables/new")
+    with app.app_context():
+        assert store.list_imports(limit=10) == []
+
+
+@pytest.mark.parametrize("url, target", [("/tables/upload", "views.tables.open_source"),
+                                         ("/forms/upload", "views.forms.precheck_excel")])
+def test_unexpected_error_during_upload_leaves_no_file(app, client, monkeypatch, tmp_path, url, target):
+    """読み込みの途中で思わぬエラーが出ても、アップロードしたファイルは残さない（design.md 3.3）。"""
+    from pathlib import Path
+
+    from openpyxl import Workbook
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("想定外")
+
+    monkeypatch.setattr(target, boom)
+    wb = Workbook()
+    wb.active["A1"] = "管理No"
+    wb.save(tmp_path / "a.xlsx")
+    with pytest.raises(RuntimeError):
+        client.post(url, data={"file": (io.BytesIO((tmp_path / "a.xlsx").read_bytes()), "a.xlsx")},
+                    content_type="multipart/form-data")
+    assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []

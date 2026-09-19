@@ -34,6 +34,30 @@ _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 _KANJI_DIGITS = {"〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 _KANJI_NUM_RE = re.compile(r"([一二三四五六七八九十]{1,3})(?=本|個|回|枚|台|件|箇所|ヶ所|か所|セット|式|袋|缶|巻|人|日|時間|分|秒|週|か月|ヶ月)")
 _VAGUE_COUNT = ("数回", "複数", "何回", "数本", "数個", "数枚", "数台", "何度")
+# 最後の状態（final_state.v）ごとに、根拠のエントリに書かれているはずの語（どれか1つ）。
+# 選択肢にない独自の状態と「不明」は照合しない
+FINAL_STATE_WORDS = {
+    "完了": ["完了", "クローズ", "CLOSE", "済", "終了", "解決"],
+    "経過観察中": ["経過観察", "様子見", "観察"],
+    "部品待ち": ["待ち", "待", "手配", "入荷", "納期"],
+    "メーカー回答待ち": ["待ち", "待", "問い合わせ", "問合せ", "問合わせ", "回答", "照会"],
+    "承認待ち": ["待ち", "待", "承認", "申請"],
+    "暫定対応中": ["暫定", "仮", "応急"],
+    "未着手": ["未"],
+}
+_NOT_DONE_RE = re.compile(r"未(?:完了|解決|終了|済)")          # 「未完了」を「完了」の根拠にしない
+# 再発の記録（「再発なし」「再発せず」「再発防止」は除く）
+_RECUR_YES_RE = re.compile(r"再発(?!\s*(?:なし|無し|無|せず|しない|していない|しておらず|ない|防止|対策))|再度|再び|再燃")
+
+
+def _final_state_words(state: str, glossary: dict) -> list[str]:
+    """最後の状態の根拠になる語。用語集でその語に言い換えられる現場の言い方（様子見→経過観察など）も含める。"""
+    words = list(FINAL_STATE_WORDS.get(state, []))
+    for term, spec in (glossary or {}).items():
+        to = spec.get("to", "") if isinstance(spec, dict) else str(spec)
+        if words and any(w in to for w in words):
+            words.append(str(term))
+    return words
 
 
 @dataclass
@@ -331,6 +355,19 @@ def _check_text_value(cx: _Ctx, path: str, label: str, value: str, evidence: str
         _check_flip_words(path, label, v, evidence, issues, check_dropped)
 
 
+def _model_in(model, text: str) -> bool:
+    """型番が原文にそのまま書かれているか。識別子は「丸ごと」一致だけを認める
+    （原文 RB-ENC-05M に対して RB-ENC-05・ENC のような切れ端は通さない）。"""
+    q = norm(str(model))
+    if not q or q not in norm(text):
+        return False
+    ids = {norm(t) for t in _identifiers(str(model))}
+    if ids:
+        return ids <= {norm(t) for t in _identifiers(text)}
+    # 識別子の形でない型番（Φ10 など）は、原文の識別子の中の一部分でなければよい
+    return q in norm(_strip_identifiers(nfkc(text)))
+
+
 def _similar_identifier(tok: str, cx: _Ctx) -> str:
     t = norm(tok).upper().replace("-", "")
     for cand in _identifiers(cx.sent_text):
@@ -467,12 +504,11 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
             _check_text_value(cx, path, "name", p["name"], text, issues)
             model = p.get("model")
             if model:
-                q = norm(model)
-                if q not in norm(text) and q not in norm(cx.sent_text):
+                if not _model_in(model, text) and not _model_in(model, cx.sent_text):
                     near = _similar_identifier(str(model), cx)
                     hint = f"（原文の表記は「{near}」）" if near else ""
                     issues.append(VerifyIssue("error", path, f"{path}.model の「{model}」は原文にありません{hint}。", "identifier"))
-                elif q not in norm(text):
+                elif not _model_in(model, text):
                     issues.append(VerifyIssue("warning", path, f"{path}.model の「{model}」は根拠のエントリにはありません。",
                                               "identifier_other"))
             _check_quote(cx, path, "qty_q", p.get("qty_q"), text, issues)
@@ -494,6 +530,11 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
             _check_quote(cx, path, "count_q", rec.get("count_q"), text, issues)
             if v == "なし" and not _has_word(text, "なし") and "せず" not in text and "ない" not in text:
                 issues.append(VerifyIssue("error", path, f"{path}.v「なし」の根拠が書かれていません。", "flip_added"))
+            # 「あり」は根拠に再発の記録（「再発なし」「再発せず」ではないもの）か、根拠にある回数の引用が要る
+            count_q = str(rec.get("count_q") or "").strip()
+            if v == "あり" and not _RECUR_YES_RE.search(nfkc(text)) and not (count_q and norm(count_q) in norm(text)):
+                issues.append(VerifyIssue("error", path, f"{path}.v「あり」の根拠（再発の記録）が書かれていません。",
+                                          "flip_added"))
         if _finish(rep, path, issues):
             out["recurrence"] = {"v": v, "count_q": rec.get("count_q") or None, "src": list(rec.get("src") or []),
                                  "segs": ev[0] if ev else []}
@@ -505,6 +546,12 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
         v = str(fs.get("v") or "").strip()
         if v not in cx.choices["final_states"]:
             issues.append(VerifyIssue("error", path, f"{path}.v「{v}」は選択肢にありません。", "choice"))
+        elif ev:
+            words = _final_state_words(v, cx.glossary)
+            ev_text = norm(ev[1] if v == "未着手" else _NOT_DONE_RE.sub(" ", nfkc(ev[1]))).upper()
+            if words and not any(norm(w).upper() in ev_text for w in words):
+                issues.append(VerifyIssue("error", path, f"{path}.v「{v}」の根拠が書かれていません（根拠のエントリに"
+                                                         f"「{words[0]}」などの語がありません）。", "flip_added"))
         if _finish(rep, path, issues):
             out["final_state"] = {"v": v, "src": list(fs.get("src") or []), "segs": ev[0] if ev else []}
 

@@ -6,15 +6,19 @@ Excel の事前チェックは openpyxl で開く前に、先頭バイトと zip
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import shutil
 import time
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from flask import current_app
+
+logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 1024 * 1024
 
@@ -28,6 +32,22 @@ ZIP_MAX_PART = 200 * 1024 * 1024
 ZIP_MAX_RATIO = 100
 # 小さいパーツは圧縮率が高くても害がないので、この大きさ以上だけ圧縮率を見る
 ZIP_RATIO_MIN_BYTES = 16 * 1024 * 1024
+# 結合セルの面積（ブック全体の合計）の上限。openpyxl は開くときに結合範囲のセルを1つずつ作るので、
+# シート全体の結合（A1:XFD1048576 など）が1つあるだけで、上のサイズ制限より前に固まる（数秒〜終わらない）。
+# 行全体の結合（A1:XFD1 = 16,384 セル）や列全体の結合（A:A = 約105万セル）は通す。
+MAX_MERGED_CELLS = 2_000_000
+# シートの置き場所は workbook.xml.rels で自由に決められるので、場所を決め打ちせず .xml の部品をすべて見る
+# （文字列の中の < は &lt; になっているので、共有文字列などに書かれた文字は拾わない）
+_XML_PART = re.compile(r".+\.xml", re.IGNORECASE)
+_MERGE_REF = re.compile(rb"<(?:\w+:)?mergeCell\b[^>]*?\bref=[\"']([A-Za-z]{1,3}\d{1,7})(?::([A-Za-z]{1,3}\d{1,7}))?[\"']")
+# セル数の上限（ブック全体の <c> の数）。openpyxl は開くときにセルを1つずつ作るので、
+# 圧縮すると小さいが展開すると大量のセルがあるブック（64KB で 100万セルなど）は、上のサイズ制限を通っても固まる。
+# 一覧表は tables.excel_source が別に上限（EXCEL_MAX_CELLS）を持ち「CSVで保存」と案内するので、ここは最後の砦の値。
+MAX_CELLS = 1_000_000
+# <c> と <x:c> だけを数える（グラフの <c:chart> などは数えない）
+_CELL_TAG = re.compile(rb"<(?:\w+:)?c(?=[\s/>])")
+# チャンクの境目で切れたタグを次のチャンクと合わせて読むために残すバイト数（タグ1つより長ければよい）
+_MERGE_TAIL = 512
 # workbook.xml の名前空間判定で読む先頭バイト数
 _WORKBOOK_HEAD_BYTES = 64 * 1024
 # 掴まれているファイルを消すときの再試行（ウイルス対策のスキャンなどは短時間で終わる）
@@ -83,7 +103,7 @@ def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> Stor
     if ext not in allowed_exts:
         kinds = " / ".join(sorted(allowed_exts))
         hint = "（.xls はExcelで .xlsx に保存し直してください）" if ext == ".xls" else ""
-        raise UploadError(f"{name}: {kinds} のファイルを選んでください{hint}")
+        raise UploadError(f"{kinds} のファイルを選んでください{hint}")
 
     stored = f"{subdir.strip('/')}/{uuid4().hex}{ext}"
     dest = upload_path(stored)
@@ -99,19 +119,22 @@ def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> Stor
                     break
                 size += len(chunk)
                 if size > max_bytes:
-                    raise UploadError(f"{name}: ファイルが大きすぎます（上限 {_format_size(max_bytes)}）")
+                    raise UploadError(f"ファイルが大きすぎます（上限 {_format_size(max_bytes)}）")
                 digest.update(chunk)
                 out.write(chunk)
         if size == 0:
-            raise UploadError(f"{name}: ファイルが空です")
+            raise UploadError("ファイルが空です")
     except BaseException:
         dest.unlink(missing_ok=True)
         raise
     return StoredFile(stored_path=stored, file_name=name, file_hash=digest.hexdigest(), size=size)
 
 
-def precheck_excel(path) -> None:
-    """Excel（.xlsx/.xlsm）として開いてよいかを、中身を展開せずに確かめる。問題があれば UploadError。"""
+def precheck_excel(path, max_cells: int | None = None) -> None:
+    """Excel（.xlsx/.xlsm）として開いてよいかを、中身を展開せずに確かめる。問題があれば UploadError。
+
+    max_cells: セル数の上限（省略時は MAX_CELLS）。
+    """
     path = Path(path)
     with open(path, "rb") as f:
         head = f.read(8)
@@ -132,11 +155,66 @@ def precheck_excel(path) -> None:
                 raise UploadError("Excelファイル（.xlsx / .xlsm）ではありません（ブックの情報が見つかりません）")
             with zf.open(workbook) as wb:
                 text = wb.read(_WORKBOOK_HEAD_BYTES).decode("utf-8", errors="ignore")
-    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, RuntimeError, NotImplementedError) as exc:
-        raise UploadError(f"Excelファイルとして読み込めません（ファイルが壊れている可能性があります: {exc.__class__.__name__}）") from exc
+            _check_sheet_parts(zf, [n for n in sorted(names) if _XML_PART.fullmatch(n)],
+                               max_cells or MAX_CELLS)
+    # zlib.error / EOFError: 圧縮データが壊れている（zipfile はこれらを包まずにそのまま投げる）
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, RuntimeError, NotImplementedError,
+            zlib.error, EOFError) as exc:
+        # 例外の種類は画面に出さず（利用者には意味がない）、ログにだけ残す
+        logger.warning("Excelファイルの事前チェックで読み込めませんでした: %s", exc.__class__.__name__)
+        raise UploadError("Excelファイルとして読み込めません（ファイルが壊れている可能性があります）") from exc
     root = re.search(r"<(?:\w+:)?workbook\b[^>]*>", text)
     if STRICT_NS in (root.group(0) if root else text[:2048]):
         raise UploadError("Strict Open XML 形式のブックです。Excelの「名前を付けて保存」で通常の「Excel ブック (.xlsx)」を選んで保存し直してください")
+    # シートが1つも無いブックは断る（読み取り先が無い）。先頭だけ読んでいるので、
+    # シートの一覧の終わりが読んだ範囲に無いときは判断しない
+    sheets_end = re.search(r"<(?:\w+:)?sheets\s*/>|</(?:\w+:)?sheets>", text)
+    if sheets_end and not re.search(r"<(?:\w+:)?sheet\b", text[:sheets_end.end()]):
+        raise UploadError("シートがないブックです。シートのあるブックを選んでください")
+
+
+def _merged_area(start: bytes, end: bytes | None) -> int:
+    from openpyxl.utils.cell import range_boundaries
+
+    ref = start.decode("ascii") + (":" + end.decode("ascii") if end else "")
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(ref.upper())
+    except (ValueError, TypeError):
+        return 0   # 読めない範囲は openpyxl 側で扱いが決まる（ここでは数えない）
+    return (abs(max_col - min_col) + 1) * (abs(max_row - min_row) + 1)
+
+
+def _check_sheet_parts(zf: zipfile.ZipFile, sheet_parts: list[str], max_cells: int) -> None:
+    """シートの XML を分割して読み、結合範囲の面積の合計とセル数を数え、上限を超えたら UploadError。
+
+    openpyxl で開く前に確かめる（開いた時点で結合範囲のセルと、すべてのセルが作られてしまうため）。
+    チャンクの境目で切れたタグを数え損ねないよう、末尾 _MERGE_TAIL バイトは次のチャンクと合わせて読む。
+    そのとき二重に数えないよう、末尾に残す範囲より前で始まるタグだけをその回で数える。
+    """
+    merged = 0
+    cells = 0
+    for part in sheet_parts:
+        buf = b""
+        with zf.open(part) as f:
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                buf += chunk
+                # 読み終わったら残りをすべて数える。途中なら末尾を残す
+                cut = len(buf) if not chunk else len(buf) - _MERGE_TAIL
+                if cut > 0:
+                    for m in _MERGE_REF.finditer(buf):
+                        if m.start() < cut:
+                            merged += _merged_area(m.group(1), m.group(2))
+                    cells += sum(1 for m in _CELL_TAG.finditer(buf) if m.start() < cut)
+                    buf = buf[cut:]
+                if merged > MAX_MERGED_CELLS:
+                    raise UploadError("結合セルの範囲が大きすぎます（シート全体・列全体の結合など）。"
+                                      "不要な結合を解除して保存し直してください")
+                if cells > max_cells:
+                    raise UploadError(f"セル数が上限（{max_cells:,} セル）を超えています。"
+                                      "不要なシート・範囲を削除して保存し直してください")
+                if not chunk:
+                    break
 
 
 def _check_zip_limits(infos: list[zipfile.ZipInfo]) -> None:
@@ -200,6 +278,11 @@ def remove_orphan_import_dirs(tables_dir, known_ids) -> int:
     return removed
 
 
+# 起動時の片付けで、これより新しいファイルは消さない（保存してから DB の行を作るまでの間を守る）。
+# core.jobs.STALE_AFTER（2分）と同じ長さ。
+ORPHAN_GRACE_SECONDS = 120
+
+
 def remove_orphan_uploads(base, known_paths) -> int:
     """DB のどこからも参照されていないアップロード済みファイルを消す。消した件数を返す。
 
@@ -214,6 +297,11 @@ def remove_orphan_uploads(base, known_paths) -> int:
             if not path.is_file() or not _STORED_NAME.fullmatch(path.name):
                 continue
             if f"{subdir}/{path.name}" in known:
+                continue
+            try:
+                if time.time() - path.stat().st_mtime < ORPHAN_GRACE_SECONDS:
+                    continue   # できたばかり: 別に起動しているアプリが取り込みの途中（DB の行を作る前）かもしれない
+            except OSError:
                 continue
             try:
                 path.unlink()

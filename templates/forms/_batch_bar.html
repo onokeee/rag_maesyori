@@ -3,17 +3,21 @@
 <div class="notice info" role="note" data-batch>
   <strong>まとめ取り込み {{ batch.position }}/{{ batch.total }}件目</strong>（確定済み {{ batch.confirmed }}/{{ batch.total }}件）。
   1件ずつ確認して確定し、最後に Markdown をまとめて zip でダウンロードします。ダウンロードするとこのPCからデータは消えます。
+  {% if batch.modified %}
+  <p class="warn" role="note">修正中の帳票が{{ batch.modified|length }}件あります。確定し直していない変更は zip に入らず、ダウンロードすると消えます:
+    {% for d in batch.modified %}<a href="{{ url_for('forms.review', doc_id=d.id) }}">{{ d.title or d.file_name }}</a>{{ "、" if not loop.last }}{% endfor %}</p>
+  {% endif %}
   <div class="btn-row">
     {% if batch.next and batch.next.id != doc.id %}
       <a class="btn small" href="{{ batch.next.href }}">次の帳票へ</a>
     {% endif %}
     {% if batch.all_confirmed %}
       <a class="btn small primary" href="{{ url_for('forms.download_batch', batch_id=batch.id) }}"
-         data-confirm="ダウンロードすると、このまとまりの帳票のデータはこのPCからすべて消えます。もう一度ダウンロードすることはできません。"
+         data-confirm="{{ batch.zip_confirm }}"
          data-confirm-ok="ダウンロードして消す">まとめてMarkdownをダウンロード（zip）</a>
     {% elif batch.confirmed %}
       <a class="btn small" href="{{ url_for('forms.download_batch', batch_id=batch.id, confirmed_only=1) }}"
-         data-confirm="確定済みの{{ batch.confirmed }}件だけを zip でダウンロードします。その{{ batch.confirmed }}件のデータはこのPCから消えます（未確定の{{ batch.total - batch.confirmed }}件は残ります）。"
+         data-confirm="{{ batch.zip_confirm }}"
          data-confirm-ok="ダウンロードして消す">確定済み{{ batch.confirmed }}件だけをダウンロード（zip）</a>
     {% endif %}
   </div>

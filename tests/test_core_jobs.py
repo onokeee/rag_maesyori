@@ -202,3 +202,86 @@ def test_recover_interrupted(core_app):
         assert job["status_label"] == "中断" and "中断" in job["message"] and job["finished"]
         assert jobs.request_resume(ids[0]) is False
         assert jobs.recover_interrupted() == 0
+
+
+def _insert_job(status, beat, kind="table_render", ref_id=1):
+    conn = db.connect()
+    job_id = conn.execute(
+        "INSERT INTO jobs (kind, ref_type, ref_id, status, heartbeat_at, created_at, updated_at) "
+        "VALUES (?, 'table_import', ?, ?, ?, ?, ?)", (kind, ref_id, status, beat, beat, beat)).lastrowid
+    conn.commit()
+    conn.close()
+    return job_id
+
+
+def test_a_job_left_by_a_previous_process_is_interrupted_once_its_heartbeat_is_stale(core_app):
+    """閉じてすぐ起動し直すと起動時の回復では拾えない（2分未満）。参照したときに持ち主がいなければ中断にする。"""
+    recent = (datetime.now() - timedelta(seconds=40)).isoformat(timespec="seconds")
+    old = (datetime.now() - timedelta(minutes=3)).isoformat(timespec="seconds")
+    with core_app.app_context():
+        left = _insert_job("running", recent)
+        assert jobs.recover_interrupted() == 0          # 起動時: まだ新しいので残す
+        assert jobs.get_job(left)["status"] == "running"
+        conn = db.connect()
+        conn.execute("UPDATE jobs SET heartbeat_at = ? WHERE id = ?", (old, left))   # 2分以上たった
+        conn.commit()
+        conn.close()
+        job = jobs.latest_job("table_import", 1)
+        assert job["status"] == "interrupted" and job["finished"] and "中断" in job["message"]
+
+
+def test_a_queued_job_of_this_process_is_not_interrupted_while_it_waits(core_app, monkeypatch):
+    release = threading.Event()
+    with core_app.app_context():
+        first = jobs.start_job("table_read", "table_import", 1, lambda ctx: release.wait(10) and None)
+        second = jobs.start_job("table_render", "table_import", 2, lambda ctx: {"ok": True})
+        _wait_until(lambda: jobs.get_job(first)["status"] == "running")
+        monkeypatch.setattr(jobs, "STALE_AFTER", timedelta(seconds=-60))   # どれも「古い」とみなす
+        assert jobs.get_job(second)["status"] == "queued"   # このプロセスのジョブなので中断にしない
+        release.set()
+        assert jobs.wait_job(second)["status"] == "done"
+
+
+def test_a_paused_ai_job_does_not_hold_up_other_imports(core_app):
+    """AI整形を一時停止しても、ほかの取り込みの読み込みは進む。同じ取り込みの分は AI整形が終わるまで待つ。"""
+    def ai(ctx):
+        while True:
+            if not ctx.wait_if_paused():
+                return None
+            time.sleep(0.01)
+
+    with core_app.app_context():
+        ai_job = jobs.start_job("ai_format", "table_import", 1, ai)
+        _wait_until(lambda: jobs.get_job(ai_job)["status"] == "running")
+        jobs.request_pause(ai_job)
+        _wait_until(lambda: jobs.get_job(ai_job)["status"] == "paused")
+
+        other = jobs.start_job("table_read", "table_import", 2, lambda ctx: {"rows": 3})
+        assert jobs.wait_job(other, timeout=5)["status"] == "done"
+
+        same = jobs.start_job("table_render", "table_import", 1, lambda ctx: {"files": 1})
+        time.sleep(0.5)
+        assert jobs.get_job(same)["status"] == "queued"    # 同じ取り込みの AI整形が終わるまで動かさない
+        later = jobs.start_job("table_read", "table_import", 3, lambda ctx: {"rows": 1})
+        assert jobs.wait_job(later, timeout=5)["status"] == "done"   # 後回しの分がほかを止めない
+
+        jobs.request_cancel(ai_job)
+        assert jobs.wait_job(ai_job)["status"] == "cancelled"
+        assert jobs.wait_job(same, timeout=5)["status"] == "done"
+
+
+def test_a_job_whose_last_status_write_fails_ends_as_failed(core_app, monkeypatch):
+    import sqlite3
+
+    real = jobs.JobContext.progress
+
+    def locked(self, **kw):
+        if "result" in kw:
+            raise sqlite3.OperationalError("database is locked")
+        return real(self, **kw)
+
+    monkeypatch.setattr(jobs.JobContext, "progress", locked)
+    with core_app.app_context():
+        job_id = jobs.start_job("table_render", "table_import", 1, lambda ctx: {"files": 1})
+        job = jobs.wait_job(job_id)
+        assert job["status"] == "failed" and "エラー" in job["message"] and job["finished"]

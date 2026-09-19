@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import math
 import re
 import time as _time
 import unicodedata
@@ -47,7 +48,7 @@ _ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988, "昭和": 192
 # 単位の換算表（列の単位ごと。値は「元の単位1つが列の単位でいくつか」）
 _UNIT_ALIASES = {"h": "時間", "hr": "時間", "hrs": "時間", "hour": "時間", "hours": "時間", "H": "時間",
                  "min": "分", "mins": "分", "sec": "秒", "yen": "円", "¥": "円", "￥": "円",
-                 "％": "%"}
+                 "s": "秒", "時": "時間", "％": "%"}
 _BUILTIN_CONVERSIONS = {
     "分": {"分": 1, "時間": 60, "秒": 1 / 60, "日": 1440},
     "時間": {"時間": 1, "分": 1 / 60, "秒": 1 / 3600, "日": 24},
@@ -102,6 +103,8 @@ class ImportStats:
     duplicate_keys: dict = field(default_factory=dict)
     reconcile: list = field(default_factory=list)
     replaced_rows: list = field(default_factory=list)
+    unclosed_quote_row: int | None = None  # CSV の " が閉じていないため、以降を1つの値として読んだ行
+    long_record_row: int | None = None  # CSV の1つの値がとても多くの行にまたがる行（閉じ忘れの疑い）
     date_min: str | None = None
     date_max: str | None = None
     months: dict = field(default_factory=dict)
@@ -332,9 +335,11 @@ def parse_number_text(text: str) -> tuple[float | None, str]:
     m = _NUMBER.match(s)
     if not m or (m.group("int") is None and m.group("dec") is None):
         return None, ""
-    number = float((m.group("int") or "0").replace(",", "") + (m.group("dec") or ""))
-    if m.group("exp"):
-        number *= 10 ** int(m.group("exp"))
+    # 指数は文字列のまま float に渡す（10 ** 309 などで OverflowError にしない）。桁あふれ・inf は数値にしない
+    number = float((m.group("int") or "0").replace(",", "") + (m.group("dec") or "")
+                   + (f"e{m.group('exp')}" if m.group("exp") else ""))
+    if not math.isfinite(number):
+        return None, ""
     if (m.group("sign") and m.group("sign") in "△▲-−") or m.group("tail"):
         number = -number
     return number, m.group("unit") or ""
@@ -483,7 +488,10 @@ def _convert_number(value, text, col, number_format, header_unit):
             v *= 100
         factor = unit_factor(header_unit, target, col.unit_conversions) if header_unit else 1.0
         if factor is None:
-            factor = 1.0
+            # 文字列のときと同じく、換算できない単位は黙って元の数のまま使わない
+            return _clean_number(v), f"「{text}」の単位「{header_unit}」を{target}に換算できません", None
+        if not math.isfinite(v * factor):
+            return None, f"「{_short(text)}」を数値に変換できません", None
         return _clean_number(v * factor), None, None
     number, unit = parse_number_text(text)
     if number is None:
@@ -495,6 +503,8 @@ def _convert_number(value, text, col, number_format, header_unit):
             factor = 1.0  # 列に単位がなければ数値部分だけを使う
         else:
             return nfkc_text(text), f"「{_short(text)}」の単位「{unit or header_unit}」を{target}に換算できません", None
+    if not math.isfinite(number * factor):
+        return nfkc_text(text), f"「{_short(text)}」を数値に変換できません", None
     return _clean_number(number * factor), None, None
 
 
@@ -694,6 +704,12 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
     replaced = getattr(source, "replaced_rows", None)
     if replaced:
         stats.replaced_rows = list(replaced)
+    unclosed = getattr(source, "unclosed_quote_row", None)
+    if isinstance(unclosed, int):
+        stats.unclosed_quote_row = unclosed
+    long_record = getattr(source, "long_record_row", None)
+    if isinstance(long_record, int):
+        stats.long_record_row = long_record
     _assign_keys(pending, spec, stats)
     date_key = spec.date_key
     months: Counter[str] = Counter()

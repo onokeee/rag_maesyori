@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import asdict, dataclass
 
+from tables.csv_source import MAX_RECORD_LINES
+
 LEVEL_LABELS = {"error": "エラー", "warning": "警告"}
 
 
@@ -115,6 +117,15 @@ def run_checks(records, spec, stats) -> list[Issue]:
         issues.append(Issue("warning", "included_rows", f"非表示・取り消し線の行を{st['included_hidden']}行取り込みました"))
     if st.get("error_values"):
         issues.append(Issue("warning", "excel_error", f"Excelのエラー値（#N/A など）を空欄として扱ったセルが{st['error_values']}個あります"))
+    if st.get("unclosed_quote_row"):
+        row = st["unclosed_quote_row"]
+        issues.append(Issue("error", "unclosed_quote",
+                            f"{row}行目の \" が閉じていないため、以降の行が1つの値になっています。"
+                            "元のファイルの \" を直してから、もう一度取り込んでください", row=row))
+    if st.get("long_record_row"):
+        row = st["long_record_row"]
+        issues.append(Issue("warning", "long_record",
+                            f"{row}行目の値が{MAX_RECORD_LINES}行以上あります。\" の閉じ忘れでないか確認してください", row=row))
     if st.get("replaced_rows"):
         rows = st["replaced_rows"]
         issues.append(Issue("warning", "replaced_chars",

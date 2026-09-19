@@ -19,14 +19,26 @@ _DATE_RE = re.compile(r"(\d{4})\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})"
 # 年の無い日付（「2/12」「2/12 3時17分」「2月12日 14:05」）。年は推測せず、原文のまま残して警告だけ出す。
 # 「24/8/25」のような2桁の年は、年の欄が空なのか2桁で書いたのか分からないのでこの形には含めない
 _NO_YEAR_RE = re.compile(r"^\s*(\d{1,2})\s*(?:/|月|-|\.)\s*(\d{1,2})\s*日?(?:\s|$|[^\d/\-.])")
+# 日付の直後の時刻「2026/2/12 14:05」
+_CLOCK_RE = re.compile(r"\s*(\d{1,2}):(\d{2})(?!\d)")
 _ERA_RE = re.compile(r"(?:令和|R)\s*(\d{1,2}|元)\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})")
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*時間\s*(\d+(?:\.\d+)?)\s*分")
+# 時刻の範囲「09:30-12:45」「9:30～13:55」（作業時間の欄によくある書き方。先頭の 9 を数値として読まない）
+# 「12/24 21:53-12/25 11:09」のように各時刻の前に月日が付いた書き方も範囲として見る（先頭の月を数値として読まない）
+_TIME_RANGE_RE = re.compile(r"(?:\d{1,2}/\d{1,2}\s*)?(\d{1,2})\s*:\s*(\d{2})\s*[-~〜ー―]\s*"
+                            r"(?:\d{1,2}/\d{1,2}\s*)?(\d{1,2})\s*:\s*(\d{2})")
+# 時刻の範囲に添えた時間数「（3.2h）」「（工数 8.75h）」「(195分)」
+_TIME_AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(時間|hours?|hrs?|h|分|mins?)(?![A-Za-z])", re.IGNORECASE)
 _SPACES_RE = re.compile(r"[^\S\n]+")
 # 見出し末尾の単位: 「作業時間(h)」「停止時間（分）」「金額[円]」
 _HEADER_UNIT_RE = re.compile(r"^(.+?)\s*[(\[]\s*([^()\[\]\d]{1,6})\s*[)\]]$")
 # 値の末尾の単位: 「1.5時間」「95分」「120 min」
 _VALUE_UNIT_RE = re.compile(r"^-?\d+(?:\.\d+)?\s*([^\d\s.,\-]{1,4})$")
+# 前後に言葉や括弧書きのある値（「約90分」「595分（9.9h）」）の、最初の数値の直後の単位
+_UNIT_AFTER_RE = re.compile(r"\s*([^\d\s.,\-:/~()\[\]{}<>、。・]{1,4})(?![^\d\s.,\-:/~()\[\]{}<>、。・])")
+# 会計の書き方の負号「▲50万円」「△0.8」（一覧表の側と同じく負の数として読む）
+_MINUS_MARK_RE = re.compile(r"^[△▲]\s*(?=\d)")
 # 見出しの括弧書きのうち単位とみなす和文（「発生原因（推定）」「担当（記入）」の括弧書きは単位でない）。
 # 英字・記号の単位（h, min, mm, %, ℃）と1文字の和文（分・円・枚・個）はこの一覧に無くても単位とみなす
 _JA_UNITS = {"時間", "千円", "万円", "百万円", "人日", "人時", "日間", "ヶ月", "か月", "カ月", "箇所", "ケ所"}
@@ -197,10 +209,38 @@ def _unit_like(text: str) -> bool:
     return normalize_unit(text) != text  # 別名の一覧にあるもの
 
 
+def _number_text(text) -> str:
+    """数値として読む前の正規化: NFKC・桁区切りのカンマを除く・「▲」「△」の負号を「-」にする。"""
+    s = unicodedata.normalize("NFKC", str(text or "")).replace(",", "").strip()
+    return _MINUS_MARK_RE.sub("-", s)
+
+
+def is_plain_number(text) -> bool:
+    """「626」「1,032」「▲5」のような数字だけの値か。"""
+    return re.fullmatch(r"-?\d+(?:\.\d+)?", _number_text(text)) is not None
+
+
 def value_unit(text) -> str:
     """「1.5時間」→ "時間"。数値＋単位の形でなければ ""。"""
-    m = _VALUE_UNIT_RE.match(unicodedata.normalize("NFKC", str(text or "")).strip())
+    m = _VALUE_UNIT_RE.match(_number_text(text))
     return normalize_unit(m[1]) if m else ""
+
+
+def written_unit(text) -> str:
+    """値に書かれた単位。「1.5時間」に加えて「約90分」「595分（9.9h）」のような前後に言葉のある値からも、
+    最初の数値（to_number が読む数値）の直後の単位を返す。単位らしくなければ ""。
+
+    「3時間40分」「09:30-12:45」は to_number が換算するので、ここでは単位を返さない。
+    """
+    s = _number_text(text)
+    whole = value_unit(s)
+    if whole or _DURATION_RE.search(s) or _TIME_RANGE_RE.search(s):
+        return whole
+    first = _NUM_RE.search(s)
+    m = _UNIT_AFTER_RE.match(s, first.end()) if first else None
+    if not m or not _unit_like(m[1]):
+        return ""
+    return normalize_unit(m[1])
 
 
 def numeric_unit(text, unit: str = "") -> str:
@@ -211,11 +251,10 @@ def numeric_unit(text, unit: str = "") -> str:
     u = normalize_unit(unit)
     if u:
         return u
-    s = unicodedata.normalize("NFKC", str(text or "")).replace(",", "").strip()
-    if _DURATION_RE.search(s):
-        return "分"  # to_number が「3時間40分」を分に換算する
-    m = _VALUE_UNIT_RE.match(s)
-    return normalize_unit(m[1]) if m else ""
+    s = _number_text(text)
+    if _DURATION_RE.search(s) or _TIME_RANGE_RE.search(s):
+        return "分"  # to_number が「3時間40分」「09:30-12:45」を分に換算する
+    return written_unit(s)
 
 
 def cell_text(value) -> str:
@@ -276,7 +315,8 @@ def to_date(raw, text: str, date1904: bool = False) -> tuple[str | None, str | N
     date1904: ブックが1904年基準（Mac版Excel由来）のときシリアル値の起点を変える。
     """
     if isinstance(raw, datetime):
-        return raw.date().isoformat(), None
+        # 時刻が入っていれば残す（「発生日時」の 23:08 を黙って落とさない）
+        return (raw.date().isoformat() if raw.time() == time(0) else raw.strftime("%Y-%m-%d %H:%M")), None
     if isinstance(raw, date):
         return raw.isoformat(), None
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
@@ -296,6 +336,9 @@ def to_date(raw, text: str, date1904: bool = False) -> tuple[str | None, str | N
     if m:
         parsed = _safe_date(int(m[1]), int(m[2]), int(m[3]))
         if parsed:
+            t = _CLOCK_RE.match(s, m.end())
+            if t and int(t[1]) < 24 and int(t[2]) < 60:
+                parsed += f" {int(t[1]):02d}:{t[2]}"  # 日付の直後の「14:05」は残す
             return parsed, None
     m = _NO_YEAR_RE.match(s)
     if m and 1 <= int(m[1]) <= 12 and 1 <= int(m[2]) <= 31:
@@ -319,7 +362,7 @@ def to_number(raw, text: str, unit: str = "") -> tuple[int | float | str | None,
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
         return (int(raw) if float(raw).is_integer() else raw), None
 
-    s = unicodedata.normalize("NFKC", text or "").replace(",", "").strip()
+    s = _number_text(text)
     m = _DURATION_RE.search(s)
     if m and normalize_unit(unit) in ("分", "時間", ""):
         # 単位の決まっていない項目では分にする（「3時間40分」を 3 と読まない）
@@ -328,6 +371,9 @@ def to_number(raw, text: str, unit: str = "") -> tuple[int | float | str | None,
         number = minutes if target == "分" else round(minutes / 60, 2)
         value = int(number) if float(number).is_integer() else number
         return value, f"「{text}」を{target}に換算しました"
+    r = _TIME_RANGE_RE.search(s)
+    if r:
+        return _time_range_number(text, s, r, unit)
     m = _NUM_RE.search(s)
     if not m:
         return (text or None), "数値として読み取れません"
@@ -335,3 +381,30 @@ def to_number(raw, text: str, unit: str = "") -> tuple[int | float | str | None,
     value = int(number) if number.is_integer() else number
     warning = None if m[0] == s else f"「{text}」から数値の部分だけを読み取りました"
     return value, warning
+
+
+def _time_range_number(text: str, s: str, r: re.Match, unit: str) -> tuple[int | float | str | None, str | None]:
+    """「09:30-12:45（3.2h）」の形。添えた時間数があればそれを、無ければ範囲の長さを、項目の単位で返す。
+
+    開始時刻（9）を数値として返さない。単位の決まっていない項目では分にする（「3時間40分」と同じ）。
+    """
+    target = normalize_unit(unit) or "分"
+    if target not in ("分", "時間"):
+        return (text or None), "時刻の範囲です。数値として読み取れません"
+    rest = s[:r.start()] + " " + s[r.end():]
+    m = _TIME_AMOUNT_RE.search(rest)
+    if not m and "/" in r[0]:
+        # 月日の付いた範囲は日をまたぐ日数が分からないので、終了−開始では出さない
+        return (text or None), "時刻の範囲です。時間数が書かれていないので数値として読み取れません"
+    if m:
+        amount, written = float(m[1]), normalize_unit(m[2])
+        minutes = amount * 60 if written == "時間" else amount
+        note = f"「{text}」の時間数（{m[1]}{written}）を読み取りました"
+    else:
+        start = int(r[1]) * 60 + int(r[2])
+        end = int(r[3]) * 60 + int(r[4])
+        minutes = end - start if end >= start else end + 24 * 60 - start  # 日をまたぐ作業
+        note = f"「{text}」は時刻の範囲なので、開始から終了までの時間を出しました"
+    number = minutes if target == "分" else round(minutes / 60, 2)
+    value = int(number) if float(number).is_integer() else number
+    return value, f"{note}（{target}）。元のファイルと照らして確かめてください"

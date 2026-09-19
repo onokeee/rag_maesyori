@@ -15,7 +15,7 @@ from logproc import PeopleIndex, parse_log
 from models import database
 from services import llm
 from tests.conftest import make_config
-from tests.fake_servers import OPENAI_KEY, FakeServer, keep_scenario
+from tests.fake_servers import OPENAI_KEY, FakeServer, keep_scenario, segments_of
 
 CELL_412 = """4/1 10:00 田中：ライン停止の連絡あり（製造 大野さん）。現場確認、搬送ロボのアーム原点復帰エラー（ALM-2031）。
 10:20 原点復帰→再起動で復旧。様子見。
@@ -121,6 +121,9 @@ def test_verify_accepts_research_example():
 
 @pytest.mark.parametrize("mutate,path,code", [
     (lambda r: r["incident"]["parts"][0].update(model="RB-ENC-5M"), "incident.parts[0]", "identifier"),
+    # 原文 RB-ENC-05M の切れ端（途中まで・一部分）は型番として通さない
+    (lambda r: r["incident"]["parts"][0].update(model="RB-ENC-05"), "incident.parts[0]", "identifier"),
+    (lambda r: r["incident"]["parts"][0].update(model="ENC"), "incident.parts[0]", "identifier"),
     (lambda r: r["incident"]["temporary_actions"][0].update(v="4/1 10:20に原点復帰"), "incident.temporary_actions[0]", "date"),
     (lambda r: r["incident"]["temporary_actions"][0].update(v="翌日に再起動"), "incident.temporary_actions[0]", "date"),
     (lambda r: r["incident"]["permanent_actions"][0].update(v="エンコーダケーブル交換済", src=["e4"]),
@@ -133,6 +136,11 @@ def test_verify_accepts_research_example():
     (lambda r: r["incident"]["temporary_actions"][0].update(v="佐藤が再起動"), "incident.temporary_actions[0]", "person"),
     (lambda r: r["incident"]["root_cause"].update(src=["e9"]), "incident.root_cause", "src"),
     (lambda r: r["incident"]["final_state"].update(v="解決"), "incident.final_state", "choice"),
+    # 最後の状態・再発「あり」も根拠と突き合わせる（手配の段階を「完了」にしない）
+    (lambda r: r["incident"]["final_state"].update(src=["e4"]), "incident.final_state", "flip_added"),
+    (lambda r: r["incident"]["final_state"].update(src=["e2"]), "incident.final_state", "flip_added"),
+    (lambda r: r["incident"]["recurrence"].update(src=["e1"], count_q=None), "incident.recurrence", "flip_added"),
+    (lambda r: r["incident"]["recurrence"].update(src=["e6"], count_q=None), "incident.recurrence", "flip_added"),
 ])
 def test_verify_item_level_failures(mutate, path, code):
     result = _good_412()
@@ -145,6 +153,32 @@ def test_verify_item_level_failures(mutate, path, code):
     # 落ちた項目だけ出さない（他は残る）
     assert inc_len(rep.accepted["incident"]) == inc_len(_verify(_good_412()).accepted["incident"]) - 1
     assert rep.repair_problems()
+
+
+def test_verify_final_state_and_recurrence_follow_evidence():
+    parse = parse_log("4/7 佐藤：ケーブル手配（RB-ENC-05M ×1）。部品待ち\n4/9 佐藤：仮配線で運転再開、経過観察")
+    sent = prompts.build_log_messages(parse, {}, STAGE)[-1]["content"]
+
+    def run(final_state, recurrence):
+        res = {"entries": [{"id": "e1", "segs": ["s1"], "t": ["部品手配"]}, {"id": "e2", "segs": ["s2"], "t": ["経過観察"]}],
+               "incident": {"final_state": final_state, "recurrence": recurrence}}
+        return verify_log_result(res, parse, sent, spec=STAGE)
+
+    rep = run({"v": "完了", "src": ["e1"]}, {"v": "あり", "src": ["e2"]})
+    assert {"incident.final_state", "incident.recurrence"} <= set(rep.failed_items), rep.issues
+    assert not rep.accepted["incident"].get("final_state") and not rep.accepted["incident"].get("recurrence")
+    for fs in ({"v": "部品待ち", "src": ["e1"]}, {"v": "経過観察中", "src": ["e2"]}):
+        rep = run(fs, {"v": "なし", "src": ["e2"]})
+        assert "incident.final_state" in rep.ok_items, rep.issues
+    # 「未完了」は完了の根拠にしない。用語集の言い換え（様子見→経過観察）は根拠になる
+    parse2 = parse_log("4/1 田中：対策は未完了\n4/2 田中：再起動して様子見")
+    sent2 = prompts.build_log_messages(parse2, {}, STAGE)[-1]["content"]
+    base = {"entries": [{"id": "e1", "segs": ["s1"], "t": ["メモ"]}, {"id": "e2", "segs": ["s2"], "t": ["経過観察"]}]}
+    rep = verify_log_result(dict(base, incident={"final_state": {"v": "完了", "src": ["e1"]}}), parse2, sent2, spec=STAGE)
+    assert "incident.final_state" in rep.failed_items
+    rep = verify_log_result(dict(base, incident={"final_state": {"v": "経過観察中", "src": ["e2"]}}), parse2, sent2,
+                            spec=STAGE)
+    assert "incident.final_state" in rep.ok_items, rep.issues
 
 
 def inc_len(inc):
@@ -262,16 +296,24 @@ def test_error_classification(ai_app, fake):
         with pytest.raises(llm.LLMCallError) as e:
             llm.chat_raw(llm.job_client_settings(), [{"role": "user", "content": "x"}])
         assert e.value.kind == "fatal"
-        fake.responder = lambda body, srv: Reply(delay=1.5, content="{}")
+        slow_seen = threading.Event()
+
+        def slow(body, srv):
+            slow_seen.set()
+            return Reply(delay=1.5, content="{}")
+        fake.responder = slow
         with pytest.raises(llm.LLMCallError) as e:
             llm.chat_raw(llm.job_client_settings(), [{"role": "user", "content": "x"}], timeout=0.3)
         assert e.value.kind == "retry"
+        # 見捨てた要求のハンドラが後から次の responder（flaky）を読まないよう、読み終わるまで待つ
+        assert slow_seen.wait(10)
         # retry は待って再試行（Retry-After に従う）
         fake.responder = None
         calls = []
 
         def flaky(body, srv):
-            calls.append(time.monotonic())
+            # Windows の time.monotonic は刻みが約15.6msで 0.3 秒待っても短く出ることがあるので perf_counter で測る
+            calls.append(time.perf_counter())
             if len(calls) == 1:
                 return Reply(status=429, body={"error": {"message": "Rate limit"}}, headers={"retry-after": "0.3"})
             return Reply(content="{}")
@@ -487,6 +529,32 @@ def test_ai_job_fallback_mode_and_outdated(ai_app, fake):
     assert items_status(ai_app, "R1") == "ok"
 
 
+def test_estimate_counts_unusable_cache_as_calls(ai_app, fake):
+    """保存済みでも使えない応答（壊れたJSON）は、実行時に聞き直すので見積もりでは呼び出しに数える。
+    再依頼で直った応答（R6）は保存済みのまま使うので 0 回。"""
+    from tests.fake_servers import Reply
+
+    def always_broken(body, srv):
+        if any("いつも壊れ" in t for _, t in segments_of(body)):
+            return Reply(content='{"entries": [')
+        return keep_scenario(body, srv)
+    fake.responder = always_broken
+    rows = {"R6": ROWS["R6"], "RX": ("4/12 田中：いつも壊れる応答の確認。\n4/13 田中：ブレーカー復帰で復旧。", "")}
+    iid = _make_import(ai_app, rows=rows)
+    job = _run_job(ai_app, iid, stage_ids=["log"])
+    assert job["status"] == "done", job["message"]
+    assert items_status(ai_app, "RX") == "error" and items_status(ai_app, "R6") == "ok"
+    with ai_app.app_context():
+        s = llm.job_client_settings()
+        est = estimate.estimate(iid, None, scope="errors", settings=s, stage_ids=["log"])
+        assert (est["ai_rows"], est["calls"], est["cached"]) == (1, 1, 0)
+        est_all = estimate.estimate(iid, None, scope="all", settings=s, stage_ids=["log"])
+        assert (est_all["ai_rows"], est_all["calls"], est_all["cached"]) == (2, 1, 1)
+    n = len(fake.chat_requests())
+    _run_job(ai_app, iid, scope="errors", stage_ids=["log"])
+    assert len(fake.chat_requests()) > n                     # 実際に聞き直している
+
+
 def items_status(app, key, stage="log"):
     with app.app_context():
         return items.get_item(1, stage, key)["status"]
@@ -520,6 +588,28 @@ def test_ai_job_pause_resume_and_cancel(ai_app, fake):
         assert sum(1 for v in _item_map(ai_app).values() if v["status"] == "ok") == 8
 
 
+def test_ai_job_stops_when_its_import_is_deleted(ai_app, fake):
+    """取り込みが消えたら（ダウンロード・削除）、動いている AI整形は新しい呼び出しを出さず、結果も書かない。"""
+    fake.responder = keep_scenario
+    slow = {f"S{i}": (f"4/{i} 田中：遅い応答の確認{i}。搬送停止。\n4/{i + 1} 田中：リセットで復旧。", "") for i in range(1, 9)}
+    iid = _make_import(ai_app, rows=slow)
+    with ai_app.app_context():
+        job_id = runner.start_ai_job(iid, concurrency=1, stage_ids=["log"])
+        _wait(lambda: (jobs.get_job(job_id)["progress"].get("done") or 0) >= 1)
+        conn = database.connect()
+        try:
+            conn.execute("DELETE FROM table_imports WHERE id = ?", (iid,))   # jobs の行は残したまま
+            conn.commit()
+        finally:
+            conn.close()
+        job = jobs.wait_job(job_id, timeout=30)
+        assert job["status"] == "cancelled"
+        n_calls = len(fake.chat_requests())
+        assert n_calls < 8
+        time.sleep(0.5)
+        assert len(fake.chat_requests()) == n_calls
+
+
 def _wait(pred, timeout=20.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -549,6 +639,171 @@ def test_fingerprint_change_and_fatal_error_stop_job(ai_app, fake):
         job = jobs.wait_job(runner.start_ai_job(iid), timeout=30)
         assert job["status"] == "failed" and "APIキー" in job["message"]
         assert len(fake.chat_requests()) == 1
+
+
+@pytest.mark.parametrize("cause,kind", [
+    ("ConnectError", "fatal"), ("RemoteProtocolError", "retry"), ("ReadError", "retry"), ("WriteError", "retry"),
+    (None, "fatal"),
+])
+def test_connection_error_classified_by_cause(cause, kind):
+    """接続できない（拒否・名前解決）はジョブを止め、要求を送った後に切れたものは待って再試行する。"""
+    import httpx2
+    from openai import APIConnectionError
+    e = APIConnectionError(request=httpx2.Request("POST", "http://x/v1/chat/completions"))
+    if cause:
+        try:
+            try:
+                raise getattr(httpx2, cause)("Server disconnected")
+            except Exception as inner:
+                raise e from inner
+        except APIConnectionError as outer:
+            e = outer
+    assert llm.classify_error(e, "m").kind == kind
+    # 接続段階のエラーが途中にあれば、その先に読み書きの失敗があっても止める
+    if cause == "ConnectError":
+        e.__cause__.__cause__ = ConnectionResetError()
+        assert llm.classify_error(e, "m").kind == "fatal"
+
+
+def test_ai_job_survives_a_dropped_connection(ai_app, fake):
+    """要求を送った後に接続が切れても、ジョブは待って再試行し、最後まで終わる。"""
+    from tests.fake_servers import Reply
+
+    def drop_once(body, srv):
+        if segments_of(body) and srv.count("drop") == 0:
+            return Reply(drop=True)
+        return keep_scenario(body, srv)
+    fake.responder = drop_once
+    iid = _make_import(ai_app, rows={"R1": ROWS["R1"]})
+    job = _run_job(ai_app, iid, stage_ids=["log"])
+    assert job["status"] == "done", job["message"]
+    assert items_status(ai_app, "R1") == "ok"
+    assert fake.counters["drop"] >= 2
+
+
+def test_chat_raw_non_api_body_is_fatal(ai_app, fake):
+    """200 でも HTML（プロキシのブロック画面・接続先URLの誤り）は、分類された致命的エラーにする。"""
+    from tests.fake_servers import Reply
+    fake.responder = lambda body, srv: Reply(html="<!doctype html><html><body>blocked</body></html>")
+    with ai_app.app_context():
+        with pytest.raises(llm.LLMCallError) as e:
+            llm.chat_raw(llm.job_client_settings(), [{"role": "user", "content": "x"}])
+    assert e.value.kind == "fatal" and "APIの形式" in str(e.value)
+
+
+def _second_import(app, template_id, rows) -> int:
+    """同じ取り込み設定（同じ版）で2つ目の取り込みを作る（先月分と今月分で管理Noが重なる等）。"""
+    with app.app_context():
+        conn = database.connect()
+        now = database.now()
+        try:
+            vid = conn.execute("SELECT id FROM table_template_versions WHERE template_id = ?", (template_id,)).fetchone()[0]
+            iid = conn.execute("INSERT INTO table_imports (template_id, template_version_id, file_name, file_hash, stored_path,"
+                               " status, created_at, updated_at) VALUES (?, ?, 'T1_2.xlsx', 'y', 'y', 'preview', ?, ?)",
+                               (template_id, vid, now, now)).lastrowid
+            conn.commit()
+        finally:
+            conn.close()
+    _write_rows(app, iid, rows)
+    return iid
+
+
+def test_ai_items_are_per_import_and_survive_other_import_purge(ai_app, fake):
+    """同じ設定・同じ行キーの2つの取り込みは AI の結果を別々に持ち、片方をダウンロード（削除）してももう片方は残る。"""
+    from core import purge
+    from tables import pipeline
+
+    fake.responder = keep_scenario
+    rows = {k: ROWS[k] for k in ("R1", "R6", "R9")}
+    a = _make_import(ai_app, rows=rows)
+    b = _second_import(ai_app, 1, rows)
+    ja = _run_job(ai_app, a, stage_ids=["log"])
+    assert ja["status"] == "done" and ja["result"]["ok"] == 3
+    jb = _run_job(ai_app, b, stage_ids=["log"])
+    assert jb["status"] == "done", jb["message"]
+    # B は A の結果を「処理済み」とみなさず、自分の行を持つ（応答はキャッシュから。再課金しない）
+    assert jb["result"]["already"] == 0 and jb["result"]["ok"] == 3 and jb["result"]["calls"] == 0
+    with ai_app.app_context():
+        assert set(items.items_by_key(1, "log", import_id=b)) == {"R1", "R6", "R9"}
+        assert items.counts(1, "log", import_id=b) == {"ok": 3}
+        spec = runner.load_spec(1)
+        imp_b = dict(database.get_db().execute("SELECT * FROM table_imports WHERE id = ?", (b,)).fetchone())
+        assert sorted(pipeline.usable_ai_results(b, imp_b, spec)) == ["R1", "R6", "R9"]
+        purge.purge_table_import(a)
+        assert sorted(pipeline.usable_ai_results(b, imp_b, spec)) == ["R1", "R6", "R9"]
+        assert items.items_by_key(1, "log", import_id=a) == {}
+        assert items.counts(1, "log", import_id=b) == {"ok": 3}
+
+
+def test_ai_items_migration_keeps_rows_and_allows_same_key_per_import(tmp_path):
+    """m6: 既存の行を残したまま、(取り込み, 設定, 段, 行) で一意に作り直す。"""
+    import sqlite3
+
+    conn = sqlite3.connect(tmp_path / "old.db")
+    conn.row_factory = sqlite3.Row
+    for number, migration in enumerate(database.MIGRATIONS[:5], start=1):
+        migration(conn)
+        conn.execute(f"PRAGMA user_version = {number}")
+    conn.execute("INSERT INTO ai_items (template_id, stage_id, row_key, status, result_json, import_id, updated_at)"
+                 " VALUES (1, 'log', 'R1', 'ok', '{}', 7, 't')")
+    conn.commit()
+    assert database.migrate(conn) == len(database.MIGRATIONS)
+    row = conn.execute("SELECT status, import_id, result_json FROM ai_items").fetchone()
+    assert tuple(row) == ("ok", 7, "{}")
+    items.upsert_item(1, "log", "R1", status="error", import_id=8, conn=conn)
+    items.upsert_item(1, "log", "R1", status="flagged", import_id=8, conn=conn)
+    assert items.counts(1, "log", conn=conn, import_id=7) == {"ok": 1}
+    assert items.counts(1, "log", conn=conn, import_id=8) == {"flagged": 1}
+    conn.close()
+
+
+def test_errors_rerun_does_not_replay_unusable_cached_response(ai_app, fake):
+    """壊れた JSON の応答はキャッシュから使い回さない。「エラーだけ再実行」で聞き直して直る。"""
+    from tests.fake_servers import Reply, segments_of
+
+    def broken(body, srv):
+        if segments_of(body):
+            return Reply(content='{"entries": [ {"id": "e1"')
+        return keep_scenario(body, srv)
+
+    fake.responder = broken
+    iid = _make_import(ai_app, rows={"R1": ROWS["R1"]})
+    job = _run_job(ai_app, iid, stage_ids=["log"])
+    assert job["result"]["error"] == 1
+    assert items_status(ai_app, "R1") == "error"
+    fake.responder = keep_scenario                    # サーバーはもう正しく答える
+    n = len(fake.chat_requests())
+    job2 = _run_job(ai_app, iid, scope="errors", stage_ids=["log"])
+    assert job2["status"] == "done", job2["message"]
+    assert job2["result"]["ok"] == 1 and job2["result"]["calls"] >= 1
+    assert len(fake.chat_requests()) > n
+    assert items_status(ai_app, "R1") == "ok"
+    # 正しい応答は使い回す（再課金しない）
+    n = len(fake.chat_requests())
+    assert _run_job(ai_app, iid, scope="all", stage_ids=["log"])["result"]["calls"] == 0
+    assert len(fake.chat_requests()) == n
+
+
+def test_repair_is_not_sent_after_pause_requested(ai_app, fake):
+    """1回目の応答が壊れていても、一時停止を頼まれていたら再依頼を送らない。"""
+    from tests.fake_servers import Reply, segments_of
+
+    def broken(body, srv):
+        if segments_of(body):
+            return Reply(content='{"entries": [')
+        return keep_scenario(body, srv)
+
+    fake.responder = broken
+    iid = _make_import(ai_app, rows={"R1": ROWS["R1"]})
+    with ai_app.app_context():
+        settings = llm.job_client_settings()
+        work = runner.prepare_works(runner.load_rows_for_ai(iid), ["log"])[0]
+        runner.assign_keys([work], settings, "json_schema")
+        stop = threading.Event()
+        stop.set()
+        out = runner.execute_work(work, settings, "json_schema", stop)
+    assert out.stopped and out.calls == 1
+    assert len(fake.chat_requests()) == 1
 
 
 def test_trial_row_and_estimate(ai_app, fake):

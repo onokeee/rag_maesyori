@@ -26,8 +26,10 @@ KEY_SAMPLE_ROWS = 50
 
 _BLOCK_TITLE_RE = re.compile(r"^\s*[■□◆◇●○▼▽★☆]")
 _NOTE_RE = re.compile(r"^\s*(※|\*\d|（注|\(注|注[記意]?\s*[\d０-９]*\s*[:：)）.．、\s])")
-_TOTAL_RE = re.compile(r"(総合計|合計|総計|累計)")
-_SUBTOTAL_RE = re.compile(r"(小計|計|平均)$")
+# 集計の語はラベル全体（前置き＋語＋短い後置き）として見る。「合計カウンタ不良」のような文の一部は合計行にしない
+_TOTAL_RE = re.compile(r"^.{0,15}?(総合計|合計|総計|累計)(件数|数|額|金額|時間|値)?$")
+# 「計」だけの語は「設計」「会計」と区別するため、単独か、区切り・数字・英字・月/年/度/期/週/日の後ろだけ
+_SUBTOTAL_RE = re.compile(r"(小計|平均)$|(^|[\s・_:：/／\-－0-9A-Za-z月年度期週日])計$")
 _PAREN_TAIL_RE = re.compile(r"\s*[（(][^()（）]*[)）]\s*$")
 _UNIT_RE = re.compile(r"^(.*?)\s*[（(\[［]\s*([^()（）\[\]［］]{1,12})\s*[)）\]］]\s*$")
 _KNOWN_UNITS = {
@@ -126,12 +128,13 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
     width, split_warning = _table_width(by_index, rows_h, levels)
     if split_warning:
         warnings.append(split_warning)
-    headers = _dedupe(headers[:width])
-    levels = [lv[:width] for lv in levels]
+    headers = _dedupe((headers + [""] * width)[:width])
+    levels = [(lv + [""] * width)[:width] for lv in levels]
     data_start = rows_h[-1] + 1
 
     header_norms = {_norm(h) for h in headers if h and not h.startswith("列")}
-    ctx = _Ctx(width=width, header_norms=header_norms, key_cols=[], is_csv=is_csv, header_rows=rows_h)
+    ctx = _Ctx(width=width, header_norms=header_norms, key_cols=[], is_csv=is_csv, header_rows=rows_h,
+               left=_left_edge(headers))
     memo_key = json.dumps([sheet, rows_h, headers, width, is_csv, data_end, max_scan_rows], ensure_ascii=False)
     found = scan_memo.get(memo_key) if scan_memo is not None else None
     if found is not None:
@@ -224,13 +227,19 @@ class _Ctx:
     key_cols: list[int]
     is_csv: bool
     header_rows: list[int]
+    left: int = 0  # 表の左端の列（0始まり）。注記・表題はこの列から始まる行だけにする
+
+
+def _left_edge(headers: list[str]) -> int:
+    """見出しのある最初の列（空の見出しは「列N」になっている）。"""
+    return next((i for i, h in enumerate(headers) if h and not re.fullmatch(r"列\d+", h)), 0)
 
 
 def _ctx_from_layout(layout: LayoutGuess) -> _Ctx:
     width = len(layout.headers)
     norms = {_norm(h) for h in layout.headers if h and not h.startswith("列")}
     return _Ctx(width=width, header_norms=norms, key_cols=list(layout.key_columns),
-                is_csv=False, header_rows=list(layout.header_rows))
+                is_csv=False, header_rows=list(layout.header_rows), left=_left_edge(layout.headers))
 
 
 def _norm(text: str) -> str:
@@ -424,7 +433,8 @@ def _dedupe(headers: list[str]) -> list[str]:
     for i, h in enumerate(headers):
         name = h or f"列{i + 1}"
         seen[name] += 1
-        out.append(name if seen[name] == 1 else f"{name}_{seen[name]}")
+        # 「備考_2」だと2段見出しの「上_下」と区別できず、下段「2」が表示名になるので括弧で番号を付ける
+        out.append(name if seen[name] == 1 else f"{name}({seen[name]})")
     return out
 
 
@@ -451,33 +461,61 @@ def _table_width(by_index: dict[int, SourceRow], rows_h: list[int], levels: list
 
         return gap, (f"見出しの右側（{get_column_letter(gap + 2)}列以降）に別の表があるようです。"
                      "最初の表だけを読み取ります。右側の表は範囲を指定して取り込んでください")
+    # 右端の見出しが空欄でも、その列に値が続いていれば表の列に含める（黙って捨てない。見出しは「列N」になる）
+    while data_rows and sum(1 for r in data_rows if last < len(r.cells) and r.cells[last].text) > 0.1 * len(data_rows):
+        last += 1
     return last, ""
 
 
 # ---- 内部: 行の分類 ----
 
-def _aggregate_label(row: SourceRow, width: int) -> str | None:
-    """小計・合計行なら "subtotal" / "total"。"""
+def _aggregate_label(row: SourceRow, width: int, key_cols: list[int] | None = None) -> str | None:
+    """小計・合計行なら "subtotal" / "total"。
+
+    「ブロック計」「部署計」のように語の後ろに「計」だけが付くラベルは、「設計」「会計」「流量計」と
+    見分けられないので、ほかのキー列（日付・番号。集計値の数値は除く）がすべて空の行のときだけ小計にする。
+    """
     cells = row.cells[:width] if width else row.cells
-    nonempty = [c for c in cells if c.text]
+    filled = [(i, c) for i, c in enumerate(cells) if c.text]
+    nonempty = [c for _i, c in filled]
     found: list[tuple[int, str]] = []
-    for pos, c in enumerate(nonempty[:3]):
+    label_col: dict[int, int] = {}
+    for pos, (col, c) in enumerate(filled[:3]):
         if not isinstance(c.value, str) or len(c.text) > 30 or "\n" in c.text:
             continue
         if "計" not in c.text and "平均" not in c.text:
             continue
-        label = _PAREN_TAIL_RE.sub("", unicodedata.normalize("NFKC", c.text)).replace(" ", "")
+        raw = _PAREN_TAIL_RE.sub("", unicodedata.normalize("NFKC", c.text)).strip()
+        label = raw.replace(" ", "")
         if label and len(label) <= 25:
-            found.append((pos, label))
+            found.append((pos, raw))
+            label_col[pos] = col
     if not found:
         return None
     strings = sum(1 for c in nonempty if c.text not in NA_TOKENS and value_kind(c.value, c.text) != "number")
     for pos, label in found:
-        if _TOTAL_RE.search(label) and strings <= 3:
-            return "subtotal" if "小計" in label else "total"
-        if pos == 0 and _SUBTOTAL_RE.search(label) and strings <= 2:
-            return "subtotal"
+        if _TOTAL_RE.match(label.replace(" ", "")) and strings <= 3:
+            if pos > 0 and _row_has_own_key(cells, filled[:pos], key_cols or [], label_col[pos]):
+                # 「P-004, 2026/04/04, 稼働時間累計, …」のように、番号・日付を持つ行の項目名は合計行ではない
+                continue
+            return "total"
+        if pos == 0 and strings <= 2:
+            if _SUBTOTAL_RE.search(label):
+                return "subtotal"
+            others = [k for k in key_cols or [] if k != label_col[pos]]
+            if label.endswith("計") and others and all(
+                    k >= len(cells) or not cells[k].text or value_kind(cells[k].value, cells[k].text) == "number"
+                    for k in others):
+                return "subtotal"
     return None
+
+
+def _row_has_own_key(cells: list, before: list, key_cols: list[int], label_col: int) -> bool:
+    """ラベルより左に番号・日付があるか、ほかのキー列に数値でない値があるか（＝データ行の印）。"""
+    if any(value_kind(c.value, c.text) in ("code", "date", "datetime") for _i, c in before):
+        return True
+    return any(k != label_col and k < len(cells) and cells[k].text and cells[k].text not in NA_TOKENS
+               and value_kind(cells[k].value, cells[k].text) != "number" for k in key_cols)
 
 
 def _classify(row: SourceRow, ctx: _Ctx) -> RowClass:
@@ -499,17 +537,22 @@ def _classify(row: SourceRow, ctx: _Ctx) -> RowClass:
         hits = len(norms & ctx.header_norms)
         if hits >= max(2, 0.6 * len(ctx.header_norms)):
             return RowClass(row.index, "header", "見出しの再出現")
-    if len(nonempty) <= 2 and _NOTE_RE.match(first):
+    # 注記・表題は表の左端の列から書かれた行だけ。文章の列だけに「●再発防止…」「※後日交換」とある行は
+    # 前の記録の続き（継続行）なので、ここでは決めずに下の判定へ回す
+    at_left = next(i for i, c in enumerate(cells) if c.text) <= ctx.left
+    if len(nonempty) <= 2 and at_left and _NOTE_RE.match(first):
         return RowClass(row.index, "note", "注記")
-    if len(nonempty) <= 2 and _BLOCK_TITLE_RE.match(first):
+    if len(nonempty) <= 2 and at_left and _BLOCK_TITLE_RE.match(first):
         return RowClass(row.index, "title", "表題")
-    agg = _aggregate_label(row, width)
+    agg = _aggregate_label(row, width, ctx.key_cols)
     if agg:
         return RowClass(row.index, "subtotal", "合計" if agg == "total" else "小計")
     if ctx.is_csv and width >= 4 and len(row.cells) < 0.5 * width and len(nonempty) <= 2:
         return RowClass(row.index, "excluded", "列数が見出しと合わない")
     if ctx.key_cols and all(not _filled(row, k) for k in ctx.key_cols):
         return RowClass(row.index, "continuation", "キー列が空で文章だけの行")
+    if ctx.key_cols and _keys_merged_from_above(row, ctx):
+        return RowClass(row.index, "continuation", "キー列が上の行から縦に結合された行")
     return RowClass(row.index, "data")
 
 
@@ -518,6 +561,32 @@ def _filled(row: SourceRow, col: int) -> bool:
     if cell is None:
         return False
     return bool(cell.text) or (cell.merged_anchor is not None and cell.merged_anchor != (row.index, col + 1))
+
+
+def _keys_merged_from_above(row: SourceRow, ctx: _Ctx) -> bool:
+    """キー列がすべて上のデータ行からの縦結合（または空）で、この行だけの値が文字だけか。
+
+    管理No・日付を縦に結合して1件の対応内容を複数行に書いた表を、1件にまとめるため。
+    数値・日付がこの行にあるなら別の記録（同じ日の部品交換の2件目など）として扱う。
+    """
+    top = ctx.header_rows[-1] if ctx.header_rows else 0
+    merged = 0
+    for k in ctx.key_cols:
+        cell = row.cell(k)
+        if cell is None or cell.text:
+            if cell is not None and cell.text:
+                return False
+            continue
+        anchor = cell.merged_anchor
+        if anchor is not None and top < anchor[0] < row.index:
+            merged += 1
+    if not merged:
+        return False
+    keys = set(ctx.key_cols)
+    for i, c in enumerate(row.cells[:ctx.width or len(row.cells)]):
+        if i not in keys and c.text and value_kind(c.value, c.text) in ("number", "date", "datetime", "time"):
+            return False
+    return True
 
 
 def _auto_key_columns(source, sheet, data_start: int, ctx: _Ctx) -> list[int]:

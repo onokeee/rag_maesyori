@@ -534,6 +534,26 @@ def _retry_after(exc: Exception) -> float | None:
     return None
 
 
+_CONNECT_PHASE_ERRORS = {"ConnectError", "ConnectTimeout"}
+_MID_REQUEST_ERRORS = {"RemoteProtocolError", "ReadError", "WriteError", "ConnectionResetError",
+                       "ConnectionAbortedError", "BrokenPipeError", "IncompleteRead"}
+
+
+def _dropped_mid_request(exc: BaseException) -> bool:
+    """接続エラーの原因をたどり、接続後に切れたもの（再試行でよい）かを返す。
+    httpx / httpx2 のどちらでも効くようにクラス名で見る。原因が分からなければ False（従来どおり止める）。"""
+    seen, cur, mid = set(), exc.__cause__ or exc.__context__, False
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        names = {c.__name__ for c in type(cur).__mro__}
+        if names & _CONNECT_PHASE_ERRORS:
+            return False
+        if names & _MID_REQUEST_ERRORS:
+            mid = True
+        cur = cur.__cause__ or cur.__context__
+    return mid
+
+
 def classify_error(exc: Exception, model: str = "") -> LLMCallError:
     """SDK の例外をジョブでの扱い（fatal / retry / row）に分類する。"""
     if isinstance(exc, LLMCallError):
@@ -546,6 +566,10 @@ def classify_error(exc: Exception, model: str = "") -> LLMCallError:
     if isinstance(exc, APITimeoutError) or "timed out" in low:
         return LLMCallError("retry", "AIの応答が時間内に返りませんでした。", None, None, model)
     if isinstance(exc, APIConnectionError):
+        # 要求を送った後に切れた（サーバー側の切断・読み書きの失敗）は一時的なので待って再試行する。
+        # 接続そのものができない（接続拒否・名前解決・接続タイムアウト）ときだけジョブを止める
+        if _dropped_mid_request(exc):
+            return LLMCallError("retry", "AIとの接続が途中で切れました。", None, None, model)
         return LLMCallError("fatal", "AIの接続先に接続できませんでした。接続先URLとサーバーの起動を確認してください。",
                             None, None, model)
     if status in (401, 403):
@@ -606,6 +630,10 @@ def chat_raw(settings: dict, messages: list[dict], response_format: dict | None 
             _learn(model, set_=set_, drop=drop)
             continue
         latency = int((time.monotonic() - started) * 1000)
+        if not hasattr(resp, "choices"):
+            # 200 でも HTML（プロキシのブロック画面・接続先URLの誤り）などは SDK が文字列のまま返す
+            raise LLMCallError("fatal", "AIの接続先がAPIの形式で応答しませんでした（接続先URLやプロキシを確認してください）。",
+                               None, None, model)
         choice = resp.choices[0] if resp.choices else None
         text = (choice.message.content if choice and choice.message else "") or ""
         usage = getattr(resp, "usage", None)

@@ -96,8 +96,8 @@
 | `POST /tables/imports/<id>/ai/...` | `split-preview`（JSON）, `trial`（1行ずつ, JSON）, `run`, `pause`, `resume`, `cancel` |
 | `GET /tables/imports/<id>/preview` | 概要（読込件数・除外件数と理由・エラー/警告・合計の照合）、**作られる md の一覧と中身**（下書きはジョブで作り、待ち画面を出す）、問題一覧（CSV）、データ（100行ずつ）。ダウンロードで消えることの一文。期間の置き換え・投入済みとの差分は持たない（8.1） |
 | `POST /tables/imports/<id>/confirm` | エラーが残っていれば止める。ジョブで全 md を作る→ done |
-| `GET /tables/imports/<id>/done` | [Markdownをまとめてダウンロード（zip）]（押すと消える確認つき）[正規化CSVをダウンロード]。zip は渡したあと**その取り込みのデータを消す**（3.3）。正規化CSVが要るときは zip より先に取る |
-| `GET /tables/imports/<id>/normalized.csv` | 正規化CSV（消さない。zip より先に取る） |
+| `GET /tables/imports/<id>/done` | [Markdownをまとめてダウンロード（zip）]（押すと消える確認つき）[正規化CSVをダウンロード]。zip は渡したあと**その取り込みのデータを消す**（3.3）。正規化CSVは zip の「管理用_RAGには入れない」フォルダにも入る |
+| `GET /tables/imports/<id>/normalized.csv` | 正規化CSV（消さない。zip にも同じものが入る） |
 | `POST /tables/imports/<id>/delete` | 取り込みを削除（`core.purge.purge_table_import`）。戻り先はホーム |
 | `GET /api/jobs/<job_id>` | ジョブ進捗（JSON） |
 
@@ -147,7 +147,7 @@ llm_calls(cache_key PK, raw_text, parsed_json, model, params_json, structured_mo
 ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, source_hash, context_hash, segments_hash, cache_key,
          status TEXT,   -- pending/ok/flagged/rule_only/error/skipped/outdated/excluded
          result_json, checks_json, override TEXT, attempts INTEGER, error TEXT, job_id, updated_at,
-         UNIQUE(template_id, stage_id, row_key))
+         UNIQUE(import_id, template_id, stage_id, row_key))   -- 取り込みごと（マイグレーション _m6_ai_items_per_import）
 ```
 一覧表の行データはDBに持たない。取り込み中だけ `data/tables/imports/<import_id>/`（`rows.jsonl.gz`・`issues.csv`・`md/`・`preview_md/`・`source_cache.json`）に置き、ダウンロードしたらフォルダごと消す（3.3）。確定済み全行の保存（`state/current.jsonl.gz`）は作らない（8.1）。
 
@@ -167,6 +167,8 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 - **欠けないダウンロード**：md も zip も全体をメモリに作ってから消す。作れなかったとき（未確定・失敗）は何も消さない。
   消すのは**本文を最後まで送り終えたあと**（`core/purge.purge_after_send`）。通信が切れた・ブラウザを閉じたなどで
   本文を渡しきれなかったときは消さないので、もう一度ダウンロードできる。
+  Range 付きの要求（ダウンロードマネージャー・途中からの再開）にも全体を 200 で返し（`send_file(conditional=False)`）、
+  `purge_after_send` は 200 以外（206・304）の応答では消さない（一部だけ渡して消すことが無いように）。
 - **消した中身を残さない**：接続時に `PRAGMA secure_delete = ON`（消した行の中身をその場でゼロ埋め）、消したあとに
   `PRAGMA wal_checkpoint(TRUNCATE)` と `VACUUM`。これが無いと、行を消しても `instance/app.db` の解放ページや
   `app.db-wal` から帳票の値・設備名・人名が平文で読めてしまう。
@@ -175,10 +177,16 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 - **AI整形の控え**：`ai_items`・`llm_calls` も取り込んだ内容そのものなので一緒に消す。消すのは `ai_items.import_id` が
   その取り込みの分だけで、同じ設定で作業中の別の取り込みの結果と応答キャッシュは残す（巻き添えの再課金を避ける）。
   同じ表を取り込み直すと AI に再度課金される（承知のうえ）。
+  取り込み設定を消したときは、その設定の `ai_items` と、それで参照されなくなった `llm_calls` をその場で消す
+  （`tables/store.delete_template` → `core/purge.sweep_orphan_ai`。起動時の片付けでも同じ掃除をする）。
 - **控えを書き戻さない**：`tables/source_cache.ImportSource` はフォルダを `__init__` でだけ作る。消したあとに
   別のタブの画面処理が控えを書いても、`imports/<id>/` は復活しない。
-- **消し損ね**：起動時に、DBから参照されていないアップロードファイルと `imports/<id>/` フォルダを片付ける（`app._cleanup_leftovers` → `core/files.remove_orphan_uploads` / `remove_orphan_import_dirs`）。作業中のものは DB に行があるので消さない。
+- **消し損ね**：起動時に、DBから参照されていないアップロードファイルと `imports/<id>/` フォルダ、もう無い取り込みを指す `ai_items`（と、それで参照されなくなった `llm_calls`）を片付ける（`app._cleanup_leftovers` → `core/files.remove_orphan_uploads` / `remove_orphan_import_dirs`、`core/purge.delete_orphan_ai_items`）。`purge_table_import` も同じ掃除をする。作業中のものは DB に行があるので消さない。`purge_table_import` で `imports/<id>/` を消し切れなかったとき（Windows で掴まれていた）はログに残し、次の起動時に片付く。
+- **消したあとの AI整形**：動いている AI整形のジョブは、取り込みの行が消えたら新しい呼び出しを出さず、結果も書かずに止まる（`aiproc/runner._import_gone`。ジョブの行が消えたときは `JobContext` が中止扱いにする）。一覧表の削除・確定・zip のダウンロードは AI整形の実行中は受け付けない。
+- **他サイトからのダウンロード（＝削除）を断る**：消すダウンロード（`forms.download_md` / `forms.download_batch` / `tables.download_zip`）は GET でも、`Sec-Fetch-Site` が same-origin / none 以外、他サイトの `Origin`、（`Sec-Fetch-Site` が無いときは）他サイトの `Referer` なら 403（`views.PURGING_ENDPOINTS`）。
+- **読み取れないアップロード**：事前チェックや読み込みで思わぬ例外が出ても、アップロードしたファイルは消してから落とす（帳票・一覧表とも）。
 - **画面の知らせ**：ダウンロードのボタンには確認ダイアログ（`data-confirm`）、完了・確認画面には「ダウンロードするとこのPCから消える／もう一度ダウンロードできない」の一文を出す。
+  修正中（確定済みの版あり）の帳票は、確定し直していない変更が入らずに消えることを確認文の先頭に書く（確認・完了画面とホームの .md / zip ボタン。`views.forms.delete_confirm` / `batch_zip_confirm`）。
   消えないボタン（帳票の `download.json`・`original`）には「（消えません）」と書く。ホームではまとめ取り込みを1行にまとめ、
   1件だけダウンロードするとまとまりが崩れることを押す前に知らせる。
 - **画面のメッセージにファイル名を出さない**：`flash` は署名付きセッションクッキーとしてブラウザに残るので、
@@ -216,7 +224,9 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 class UploadError(Exception): ...
 @dataclass class StoredFile: stored_path: str; file_name: str; file_hash: str; size: int
 def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> StoredFile   # 分割読みで sha256
-def precheck_excel(path) -> None      # OLE(D0CF11E0)=パスワード付き/xls、xl/workbook.bin=xlsb、Strict名前空間、zip展開上限(合計500MB/1パーツ200MB/圧縮率100) → UploadError(日本語)
+def precheck_excel(path, max_cells=None) -> None   # OLE(D0CF11E0)=パスワード付き/xls、xl/workbook.bin=xlsb、Strict名前空間、zip展開上限(合計500MB/1パーツ200MB/圧縮率100)、
+                                      # 結合セルの面積の合計(200万セル)、セル数（<c> の数。帳票・見本は EXCEL_MAX_CELLS=50万、省略時 100万）、
+                                      # シートが1つも無いブック、壊れた圧縮データ(zlib.error/EOFError) → UploadError(日本語。ファイル名・例外の種類名は入れない)
 def upload_path(stored_path) -> Path;  def remove_upload(stored_path) -> bool   # 消せたら True。掴まれて消せないときは中身を0バイトにして False
 def remove_orphan_uploads(upload_dir, known: set[str]) -> int;  def remove_orphan_import_dirs(tables_dir, import_ids: set[int]) -> int
 
@@ -520,8 +530,8 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 
 ### 8.0 残っている不一致・開いている点
 測定値（`python -m scripts.samples.evaluate_forms`、見本各3件・対象各30件、2026-09-19）：
-F1 98.5% ／ F2 97.1% ／ F3 96.4% ／ F4 100.0% ／ F5 92.8%、
-全体で 1つの値の項目 2,944/3,052 = 96.5%、明細表の行 1,772/1,995 = 88.8%（`--offset 3` では 95.5% / 85.8%）。残っているのは次のもの。
+F1 98.5% ／ F2 97.4% ／ F3 96.4% ／ F4 100.0% ／ F5 92.8%、
+全体で 1つの値の項目 2,946/3,052 = 96.5%、明細表の行 1,772/1,995 = 88.8%（`--offset 3` では 95.5% / 85.8%）。残っているのは次のもの。
 
 **読み取りの不一致**
 - 発行側と回答側で同じ意味の欄が並ぶ帳票（F5 工程異常連絡票）で、「処置内容（発行側）」と「暫定対策（処置）（回答側）」のようにどちらも候補ラベルに当たる場合、帳票の上にある方を読む。F5 が全体で一番低いのはこれが主因で、明細表の「処置」列（0/6）、`action`（15/24）、`checker`（16/25）に出る。
@@ -552,6 +562,12 @@ F1 98.5% ／ F2 97.1% ／ F3 96.4% ／ F4 100.0% ／ F5 92.8%、
   使い終わったら画面から削除する必要がある。自動で消すには「読み取りテストのたびに見本を選び直す」形に変える必要があり、未実施。
 - `instance/app.db` のファイル自体は残る（中身は `secure_delete` + `VACUUM` で消える）。`.flask_secret`・`data/model_settings.yaml`
   （APIキーを平文で持つ）・`env` も残る。
+
+**承知のうえで残している小さな点（2026-09-19 の確認）**
+- 一覧表の読み込み・md 作成のジョブを始めるとき、状態を先に書いてからジョブを登録するので、その2つの書き込みの間
+  （マイクロ秒）に開いた画面は、新しい状態と前回の終わったジョブを見ることがある。画面は POST → リダイレクト → GET の順なので実害は無い。
+- CSV の列数の上限（2,000列）は自動判定したときだけ確かめる。文字コード・区切り文字を指定して開き直すときは確かめない。
+- AI接続のタイムアウト（接続時を含む）は「混んでいるだけ」として再試行する。止めるのは接続拒否・名前解決の失敗だけ。
 
 **Markdown の断片**
 - 明細表を読むようになったため、帳票の md が 1,200トークン（LightRAG の既定の固定窓）を超えて2つ以上の断片に分かれる様式がある（サンプルでは F2・F3・F4）。長文項目の見出しには識別子が入るが、明細表の行だけで埋まった断片には識別番号が出ない。明細表の各行への設備番号の付与・帳票へのヒント付与は、出力仕様の変更になるため入れていない（`docs/research/LightRAGオフライン評価.md` 8.5/8.7）。

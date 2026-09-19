@@ -134,7 +134,11 @@
       const remove = event.target.closest("[data-remove-table-row]");
       if (remove) {
         const tr = remove.closest("tr");
-        if (box._activeCell && tr.contains(box._activeCell)) box._activeCell = null;
+        if (box._activeCell && tr.contains(box._activeCell)) {
+          // 選んでいたセルの行を消したら、この表への入力先も外す（シートのクリックで先頭のセルを上書きしない）
+          box._activeCell = null;
+          if (activeBox === box) activeBox = null;
+        }
         tr.remove();
         syncTable(box);
         return;
@@ -243,6 +247,15 @@
   let dirty = false;
   let saving = null;
 
+  // 画面を開いたときの作業データの版。保存・確定で送り、別の画面で変わっていたら 409 で止まる
+  const versionInput = form.querySelector("[data-version-input]");
+  const currentVersion = () => root.dataset.version || "";
+  function setVersion(v) {
+    if (!v) return;
+    root.dataset.version = v;
+    if (versionInput) versionInput.value = v;
+  }
+
   async function postJson(url, body) {
     const res = await fetch(url, {
       method: "POST",
@@ -254,17 +267,20 @@
       try { const data = await res.json(); if (data.error) msg = data.error; } catch (e) { /* 本文なし */ }
       throw new Error(msg);
     }
+    setVersion(res.headers.get("X-Doc-Version"));
     return res.status === 204 ? null : res.json();
   }
 
   async function saveNow() {
+    if (saving) await saving;  // 前の保存が終わってから（同じ版を2回送って自分の保存とぶつからないように）
     if (!dirty) return;
     dirty = false;
-    const body = { values: values() };
+    const body = { values: values(), version: currentVersion() };
     setStatus("保存中…");
     saving = (async () => {
       try {
         await postJson(root.dataset.draftUrl, body);
+        body.version = currentVersion();  // 保存で版が進んだので、プレビューには新しい版を送る
         const summary = await postJson(root.dataset.previewUrl, body);
         if (summary) applySummary(summary);
         setStatus("保存しました");
@@ -288,11 +304,24 @@
 
   // 画面を離れる前に保存（確定・AIボタンの送信は値をフォームで送るので不要）
   let submitting = false;
-  form.addEventListener("submit", () => { submitting = true; clearTimeout(timer); });
+  let waited = false;
+  form.addEventListener("submit", (event) => {
+    if (saving && !waited) {
+      // 途中保存の応答を待ってから送る（新しい版を送らないと、自分の保存を「別の画面の変更」と取り違える）
+      event.preventDefault();
+      const submitter = event.submitter;
+      waited = true;
+      saving.finally(() => (submitter ? form.requestSubmit(submitter) : form.requestSubmit()));
+      return;
+    }
+    waited = false;
+    submitting = true;
+    clearTimeout(timer);
+  });
   window.addEventListener("beforeunload", () => {
     if (submitting || !dirty) return;
     try {
-      const blob = new Blob([JSON.stringify({ values: values() })], { type: "application/json" });
+      const blob = new Blob([JSON.stringify({ values: values(), version: currentVersion() })], { type: "application/json" });
       navigator.sendBeacon(root.dataset.draftUrl, blob);
     } catch (e) { /* 送れなくても次回の入力で保存される */ }
   });

@@ -288,9 +288,49 @@ def _m5_purge_scope(conn: sqlite3.Connection) -> None:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
 
 
+_AI_ITEMS_COLUMNS = ("id, template_id, stage_id, row_key, template_version_id, source_hash, context_hash, "
+                     "segments_hash, cache_key, status, result_json, checks_json, override, attempts, error, job_id, "
+                     "updated_at, import_id")
+
+
+def _m6_ai_items_per_import(conn: sqlite3.Connection) -> None:
+    """ai_items を「取り込み × 段 × 行」で一意にする（表を作り直す。SQLite は UNIQUE を外せないため）。
+
+    (設定, 段, 行) で一意だと、同じ設定・同じ行の2つ目の取り込みは1つ目の結果を「処理済み」とみなして
+    自分の行を持たず、1つ目をダウンロード（削除）すると2つ目の AI 結果まで消えていた（design.md 3.3）。
+    """
+    _add_column(conn, "ai_items", "import_id", "INTEGER")
+    conn.execute("""CREATE TABLE ai_items_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_id INTEGER NOT NULL,
+        stage_id TEXT NOT NULL,
+        row_key TEXT NOT NULL,
+        template_version_id INTEGER,
+        source_hash TEXT,
+        context_hash TEXT,
+        segments_hash TEXT,
+        cache_key TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        result_json TEXT,
+        checks_json TEXT,
+        override TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        job_id INTEGER,
+        updated_at TEXT NOT NULL,
+        import_id INTEGER,
+        UNIQUE (import_id, template_id, stage_id, row_key)
+    )""")
+    conn.execute(f"INSERT INTO ai_items_new ({_AI_ITEMS_COLUMNS}) SELECT {_AI_ITEMS_COLUMNS} FROM ai_items")
+    conn.execute("DROP TABLE ai_items")
+    conn.execute("ALTER TABLE ai_items_new RENAME TO ai_items")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_items_status ON ai_items(template_id, stage_id, status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_items_import ON ai_items(import_id)")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
-                                                          _m5_purge_scope]
+                                                          _m5_purge_scope, _m6_ai_items_per_import]
 
 
 def migrate(conn: sqlite3.Connection) -> int:

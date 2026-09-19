@@ -25,7 +25,7 @@
 {% call ui.card() %}
 <form method="post" action="{{ url_for('forms.upload') }}" enctype="multipart/form-data" class="stack">
   {{ ui.file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
-                  hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて選ぶと1件ずつ確認します", multiple=True) }}
+                  hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて選ぶと1件ずつ確認します（" ~ max_files ~ "ファイル・合計" ~ max_mb ~ "MBまで）", multiple=True) }}
   <div class="form-actions">
     <button type="submit" class="btn primary">ファイルを選んで次へ</button>
   </div>

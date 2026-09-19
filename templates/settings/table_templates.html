@@ -15,7 +15,7 @@
   {% if templates %}
   <div class="table-wrap">
     <table class="table">
-      <thead><tr><th>設定名</th><th class="num">確定した取り込み（件）</th><th>更新日時</th><th class="actions">操作</th></tr></thead>
+      <thead><tr><th>設定名</th><th class="num">ダウンロード待ちの取り込み（件）</th><th>更新日時</th><th class="actions">操作</th></tr></thead>
       <tbody>
         {% for t in templates %}
         <tr>
@@ -26,7 +26,7 @@
             <a class="btn small" href="{{ url_for('tables.template_edit', template_id=t.id) }}">編集</a>
             {% if t.version %}<a class="btn small" href="{{ url_for('settings.export_table_template', template_id=t.id) }}">JSONで書き出す</a>{% endif %}
             {{ ui.confirm_delete_form(url_for('tables.delete_template', template_id=t.id),
-                 "取り込み設定「%s」を削除します。元に戻せません。\nダウンロード済みのMarkdownは手元に残ります。" % t.name) }}
+                 "取り込み設定「%s」を削除します。元に戻せません。\nまだダウンロードしていない取り込みがあるときは削除できません。" % t.name) }}
           </td>
         </tr>
         {% endfor %}

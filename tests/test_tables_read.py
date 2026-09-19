@@ -830,3 +830,212 @@ def test_sample_excel_streaming_reader_matches_normal_mode():
         assert src.sheets() == infos
         for info in infos:
             assert list(src.rows(info.name)) == expected[info.name], (name, info.name)
+
+
+# ---- 行の分類: 集計の語・注記・縦結合のキー（R1） ----
+
+def _auto_records(source, sheet, layout):
+    from tables.normalize import read_records
+    from tables.spec import spec_from_suggestions
+
+    suggestions = suggest_columns(layout.headers, sample_data_rows(source, sheet, layout))
+    spec = spec_from_suggestions("テスト", layout, suggestions, {})
+    records, _issues, stats = read_records(source, {"sheet": sheet}, layout, spec)
+    return records, stats
+
+
+def test_values_ending_in_kei_are_not_subtotals(tmp_path):
+    """「設計」「会計」の部署や、文の中の「合計」は小計・合計の行にしない（語全体が集計の語のときだけ）。"""
+    depts = ["設計", "製造", "品証", "会計"]
+    lines = ["部署,日付,工数(h)"] + [f"{depts[i % 4]},2026/04/{i % 28 + 1:02d},{i % 7 + 1}" for i in range(40)]
+    path = _write(tmp_path / "dept.csv", "\r\n".join(lines) + "\r\n", "cp932")
+    src = CsvSource(path, "dept.csv")
+    layout = guess_layout(src, "dept.csv")
+    assert layout.data_end == 41 and layout.counts == {"data": 40}
+    records, stats = _auto_records(src, "dept.csv", layout)
+    assert len(records) == 40 and not stats.excluded
+
+    # 日付などのキー列が空の「ブロック計」の行は、これまでどおり小計
+    path = _write(tmp_path / "dept2.csv", "\r\n".join(lines + ["ブロック計,,160"]) + "\r\n", "cp932")
+    src = CsvSource(path, "dept2.csv")
+    layout = guess_layout(src, "dept2.csv")
+    assert layout.counts == {"data": 40, "subtotal": 1}
+
+    lines = ["管理No,発生日,設備,内容"]
+    for i in range(1, 101):
+        text = "合計カウンタ不良" if i == 40 else "搬送停止"
+        lines.append(f"T{i:03d},2026/04/{i % 28 + 1:02d},CMP-101,{text}")
+    path = _write(tmp_path / "total.csv", "\r\n".join(lines) + "\r\n", "cp932")
+    src = CsvSource(path, "total.csv")
+    layout = guess_layout(src, "total.csv")
+    assert layout.data_end == 101 and layout.counts == {"data": 100}
+
+    # 本物の集計の行はこれまでどおり: 「A部署 計」「4月計」「合計件数」
+    lines = ["部署,日付,工数(h)", "設計,2026/04/01,3", "A部署 計,,3", "会計,2026/04/02,2", "4月計,,5", "合計件数,2,"]
+    path = _write(tmp_path / "agg.csv", "\r\n".join(lines) + "\r\n", "cp932")
+    src = CsvSource(path, "agg.csv")
+    kinds = {rc.index: (rc.kind, rc.reason) for rc in guess_layout(src, "agg.csv").row_classes}
+    assert kinds[2][0] == "data" and kinds[4][0] == "data"
+    assert kinds[3] == ("subtotal", "小計") and kinds[5] == ("subtotal", "小計") and kinds[6] == ("subtotal", "合計")
+
+
+def _log_book(path: Path, extra: dict[int, str]) -> Path:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "一覧"
+    for c, h in enumerate(["管理No", "発生日", "設備", "現象", "対応内容"], start=1):
+        ws.cell(1, c, h)
+    r = 2
+    for i in range(1, 41):
+        ws.cell(r, 1, f"T{i:03d}")
+        ws.cell(r, 2, datetime(2026, 4, i % 28 + 1))
+        ws.cell(r, 3, "CMP-101")
+        ws.cell(r, 4, "停止")
+        ws.cell(r, 5, "点検した")
+        r += 1
+        if i in extra:
+            ws.cell(r, 5, extra[i])
+            r += 1
+    wb.save(path)
+    return path
+
+
+def test_mark_rows_in_text_column_are_continuations(tmp_path):
+    """文章の列だけに「●…」「※…」とある行は注記・表題ではなく前の記録の続き（表を途中で終わらせない）。"""
+    path = _log_book(tmp_path / "cont.xlsx", {10: "●再発防止としてセンサ追加", 20: "※部品は後日交換予定"})
+    src = ExcelSource(path)
+    layout = guess_layout(src, "一覧")
+    assert layout.data_end == 43
+    records, stats = _auto_records(src, "一覧", layout)
+    assert len(records) == 40 and not stats.excluded
+    texts = {r.values.get("record_no") or r.key: "".join(str(v) for v in r.values.values()) for r in records}
+    assert any("●再発防止としてセンサ追加" in t for t in texts.values())
+    assert any("※部品は後日交換予定" in t for t in texts.values())
+
+    # 範囲を手で決めても同じ（注記として捨てない）
+    manual = guess_layout(src, "一覧", header_rows=[1], data_end=43)
+    records, stats = _auto_records(src, "一覧", manual)
+    assert len(records) == 40 and "注記" not in stats.excluded
+    assert any("※部品は後日交換予定" in "".join(str(v) for v in r.values.values()) for r in records)
+
+    # 左端の列の「※」はこれまでどおり注記（表の終わり）
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["管理No", "発生日", "設備", "現象", "対応内容"])
+    for i in range(1, 11):
+        ws.append([f"T{i:03d}", datetime(2026, 4, i), "CMP-101", "停止", "点検した"])
+    ws.append(["※金額は税抜"])
+    wb.save(tmp_path / "note.xlsx")
+    layout = guess_layout(ExcelSource(tmp_path / "note.xlsx"), ws.title)
+    assert layout.data_end == 11 and {rc.index: rc.kind for rc in layout.row_classes}[12] == "note"
+
+
+def test_vertically_merged_keys_make_one_record(tmp_path):
+    """管理No・日付・設備を縦に結合して対応内容を複数行に書いた表は、1件の記録にまとめる。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "一覧"
+    for c, h in enumerate(["管理No", "発生日", "設備", "対応内容"], start=1):
+        ws.cell(1, c, h)
+    r = 2
+    for t in range(10):
+        ws.cell(r, 1, f"T{t:03d}")
+        ws.cell(r, 2, datetime(2026, 4, t + 1))
+        ws.cell(r, 3, "CMP-101")
+        for k in range(3):
+            ws.cell(r + k, 4, f"{k + 1}行目の対応")
+        for c in (1, 2, 3):
+            ws.merge_cells(start_row=r, start_column=c, end_row=r + 2, end_column=c)
+        r += 3
+    wb.save(tmp_path / "merged.xlsx")
+    src = ExcelSource(tmp_path / "merged.xlsx")
+    layout = guess_layout(src, "一覧")
+    assert layout.data_end == 31
+    records, stats = _auto_records(src, "一覧", layout)
+    assert len(records) == 10 and stats.continuation_merged == 20
+    assert all("#" not in r.key for r in records)
+    joined = "".join(str(v) for v in records[0].values.values())
+    assert "1行目の対応" in joined and "3行目の対応" in joined
+
+
+# ---- CSV の壊れ方（R1） ----
+
+def test_unclosed_quote_is_reported_as_an_error(tmp_path):
+    """" の閉じ忘れで以降の行が1つの値になったら、黙って件数を減らさず、確定を止めるエラーにする。"""
+    from tables.checks import has_blocking, run_checks
+
+    lines = ["管理No,設備名,現象", "T0001,搬送機,停止", 'T0002,"研磨機,異音']
+    lines += [f"T{i:04d},搬送機,停止" for i in range(3, 5003)]
+    path = _write(tmp_path / "q.csv", "\r\n".join(lines) + "\r\n", "cp932")
+    src = open_source(path, "q.csv")
+    rows = list(src.rows())
+    assert len(rows) == 3 and src.unclosed_quote_row == 3
+
+    layout = guess_layout(src, "q.csv")
+    records, stats = _auto_records(src, "q.csv", layout)
+    assert stats.unclosed_quote_row == 3
+    from tables.spec import spec_from_suggestions
+
+    spec = spec_from_suggestions("テスト", layout, suggest_columns(layout.headers, sample_data_rows(src, "q.csv", layout)), {})
+    issues = run_checks(records, spec, stats)
+    assert has_blocking(issues) and any(i.code == "unclosed_quote" and "3行目" in i.message for i in issues)
+
+    # 正しく閉じた複数行の値は問題にしない
+    ok = _write(tmp_path / "ok.csv", '管理No,内容\r\nT1,"1行目\r\n2行目"\r\nT2,停止\r\nT3,"最後\r\nの行"\r\n', "cp932")
+    src = open_source(ok, "ok.csv")
+    assert len(list(src.rows())) == 4 and src.unclosed_quote_row is None
+
+
+def test_csv_field_limit_error_becomes_upload_error(tmp_path):
+    """1つの値が大きすぎて csv モジュールが読めないときは、500 ではなく案内付きの UploadError にする。"""
+    import csv
+
+    lines = ["管理No,設備名,現象", 'T0002,"研磨機,異音'] + [f"T{i:04d},搬送機,停止" for i in range(3, 200)]
+    path = _write(tmp_path / "big.csv", "\r\n".join(lines) + "\r\n", "cp932")
+    src = open_source(path, "big.csv")
+    old = csv.field_size_limit(1000)
+    try:
+        with pytest.raises(UploadError, match="閉じていない"):
+            list(src.rows())
+    finally:
+        csv.field_size_limit(old)
+
+
+def test_excel_or_binary_named_csv_is_rejected(tmp_path):
+    """拡張子が .csv でも中身が Excel・バイナリなら、文字コードの問題ではなくその旨を出す。"""
+    wb = Workbook()
+    wb.active.append(["管理No", "内容"])
+    wb.save(tmp_path / "x.csv")
+    with pytest.raises(UploadError, match="中身はExcelファイル"):
+        open_source(tmp_path / "x.csv", "x.csv")
+    (tmp_path / "b.txt").write_bytes(bytes(range(0, 32)) * 64)
+    with pytest.raises(UploadError, match="テキストのCSVではありません"):
+        open_source(tmp_path / "b.txt", "b.txt")
+    # BOMなしの UTF-16 はバイナリ扱いしない
+    u16 = tmp_path / "u16.csv"
+    u16.write_bytes("管理No,内容\r\nT1,停止\r\nT2,異音\r\n".encode("utf-16-le"))
+    assert open_source(u16, "u16.csv").encoding == "utf-16-le"
+
+
+def test_damaged_sheet_part_is_an_upload_error_not_zero_cells(tmp_path):
+    """シートの圧縮データが壊れていたら、セル数の目安を 0 にせず「壊れている」と伝える。"""
+    import zipfile as _zip
+
+    from tables.excel_source import estimate_cell_count
+
+    wb = Workbook()
+    for r in range(1, 200):
+        wb.active.append([f"管理No{r}", r, "対応内容の長い文章" * 5])
+    path = tmp_path / "ok.xlsx"
+    wb.save(path)
+    data = bytearray(path.read_bytes())
+    with _zip.ZipFile(path) as zf:
+        info = zf.getinfo("xl/worksheets/sheet1.xml")
+    start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+    for i in range(start, start + min(info.compress_size, 64)):
+        data[i] ^= 0xFF
+    broken = tmp_path / "broken.xlsx"
+    broken.write_bytes(bytes(data))
+    assert estimate_cell_count(path) > 0
+    with pytest.raises(UploadError, match="壊れている"):
+        estimate_cell_count(broken)

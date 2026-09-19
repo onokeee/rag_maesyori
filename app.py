@@ -119,6 +119,23 @@ def create_app(overrides: dict | None = None) -> Flask:
                                  "ホームからやり直してください"), 404
         return render_template("errors/404.html"), 404
 
+    @app.errorhandler(413)
+    def _too_large(_exc):
+        # MAX_CONTENT_LENGTH を超えた送信。Werkzeug の英語の画面を出さない（design.md 2: エラー画面は日本語）
+        limit = app.config.get("MAX_CONTENT_LENGTH") or 0
+        text = f"{limit / 1024 / 1024:.0f}MB" if limit >= 1024 * 1024 else f"{limit / 1024:.0f}KB"
+        if request.accept_mimetypes.best == "application/json" or request.is_json:
+            return jsonify(error=f"送った内容が大きすぎます（1回に合計 {text} まで）。分けて送ってください"), 413
+        return render_template("errors/413.html", limit=text), 413
+
+    @app.errorhandler(400)
+    @app.errorhandler(405)
+    def _bad_request(exc):
+        # 送信専用の URL をアドレス欄から開いた（405）など。Werkzeug の英語の画面を出さない（design.md 2）
+        if request.accept_mimetypes.best == "application/json" or request.is_json:
+            return jsonify(error="この操作は受け付けられませんでした。ホームから開き直してください"), exc.code
+        return render_template("errors/400.html"), exc.code
+
     @app.errorhandler(500)
     def _server_error(_exc):
         return render_template("errors/500.html"), 500
@@ -141,6 +158,7 @@ def _cleanup_leftovers(app: Flask) -> None:
     データを残さない方針（design.md 3.3）でも、削除の途中で落ちたときやファイルを掴まれていたときに
     残ることがあるので、ここで片付ける。作業中のものは DB に行があるので消さない。
     """
+    from core import purge
     from core.files import remove_orphan_import_dirs, remove_orphan_uploads
     from models.database import get_db
 
@@ -155,6 +173,9 @@ def _cleanup_leftovers(app: Flask) -> None:
             removed = remove_orphan_uploads(app.config["UPLOAD_DIR"], known)
             import_ids = {row[0] for row in db.execute("SELECT id FROM table_imports")}
             removed_dirs = remove_orphan_import_dirs(app.config["TABLES_DIR"], import_ids)
+            # もう無い取り込みの AI整形の結果と、どこからも使われない AI の応答も消す（データを残さない）。
+            # ai_items が先に消えていて（取り込み設定の削除など）応答だけ残っていることもあるので、毎回見る。
+            purge.sweep_orphan_ai(db)
         if removed:
             print(f"[app] 参照されていないアップロードファイルを {removed} 件片付けました")
         if removed_dirs:

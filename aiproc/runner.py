@@ -27,7 +27,7 @@ from flask import current_app
 from aiproc import cache, custom, items, prompts
 from aiproc.common import (DEFAULT_LIMITS, DEFAULT_RUN_IF, DEFAULT_SUMMARY_TOKENS, nfkc, sget)
 from aiproc.verify import VerifyReport, verify_log_result
-from core.jobs import JobError
+from core.jobs import JobCancelled, JobError
 from core.mdtext import estimate_tokens
 from logproc import PeopleIndex, SplitOptions, mask_text, parse_log, render_timeline, review_notes
 from models import database
@@ -485,6 +485,32 @@ def _one_call(work: StageWork, messages, key: str, settings: dict, mode: str, st
     return res.text, res.finish_reason
 
 
+def _repair_request(work: StageWork, text: str, problems: list, settings: dict, mode: str) -> tuple[list, str]:
+    """再依頼のメッセージとキャッシュキー。"""
+    r_messages = prompts.build_repair_messages(work.messages, text, problems)
+    return r_messages, cache.cache_key(r_messages, settings.get("model", ""), settings.get("params") or {},
+                                       work.schema if mode == "json_schema" else None, mode)
+
+
+def cached_usable(work: StageWork, settings: dict, mode: str, key: str | None = None) -> bool:
+    """キャッシュだけで AI を呼ばずに済むか（見積もり用）。execute_work と同じ判断をする：
+    キャッシュが無い・再依頼が要るのに再依頼の応答が無い・キャッシュの応答がエラー（壊れたJSON・打ち切り。
+    実行時は聞き直す）なら False。"""
+    hit = cache.get(key or work.key)
+    if hit is None:
+        return False
+    text, finish = hit.get("raw_text") or "", hit.get("finish_reason")
+    status, _, _, problems, _ = _evaluate(work, text, finish)
+    if problems:
+        r_hit = cache.get(_repair_request(work, text, problems, settings, mode)[1])
+        if r_hit is None:
+            return False
+        r_status = _evaluate(work, r_hit.get("raw_text") or "", r_hit.get("finish_reason"))[0]
+        if not (r_status == "error" and status != "error"):
+            status = r_status
+    return status != "error"
+
+
 def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threading.Event | None = None,
                  use_cache: bool = True, repair: bool = True) -> Outcome:
     """1行×段を処理する（キャッシュ→呼び出し→照合→1回だけ再依頼）。app_context 内で呼ぶ。"""
@@ -496,9 +522,10 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
         out.raw_text = text
         status, result, checks, problems, _ = _evaluate(work, text, finish)
         if problems and repair:
-            r_messages = prompts.build_repair_messages(work.messages, text, problems)
-            r_key = cache.cache_key(r_messages, settings.get("model", ""), settings.get("params") or {},
-                                    work.schema if mode == "json_schema" else None, mode)
+            # 一時停止・中止を頼まれていたら再依頼を送らない（1回目の応答は保存済みなので、再開時は再依頼から）
+            if stop_event is not None and stop_event.is_set():
+                raise _Stopped()
+            r_messages, r_key = _repair_request(work, text, problems, settings, mode)
             r_tokens = int(work.max_tokens * 1.5) if (finish == "length" and work.max_tokens) else work.max_tokens
             r_text, r_finish = _one_call(work, r_messages, r_key, settings, mode, stop_event, out, r_tokens, use_cache)
             out.attempts = 2
@@ -514,6 +541,10 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
             msgs = [i.get("message") for i in (checks or {}).get("issues", []) if i.get("level") == "fatal"]
             out.error = msgs[0] if msgs else "AIの応答を使えませんでした。"
         out.cached = out.calls == 0
+        if status == "error" and out.cached and use_cache:
+            # キャッシュの応答だけでエラーになった（壊れたJSON・打ち切り）。同じ応答を再生しても直らないので
+            # 聞き直す（「エラーだけ再実行」で直せるように）。再依頼で直った応答はこれまでどおり使い回す
+            return execute_work(work, settings, mode, stop_event, use_cache=False, repair=repair)
     except _Stopped:
         out.stopped = True
     except llm.LLMCallError as e:
@@ -573,7 +604,7 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
     template_id = data.template_id or 0
     existing = {}
     for sid in {w.stage_id for w in works}:
-        existing[sid] = items.items_by_key(template_id, sid)
+        existing[sid] = items.items_by_key(template_id, sid, import_id=import_id)   # 取り込みごと（design.md 3.3）
 
     job_id = getattr(ctx, "job_id", None)
     stats = {"total": 0, "done": 0, "ok": 0, "flagged": 0, "error": 0, "rule_only": 0, "skipped": 0,
@@ -621,6 +652,10 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
         inflight = {}
         try:
             while queue or inflight:
+                if _import_gone(conn, import_id):
+                    # ダウンロード・削除で取り込みが消えた: 新しい呼び出しを出さず、結果も書かない（design.md 3.3）
+                    stop_event.set()
+                    raise JobCancelled()
                 stopping = fatal is not None or ctx.should_stop()
                 if stopping:
                     stop_event.set()
@@ -661,6 +696,10 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
         return _summary(stats, settings, mode)
     finally:
         conn.close()
+
+
+def _import_gone(conn, import_id: int) -> bool:
+    return conn.execute("SELECT 1 FROM table_imports WHERE id = ?", (import_id,)).fetchone() is None
 
 
 def _detect_mode(ctx, settings: dict, stop_event: threading.Event) -> str:

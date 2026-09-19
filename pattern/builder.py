@@ -16,7 +16,7 @@ from excel.text import (MAX_LABEL_LENGTH, cell_text, normalize_label, normalize_
                         split_label_unit, to_date, value_unit)
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
 from pattern.dictionary import (BY_FIELD_NAME, COMBINED_EQUIPMENT_NORMS, COMBINED_EQUIPMENT_PARTS,
-                                DICTIONARY_NORMS, LOOKUP)
+                                DICTIONARY_NORMS, LOOKUP, is_person_field)
 from pattern.forms import pattern_to_rows
 from pattern.model import DEFAULT_TITLE_KEYS, FieldDef, PatternDef
 
@@ -207,8 +207,10 @@ def _label_candidates(grid: SheetGrid) -> dict[str, _Suggestion]:
         found.append((cell, _make_suggestion(cell.norm, label_text, values[0].value, cell), values))
         found.extend((cell, part, values) for part in _equipment_parts(cell.norm, label_text, values[0].text, cell))
 
-    # 辞書ラベルの「値」として使われたセルは、ラベル候補から外す
-    value_cells = {(v.row, v.col) for _, sug, values in found if sug.synonyms for v in values}
+    # 辞書ラベルの「値」として使われたセルは、ラベル候補から外す。人名の欄（作成・確認・承認）の値も同じ:
+    # 押印欄の「斎藤」を見出しにすると、人名の項目を省いても見出しと値（隣の人名）が Markdown に出てしまう
+    value_cells = {(v.row, v.col) for _, sug, values in found
+                   if sug.synonyms or is_person_field(sug.field_name or "", sug.display_name) for v in values}
     result: dict[str, _Suggestion] = {}
     for cell, sug, _ in found:
         if not sug.synonyms and (cell.row, cell.col) in value_cells:

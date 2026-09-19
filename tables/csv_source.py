@@ -26,6 +26,12 @@ REPLACEMENT_CHAR = "〓"
 _CHUNK = 1024 * 1024
 _EXCEL_WRAPPED = re.compile(r'^="(.*)"$', re.S)
 _TRAILER_WORDS = re.compile(r"(合計|総計|件数|END|EOF|以上)", re.I)
+# 1つの値がこれより多くの物理行にまたがるなら、" の閉じ忘れとみなす（セルの中の改行としては多すぎる）
+MAX_RECORD_LINES = 500
+# 列数の上限。見出しごとに辞書を引くので、列が桁違いに多いと画面の処理が何秒も止まる（一覧表は多くても数百列）
+MAX_COLUMNS = 2000
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_ZIP_MAGIC = b"PK\x03\x04"
 
 csv.field_size_limit(16 * 1024 * 1024)
 
@@ -52,6 +58,7 @@ class CsvSniff:
     confidence: float
     warnings: list[str] = field(default_factory=list)
     decode_error_line: int | None = None  # 全件デコードで失敗した物理行（おおよそ）
+    max_columns: int = 0  # 先頭のレコードで最も多い列数（末尾の空列を除く）
 
 
 def sniff_csv(path) -> CsvSniff:
@@ -88,6 +95,7 @@ def sniff_csv(path) -> CsvSniff:
         confidence=confidence,
         warnings=warnings,
         decode_error_line=error_line,
+        max_columns=max((_width(r) for r in records), default=0),
     )
 
 
@@ -116,15 +124,35 @@ def _detect_encoding(path: Path, head: bytes) -> tuple[str, bool, int | None]:
             return "utf-16-be", False, _full_decode_error_line(path, "utf-16-be")
 
     best: tuple[int, str, int] | None = None  # (失敗位置, 文字コード, 行)
+    cp932_line: int | None = None
     for enc in ("utf-8", "cp932", "shift_jis_2004"):
         err = _full_decode_error(path, enc)
         if err is None:
+            if enc == "shift_jis_2004" and cp932_line is not None and _has_cp932_only_chars(path):
+                # CP932 の拡張文字（髙・﨑 など）を含むファイルに読めないバイトが混じっただけ。
+                # Shift_JIS-2004 で読むと 髙→郄 のように別の字に化けるので、CP932 のまま読めない行を知らせる
+                return "cp932", False, cp932_line
             return enc, False, None
         pos, line = err
+        if enc == "cp932":
+            cp932_line = line
         if best is None or pos > best[0]:
             best = (pos, enc, line)
     assert best is not None
     return best[1], False, best[2]
+
+
+def _has_cp932_only_chars(path: Path) -> bool:
+    """CP932 として正しく読めて、Shift_JIS-2004 だと別の字になる行があるか（NEC・IBM 拡張文字など）。"""
+    with path.open("rb") as f:
+        for raw in f:
+            try:
+                text = raw.decode("cp932")
+            except UnicodeDecodeError:
+                continue
+            if text != raw.decode("shift_jis_2004", errors="replace"):
+                return True
+    return False
 
 
 def _full_decode_error(path: Path, encoding: str) -> tuple[int, int] | None:
@@ -283,11 +311,19 @@ class CsvSource:
             self.sniff = sniff_csv(self.path)
         self.encoding: str = options.get("encoding") or self.sniff.encoding
         self.delimiter: str = options.get("delimiter") or self.sniff.delimiter
+        if self.sniff is not None and self.sniff.max_columns > MAX_COLUMNS:
+            raise UploadError(f"列数が上限（{MAX_COLUMNS:,}列）を超えています（{self.sniff.max_columns:,}列）。"
+                              "不要な列を削除して保存し直してください")
         if not isinstance(self.delimiter, str) or len(self.delimiter) != 1:
             raise UploadError("区切り文字は1文字で選んでください")
+        _reject_binary(self.path)
         errors = str(options.get("errors") or "strict")
         self.replace_errors = errors.startswith("replace")
         self.replaced_rows: list[int] = []  # 〓に置き換えたレコード番号（直近の rows() 走査分）
+        # " が閉じていないため、以降の行を1つの値として読んだレコード番号（直近の rows() 走査分）
+        self.unclosed_quote_row: int | None = None
+        # " は閉じているが、1つの値が MAX_RECORD_LINES 行より多くにまたがるレコード番号（閉じ忘れの疑い）
+        self.long_record_row: int | None = None
         self._stats: tuple[int, int] | None = None
 
     @property
@@ -309,16 +345,30 @@ class CsvSource:
     def rows(self, sheet: str | None = None, start: int = 1, limit: int | None = None) -> Iterator[SourceRow]:
         errors = "tables_geta" if self.replace_errors else "strict"
         self.replaced_rows = []
+        self.unclosed_quote_row = None
+        self.long_record_row = None
         index = 0
         emitted = 0
+        state = {"eof": False}
+
+        def physical_lines(f):
+            for line in f:
+                yield line.replace("\x00", "")
+            state["eof"] = True  # レコードの途中でファイルが終わった（" が閉じていない）ときだけ、ここまで読まれる
+
         try:
             with self.path.open("r", encoding=self.encoding, errors=errors, newline="") as f:
-                lines = (line.replace("\x00", "") for line in f)
-                reader = csv.reader(lines, delimiter=self.delimiter, strict=False)
+                reader = csv.reader(physical_lines(f), delimiter=self.delimiter, strict=False)
+                line_before = 0
                 for record in reader:
                     index += 1
                     if self.replace_errors and any(REPLACEMENT_CHAR in v for v in record):
                         self.replaced_rows.append(index)
+                    if self.unclosed_quote_row is None and state["eof"]:
+                        self.unclosed_quote_row = index
+                    elif self.long_record_row is None and reader.line_num - line_before > MAX_RECORD_LINES:
+                        self.long_record_row = index
+                    line_before = reader.line_num
                     if index < start:
                         continue
                     if limit is not None and emitted >= limit:
@@ -327,12 +377,38 @@ class CsvSource:
                     yield SourceRow(index=index, cells=[_csv_cell(v) for v in record], hidden=None)
         except LookupError as e:
             raise UploadError(f"文字コード {self.encoding} は使えません。文字コードを選び直してください") from e
+        except csv.Error as e:
+            # 「field larger than field limit」など。" の閉じ忘れで残りのファイル全体が1つの値になったときに起きる
+            raise UploadError(
+                f"{index + 1}行目付近から、\" が閉じていないなどの理由で CSV として読めません（{e}）。ファイルを確認してください"
+            ) from e
         except UnicodeError as e:
             # UTF-16 の「BOM が無い」などは UnicodeDecodeError ではなく UnicodeError で上がる
             raise UploadError(
                 f"{index + 1}行目付近で、文字コード {self.encoding} として読めない文字がありました。"
                 f"文字コードを選び直すか、「読めない文字を{REPLACEMENT_CHAR}に置き換える」を選んでください"
             ) from e
+
+
+def _reject_binary(path: Path) -> None:
+    """拡張子が .csv / .txt / .tsv でも、中身が Excel やバイナリなら読む前に止める（文字コードの問題に見せない）。"""
+    try:
+        with path.open("rb") as f:
+            head = f.read(4096)
+    except OSError:
+        return
+    if head.startswith(_ZIP_MAGIC) or head.startswith(_OLE_MAGIC):
+        raise UploadError("中身はExcelファイルです。拡張子を .xlsx にして選び直してください")
+    if head.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return
+    if len(head) >= 4:
+        even_nul = head[0::2].count(0) / max(1, len(head[0::2]))
+        odd_nul = head[1::2].count(0) / max(1, len(head[1::2]))
+        if (odd_nul > 0.3 and even_nul < 0.05) or (even_nul > 0.3 and odd_nul < 0.05):
+            return  # BOMなしの UTF-16
+    control = sum(1 for b in head if b < 0x20 and b not in (0x09, 0x0A, 0x0D))
+    if head and control > 0.1 * len(head):
+        raise UploadError("テキストのCSVではありません（中身がバイナリです）。CSV・TSV・テキストのファイルを選んでください")
 
 
 def _csv_cell(raw: str) -> CellInfo:

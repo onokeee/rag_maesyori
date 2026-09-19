@@ -62,15 +62,29 @@ def _decode(row) -> dict | None:
     return item
 
 
-def get_item(template_id: int, stage_id: str, row_key: str, conn=None) -> dict | None:
+def _import_filter(import_id) -> tuple[str, list]:
+    """取り込みで絞る条件。import_id を渡さなければ絞らない（設定全体。取り込みが1つだけのときの互換）。
+
+    ai_items は取り込みごとに持つ（design.md 3.3）。取り込みを渡さないと、同じ設定・同じ行キーの
+    別の取り込みの結果が混ざるので、画面・ジョブ・md 作成からは必ず import_id を渡す。
+    """
+    return (" AND import_id = ?", [import_id]) if import_id is not None else ("", [])
+
+
+def get_item(template_id: int, stage_id: str, row_key: str, conn=None, *, import_id: int | None = None) -> dict | None:
+    cond, args = _import_filter(import_id)
     return _run(conn, lambda c: _decode(c.execute(
-        "SELECT * FROM ai_items WHERE template_id = ? AND stage_id = ? AND row_key = ?",
-        (template_id, stage_id, row_key)).fetchone()))
+        "SELECT * FROM ai_items WHERE template_id = ? AND stage_id = ? AND row_key = ?" + cond
+        + " ORDER BY updated_at DESC, id DESC",
+        (template_id, stage_id, row_key, *args)).fetchone()))
 
 
-def items_by_key(template_id: int, stage_id: str, conn=None) -> dict[str, dict]:
+def items_by_key(template_id: int, stage_id: str, conn=None, *, import_id: int | None = None) -> dict[str, dict]:
+    cond, args = _import_filter(import_id)
+
     def run(c):
-        rows = c.execute("SELECT * FROM ai_items WHERE template_id = ? AND stage_id = ?", (template_id, stage_id))
+        rows = c.execute("SELECT * FROM ai_items WHERE template_id = ? AND stage_id = ?" + cond
+                         + " ORDER BY updated_at, id", (template_id, stage_id, *args))
         return {r["row_key"]: _decode(r) for r in rows}
     return _run(conn, run)
 
@@ -82,32 +96,36 @@ def upsert_item(template_id: int, stage_id: str, row_key: str, *, status: str, t
                 import_id: int | None = None, conn=None, commit: bool = True) -> None:
     """行×段の状態を保存する。override（人の判断）は変えない。
 
-    import_id は「どの取り込みの分か」。ダウンロードのときに、その取り込みの分だけを消すために持つ
-    （design.md 3.3。同じ設定で作業中の別の取り込みの結果を巻き添えにしない）。
+    import_id は「どの取り込みの分か」。行は (取り込み, 設定, 段, 行) で1つ。ダウンロードのときに
+    その取り込みの分だけを消すために持つ（design.md 3.3。同じ設定で作業中の別の取り込みの結果を巻き添えにしない）。
     """
     if status not in STATUSES:
         raise ValueError(f"不明な状態です: {status}")
 
+    result_json = json.dumps(result, ensure_ascii=False) if result is not None else None
+    checks_json = json.dumps(checks, ensure_ascii=False) if checks is not None else None
+
     def run(c):
-        c.execute(
-            """INSERT INTO ai_items (template_id, stage_id, row_key, template_version_id, source_hash, context_hash,
-                   segments_hash, cache_key, status, result_json, checks_json, attempts, error, job_id, import_id,
-                   updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT (template_id, stage_id, row_key) DO UPDATE SET
-                   template_version_id = excluded.template_version_id, source_hash = excluded.source_hash,
-                   context_hash = excluded.context_hash, segments_hash = excluded.segments_hash,
-                   cache_key = excluded.cache_key, status = excluded.status, result_json = excluded.result_json,
-                   checks_json = excluded.checks_json,
-                   attempts = CASE WHEN ? IS NULL THEN ai_items.attempts ELSE excluded.attempts END,
-                   error = excluded.error, job_id = excluded.job_id,
-                   import_id = COALESCE(excluded.import_id, ai_items.import_id),
-                   updated_at = excluded.updated_at""",
-            (template_id, stage_id, row_key, template_version_id, source_hash, context_hash, segments_hash, cache_key,
-             status, json.dumps(result, ensure_ascii=False) if result is not None else None,
-             json.dumps(checks, ensure_ascii=False) if checks is not None else None, attempts or 0, error, job_id,
-             import_id, database.now(), attempts),
-        )
+        now = database.now()
+        # import_id が NULL の行（古いDBの分）も1行にまとめたいので ON CONFLICT ではなく「IS ?」で探して更新する
+        updated = c.execute(
+            """UPDATE ai_items SET template_version_id = ?, source_hash = ?, context_hash = ?, segments_hash = ?,
+                   cache_key = ?, status = ?, result_json = ?, checks_json = ?,
+                   attempts = CASE WHEN ? IS NULL THEN attempts ELSE ? END,
+                   error = ?, job_id = ?, updated_at = ?
+               WHERE template_id = ? AND stage_id = ? AND row_key = ? AND import_id IS ?""",
+            (template_version_id, source_hash, context_hash, segments_hash, cache_key, status, result_json,
+             checks_json, attempts, attempts or 0, error, job_id, now, template_id, stage_id, row_key, import_id),
+        ).rowcount
+        if not updated:
+            c.execute(
+                """INSERT INTO ai_items (template_id, stage_id, row_key, template_version_id, source_hash,
+                       context_hash, segments_hash, cache_key, status, result_json, checks_json, attempts, error,
+                       job_id, import_id, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (template_id, stage_id, row_key, template_version_id, source_hash, context_hash, segments_hash,
+                 cache_key, status, result_json, checks_json, attempts or 0, error, job_id, import_id, now),
+            )
         if commit:
             c.commit()
     _run(conn, run)
@@ -123,11 +141,11 @@ def is_outdated(item: dict | None, template_version_id, source_hash_: str, conte
 
 
 def mark_outdated(template_id: int, stage_id: str, current: dict[str, dict], template_version_id,
-                  conn=None) -> int:
+                  conn=None, *, import_id: int | None = None) -> int:
     """current = {row_key: {source_hash, context_hash, segments_hash}} と比べて古い結果を outdated にする。件数を返す。"""
     def run(c):
         n = 0
-        for key, item in items_by_key(template_id, stage_id, conn=c).items():
+        for key, item in items_by_key(template_id, stage_id, conn=c, import_id=import_id).items():
             h = current.get(key)
             if h is None or item["status"] in ("outdated", "pending"):
                 continue
@@ -141,21 +159,23 @@ def mark_outdated(template_id: int, stage_id: str, current: dict[str, dict], tem
     return _run(conn, run)
 
 
-def counts(template_id: int, stage_id: str | None = None, conn=None) -> dict[str, int]:
-    sql, args = "SELECT status, COUNT(*) AS n FROM ai_items WHERE template_id = ?", [template_id]
+def counts(template_id: int, stage_id: str | None = None, conn=None, *, import_id: int | None = None) -> dict[str, int]:
+    cond, extra = _import_filter(import_id)
+    sql, args = "SELECT status, COUNT(*) AS n FROM ai_items WHERE template_id = ?" + cond, [template_id, *extra]
     if stage_id:
         sql += " AND stage_id = ?"
         args.append(stage_id)
     return _run(conn, lambda c: {r["status"]: r["n"] for r in c.execute(sql + " GROUP BY status", args)})
 
 
-def results_for_render(template_id: int, stage_id: str, conn=None) -> dict[str, dict]:
+def results_for_render(template_id: int, stage_id: str, conn=None, *,
+                       import_id: int | None = None) -> dict[str, dict]:
     """Markdown 描画用：照合に通った結果（ok / flagged）だけを {row_key: accepted} で返す。
 
     override が rule_only / excluded の行、outdated・error の行は含めない（ルール出力に戻す）。
     """
     out = {}
-    for key, item in items_by_key(template_id, stage_id, conn=conn).items():
+    for key, item in items_by_key(template_id, stage_id, conn=conn, import_id=import_id).items():
         if item.get("override") in OVERRIDES or item["status"] not in ("ok", "flagged"):
             continue
         if item.get("result") is not None:

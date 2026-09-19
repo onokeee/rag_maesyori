@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from flask import request, url_for
 
@@ -51,17 +51,35 @@ def set_download_name(response, name: str, default_stem: str):
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 SAME_SITE_FETCH = ("same-origin", "none")
 
+# GET でもデータを消すルート（Markdown をダウンロードすると、その帳票・取り込みを消す。design.md 3.3）。
+# 他サイトのページの <img>・リンク・window.open からでも GET は出せるので、書き込みと同じく発火元を確かめる。
+# アドレス欄に打った URL（Sec-Fetch-Site: none）とアプリ内のクリック（same-origin）は通す。
+PURGING_ENDPOINTS = frozenset({"forms.download_md", "forms.download_batch", "tables.download_zip"})
+
+
+def _origin_of(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+
 
 def is_cross_site_write(req=None) -> bool:
-    """他サイトのページから出された書き込み要求なら True。"""
+    """他サイトのページから出された書き込み要求（データを消すダウンロードを含む）なら True。"""
     req = req if req is not None else request
-    if req.method in SAFE_METHODS:
+    purging = req.endpoint in PURGING_ENDPOINTS
+    if req.method in SAFE_METHODS and not purging:
         return False
     site = (req.headers.get("Sec-Fetch-Site") or "").strip().lower()
     if site and site not in SAME_SITE_FETCH:
         return True
+    host = req.host_url.rstrip("/")
     origin = (req.headers.get("Origin") or "").strip()
-    return bool(origin) and origin.rstrip("/") != req.host_url.rstrip("/")
+    if origin and origin.rstrip("/") != host:
+        return True
+    if purging and not site:
+        # Sec-Fetch-Site を付けない古いブラウザ向け。Referer が別サイトなら断る（無ければ手入力として通す）
+        referer = (req.headers.get("Referer") or "").strip()
+        return bool(referer) and _origin_of(referer) != host
+    return False
 
 
 # ---- DB の読み取り（ホームの一覧用の直接照会。表が無ければ空） ------------

@@ -1,8 +1,13 @@
-"""バックグラウンドジョブ（単一ワーカースレッド＋キュー）。
+"""バックグラウンドジョブ（ワーカースレッド＋キュー。AI整形だけ別の列で動かす）。
 
 - 状態・進捗・一時停止/中止の要求は jobs テーブルに持つ（画面はポーリングで読む）。
 - fn(ctx) は start_job を呼んだアプリの app_context 内で実行する。fn 内で DB を使うときは database.connect()。
 - 実行中は一定間隔で heartbeat_at を更新する。起動時に recover_interrupted() で止まったジョブを「中断」にする。
+  動いている間も、このプロセスが持っていないジョブの heartbeat が古ければ、参照したときに「中断」にする
+  （アプリを閉じてすぐ起動し直したとき、前のプロセスのジョブが「処理中」のまま残らないように）。
+- AI整形（ai_format）は何時間もかかったり一時停止したりするので、読み込み・プレビュー・Markdown作成とは
+  別のワーカーで動かす（止めている間に、ほかの取り込みの作業まで止まらないように）。
+  同じ取り込みのジョブは、列が違っても同時には動かさない（前のジョブが終わるまで待たせる）。
 """
 from __future__ import annotations
 
@@ -34,9 +39,16 @@ STATUS_LABELS = {
     "interrupted": "中断",
 }
 
-_queue: queue.Queue = queue.Queue()
-_worker: threading.Thread | None = None
+# ジョブの種類 → 動かす列（書いていない種類は "main"）
+LANE_OF_KIND = {"ai_format": "ai"}
+
+_queues: dict[str, queue.Queue] = {}
+_workers: dict[str, threading.Thread] = {}
 _worker_lock = threading.Lock()
+# 各列がいま実行している取り込み（ref_type, ref_id）。同じ取り込みのジョブを別の列で同時に動かさないため
+_executing: dict[str, tuple] = {}
+# このプロセスが登録したジョブ（DB のパス, job_id）。これ以外で heartbeat が古いものは持ち主がいない
+_owned: set[tuple[str, int]] = set()
 
 
 class JobCancelled(Exception):
@@ -161,22 +173,57 @@ def start_job(kind: str, ref_type: str, ref_id: int | None, fn: Callable[[JobCon
         job_id = cur.lastrowid
     finally:
         conn.close()
-    _queue.put((app, job_id, fn))
-    _ensure_worker()
+    lane = LANE_OF_KIND.get(kind, "main")
+    ref = (ref_type or "", ref_id) if ref_id is not None else None
+    with _worker_lock:
+        _owned.add((_db_key(), job_id))
+        q = _queues.setdefault(lane, queue.Queue())
+    q.put((app, job_id, fn, ref))
+    _ensure_worker(lane)
     return job_id
 
 
-def _ensure_worker() -> None:
-    global _worker
+def _db_key() -> str:
+    return str(current_app.config["DATABASE"])
+
+
+def _ensure_worker(lane: str) -> None:
     with _worker_lock:
-        if _worker is None or not _worker.is_alive():
-            _worker = threading.Thread(target=_worker_loop, name="job-worker", daemon=True)
-            _worker.start()
+        worker = _workers.get(lane)
+        if worker is None or not worker.is_alive():
+            worker = threading.Thread(target=_worker_loop, args=(lane,), name=f"job-worker-{lane}", daemon=True)
+            _workers[lane] = worker
+            worker.start()
 
 
-def _worker_loop() -> None:
+def _next_item(lane: str, pending: list):
+    """次に実行するものを取り出す。同じ取り込みを別の列が実行中なら、その取り込みの分は後回しにする。
+
+    先頭から見て最初に動けるものを選ぶので、同じ取り込みの後ろのジョブが前のジョブを追い越すことはない。
+    """
+    q = _queues[lane]
     while True:
-        app, job_id, fn = _queue.get()
+        try:
+            while True:
+                pending.append(q.get_nowait())
+        except queue.Empty:
+            pass
+        with _worker_lock:
+            busy = {ref for other, ref in _executing.items() if other != lane and ref is not None}
+            for i, item in enumerate(pending):
+                if item[3] is None or item[3] not in busy:
+                    _executing[lane] = item[3]
+                    return pending.pop(i)
+        try:
+            pending.append(q.get(timeout=PAUSE_POLL if pending else None))
+        except queue.Empty:
+            pass
+
+
+def _worker_loop(lane: str = "main") -> None:
+    pending: list = []
+    while True:
+        app, job_id, fn, _ref = _next_item(lane, pending)
         try:
             _run(app, job_id, fn)
         except Exception:  # ワーカーは止めない
@@ -184,8 +231,30 @@ def _worker_loop() -> None:
                 app.logger.exception("ジョブ %s の実行管理でエラー", job_id)
             except Exception:
                 pass
+            _fail_left_open(app, job_id)
         finally:
-            _queue.task_done()
+            with _worker_lock:
+                _executing.pop(lane, None)
+
+
+def _fail_left_open(app, job_id: int) -> None:
+    """実行管理の途中で落ちた（最後の状態の書き込みが DB のロックで失敗した など）ジョブを「エラー」で閉じる。
+
+    閉じないと「処理中」のまま残り、中止も再実行もできなくなる。ここも失敗したら諦める（ログは残してある）。
+    """
+    try:
+        with app.app_context():
+            conn = database.connect()
+            try:
+                marks = ", ".join("?" for _ in ACTIVE_STATUSES)
+                conn.execute(f"UPDATE jobs SET status = 'failed', pause_requested = 0, message = ?, updated_at = ? "
+                             f"WHERE id = ? AND status IN ({marks})",
+                             (error_message(RuntimeError()), _now(), job_id, *ACTIVE_STATUSES))
+                conn.commit()
+            finally:
+                conn.close()
+    except Exception:
+        pass
 
 
 class _Ticker:
@@ -274,9 +343,35 @@ def _with_conn(fn):
         conn.close()
 
 
+INTERRUPTED_MESSAGE = "アプリの終了などで処理が中断されました。もう一度実行してください"
+
+
+def _reap_orphan(conn, row):
+    """持ち主のいないジョブ（このプロセスが登録しておらず、heartbeat が2分以上古い）を「中断」にして返す。
+
+    起動時の recover_interrupted は2分以上古いものしか直さない（誤って2つ目を起動したときに、動いている
+    1つ目のジョブを中断にしないため）。閉じてすぐ起動し直すと前のジョブが「処理中」のまま残るので、
+    参照したときにもう一度確かめる。
+    """
+    if row is None or row["status"] not in ACTIVE_STATUSES:
+        return row
+    with _worker_lock:
+        if (_db_key(), row["id"]) in _owned:
+            return row
+    cutoff = (datetime.now() - STALE_AFTER).isoformat(timespec="seconds")
+    if (row["heartbeat_at"] or row["updated_at"] or row["created_at"] or "") >= cutoff:
+        return row
+    marks = ", ".join("?" for _ in ACTIVE_STATUSES)
+    conn.execute(f"UPDATE jobs SET status = 'interrupted', pause_requested = 0, message = ?, updated_at = ? "
+                 f"WHERE id = ? AND status IN ({marks})", (INTERRUPTED_MESSAGE, _now(), row["id"], *ACTIVE_STATUSES))
+    conn.commit()
+    return conn.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone()
+
+
 def get_job(job_id: int) -> dict | None:
     """ジョブ1件（params / progress / result / status_label / finished を付けて返す）。"""
-    return _with_conn(lambda c: _decode(c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()))
+    return _with_conn(lambda c: _decode(_reap_orphan(
+        c, c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())))
 
 
 def latest_job(ref_type: str, ref_id: int, kind: str | None = None) -> dict | None:
@@ -284,7 +379,7 @@ def latest_job(ref_type: str, ref_id: int, kind: str | None = None) -> dict | No
     if kind:
         sql += " AND kind = ?"
         args.append(kind)
-    return _with_conn(lambda c: _decode(c.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()))
+    return _with_conn(lambda c: _decode(_reap_orphan(c, c.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone())))
 
 
 def _request(job_id: int, sets: str, statuses=ACTIVE_STATUSES) -> bool:
@@ -319,10 +414,9 @@ def recover_interrupted() -> int:
     def run(conn):
         marks = ", ".join("?" for _ in ACTIVE_STATUSES)
         cur = conn.execute(
-            f"""UPDATE jobs SET status = 'interrupted', pause_requested = 0,
-                    message = 'アプリの終了などで処理が中断されました。もう一度実行してください', updated_at = ?
+            f"""UPDATE jobs SET status = 'interrupted', pause_requested = 0, message = ?, updated_at = ?
                 WHERE status IN ({marks}) AND COALESCE(heartbeat_at, updated_at, created_at) < ?""",
-            (_now(), *ACTIVE_STATUSES, cutoff),
+            (INTERRUPTED_MESSAGE, _now(), *ACTIVE_STATUSES, cutoff),
         )
         conn.commit()
         return cur.rowcount

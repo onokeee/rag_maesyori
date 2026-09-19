@@ -37,7 +37,7 @@ HEADING_IDENTIFIER_TOKENS = 1200
 MAX_LABEL_VALUE_CHARS = 20
 AI_MARK = "（AI入力）"
 
-_ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?: \d{2}:\d{2})?$")  # 時刻付き（発生日時）も
 # 明細表の合計行の先頭（「合計」「小計」「部品費計」）
 _TOTAL_LABEL = re.compile(r"^(?:合計|小計|総計|計|.{1,6}計)$")
 
@@ -76,14 +76,21 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     title_fields = _title_fields(pattern, extraction["fields"], shown)
 
     title_texts = _title_texts(title_fields, heading=False)
+    heading_texts = _title_texts(title_fields, heading=True)
     stem = _one_line(Path(doc["file_name"]).stem)
     if not title_texts:
         title = f"{type_name} {stem}"
-    elif _has_identifier(title_fields):
+    else:
+        if _has_equipment_only(title_fields):
+            # 設備だけでは同じ設備の帳票が同じタイトル・同じ見出しになる。番号らしい項目・日付、
+            # それも無ければ元ファイル名を足して、1帳票だけで見分けられるようにする（design.md 6章）
+            extra = _fallback_identifier(filled, title_fields) or stem
+            title_texts, heading_texts = [*title_texts, extra], [*heading_texts, extra]
+        elif not _has_identifier(title_fields):
+            # 識別番号も設備も入らないタイトルは、元ファイル名を足して帳票を特定できるようにする
+            title_texts = [*title_texts, stem]
         title = f"{type_name} {'｜'.join(title_texts)}"
-    else:  # 識別番号も設備も入らないタイトルは、元ファイル名を足して帳票を特定できるようにする
-        title = f"{type_name} {'｜'.join([*title_texts, stem])}"
-    identifier = "／".join(_title_texts(title_fields, heading=True))
+    identifier = "／".join(heading_texts)
 
     head = [f"# {_escape_line(title)}"]
     basics = [f"- 帳票の種類: {type_name}"]
@@ -149,12 +156,34 @@ def _shown_fields(extraction: dict) -> list[dict]:
     """Markdown に出す項目（「出さない」項目、設定により人名の項目、値が見出し語だけの項目を除く）。"""
     omit_person = bool(_md_options(extraction).get("omit_person_fields", True))
     labels = set(extraction["pattern"].get("labels") or ())
+    people = _person_values(extraction["fields"]) if omit_person else set()
     return [
         f for f in extraction["fields"]
         if f.get("rag_output", "show") != "omit"
         and not (omit_person and is_person_field(f["field_name"], f.get("display_name", "")))
         and not _is_label_value(f, labels)
+        and not _is_person_name_field(f, people)
     ]
+
+
+def _person_values(fields: list[dict]) -> set[str]:
+    """人名の項目（作成・確認・承認・報告者…）に読み取った値（正規化したもの）。"""
+    return {_normalize_label(_one_line(f["value"])) for f in fields
+            if f["data_type"] == "string" and not _is_blank(f["value"])
+            and is_person_field(f["field_name"], f.get("display_name", ""))} - {""}
+
+
+def _is_person_name_field(f: dict, people: set[str]) -> bool:
+    """押印欄の人名（「斎藤」）を見出しにした項目か、値が人名の項目の値と同じ短い項目か。
+
+    帳票の種類を作るときに人名が見出しとして選ばれると、人名の項目を省いても「- 斎藤: 森」が出てしまう。
+    """
+    if not people or f["data_type"] != "string" or is_person_field(f["field_name"], f.get("display_name", "")):
+        return False
+    if _normalize_label(f.get("display_name", "")) in people:
+        return True
+    text = _one_line(f["value"])
+    return bool(text) and len(text) <= MAX_LABEL_VALUE_CHARS and _normalize_label(text) in people
 
 
 def _is_label_value(f: dict, labels: set[str]) -> bool:
@@ -181,6 +210,31 @@ def _title_fields(pattern: dict, all_fields: list[dict], shown: list[dict]) -> l
 def _has_identifier(fields: list[dict]) -> bool:
     """タイトル項目に、その帳票を見分けられるもの（識別番号・設備）があるか。"""
     return any(f["field_name"] in ("report_id", "equipment_id", "equipment_name") for f in fields)
+
+
+def _has_equipment_only(fields: list[dict]) -> bool:
+    """タイトル項目で帳票を見分ける手がかりが設備だけか（識別番号も日付も無い）。
+
+    同じ設備の点検記録は何十件もあるので、設備だけでは帳票を見分けられない。
+    """
+    return (any(f["field_name"] in ("equipment_id", "equipment_name") for f in fields)
+            and not any(f["field_name"] == "report_id" or f["data_type"] == "date" for f in fields))
+
+
+# 「作業No.」「管理番号」「点検№」のような番号らしい見出し（設備番号は設備なので除く）
+_NUMBER_LABEL = re.compile(r"(?:No\.?|NO\.?|番号|№)\s*$")
+
+
+def _fallback_identifier(filled: list[dict], title_fields: list[dict]) -> str:
+    """タイトル項目で見分けられないときに足す値: 番号らしい項目 → 日付の項目の順。無ければ ""。"""
+    used = {f["field_name"] for f in title_fields}
+    rest = [f for f in filled if f["field_name"] not in used
+            and f["field_name"] not in ("equipment_id", "equipment_name")]
+    numbered = next((f for f in rest if f["data_type"] in ("string", "number")
+                     and _NUMBER_LABEL.search(_one_line(f.get("display_name")))), None)
+    dated = next((f for f in rest if f["data_type"] == "date"), None)
+    found = numbered or dated
+    return _one_line(_plain_value(found)) if found else ""
 
 
 def _title_texts(fields: list[dict], heading: bool) -> list[str]:
