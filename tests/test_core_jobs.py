@@ -242,6 +242,28 @@ def test_a_queued_job_of_this_process_is_not_interrupted_while_it_waits(core_app
         assert jobs.wait_job(second)["status"] == "done"
 
 
+def test_a_long_queued_job_is_not_interrupted_by_a_second_launch(core_app, monkeypatch):
+    """誤って2つ目を起動しても、その起動時の回復（別プロセス）が、1つ目で2分以上待っているジョブを中断にしない。"""
+    monkeypatch.setattr(jobs, "HEARTBEAT_INTERVAL", 0.05)
+    release = threading.Event()
+    old = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    with core_app.app_context():
+        first = jobs.start_job("table_read", "table_import", 1, lambda ctx: release.wait(10) and None)
+        second = jobs.start_job("table_render", "table_import", 2, lambda ctx: {"ok": True})
+        _wait_until(lambda: jobs.get_job(first)["status"] == "running")
+        conn = db.connect()
+        conn.execute("UPDATE jobs SET heartbeat_at = NULL, created_at = ?, updated_at = ? WHERE id = ?",
+                     (old, old, second))   # 5分前から待っている
+        conn.commit()
+        conn.close()
+        # 動いているジョブの Ticker が、待機中のジョブの heartbeat も更新する
+        _wait_until(lambda: (jobs.get_job(second)["heartbeat_at"] or "") > old)
+        assert jobs.recover_interrupted() == 0   # 2つ目の起動時の回復（このプロセスのことは知らない）
+        assert jobs.get_job(second)["status"] == "queued"
+        release.set()
+        assert jobs.wait_job(second)["status"] == "done"
+
+
 def test_a_paused_ai_job_does_not_hold_up_other_imports(core_app):
     """AI整形を一時停止しても、ほかの取り込みの読み込みは進む。同じ取り込みの分は AI整形が終わるまで待つ。"""
     def ai(ctx):

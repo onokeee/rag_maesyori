@@ -8,12 +8,17 @@
 <div class="page-head">
   <div>
     <h1>保存先フォルダに保存しました</h1>
-    <p class="page-lead">{{ what }}の Markdown {{ result.md_names | length }}件を保存しました。このアプリからはデータを消しました（ダウンロードしたときと同じです）。</p>
+    <p class="page-lead">{{ what }}の Markdown {{ result.md_names | length }}件を保存しました。
+      {%- if purge_failed %}{# 消し損ねたときは「消しました」と言わない（下の警告を見る） #}
+      {%- elif remaining %}確定済みの{{ result.md_names | length }}件のデータは、このアプリから消しました（ダウンロードしたときと同じです）。<strong>未確定の{{ remaining }}件は残っています。</strong>
+      {%- else %}このアプリからはデータを消しました（ダウンロードしたときと同じです）。{% endif %}</p>
   </div>
 </div>
 
 {% if purge_failed %}
-<p class="notice" role="alert">保存は終わりましたが、このアプリのデータを消し切れませんでした。ホームに残っている場合は、そこから削除してください。</p>
+<p class="notice" role="alert">保存は終わりましたが、このアプリのデータを消し切れませんでした。
+  {%- if detail_url %}<a href="{{ detail_url }}">帳票の詳細画面</a>を開き、［この帳票を削除］で削除してください（画面が開けなければ、消えています）。
+  {%- else %}ホームに残っている場合は、そこから開いて削除してください（帳票は詳細画面の［この帳票を削除］）。{% endif %}</p>
 {% endif %}
 
 {% call ui.card("保存したもの") %}
@@ -22,6 +27,8 @@
     <dt>md ファイル</dt><dd>{{ result.md_names | length }}件（フォルダの直下）</dd>
     {% if result.admin_dir %}
     <dt>管理用ファイル</dt><dd>{{ result.admin_names | length }}件 <code>{{ result.admin_dir }}</code>（LightRAG には入りません）</dd>
+    {% elif admin_skipped %}
+    <dt>管理用ファイル</dt><dd>保存していません（設定で保存しないにしているため。正規化データ・問題一覧・取込レポート）</dd>
     {% endif %}
   </dl>
   <ul class="list-plain scroll-list" aria-label="保存した md ファイル">
@@ -57,8 +64,13 @@
 {% endcall %}
 
 <div class="form-actions">
+  {% if remaining and remaining_url %}
+  <a class="btn primary" href="{{ remaining_url }}">次の帳票へ</a>
+  <a class="btn" href="{{ url_for('home.index') }}">ホームへ</a>
+  {% else %}
   <a class="btn primary" href="{{ url_for('home.index') }}">ホームへ</a>
   {% if next_url %}<a class="btn" href="{{ next_url }}">次のファイルを取り込む</a>{% endif %}
+  {% endif %}
 </div>
 
 {% elif mode == "conflict" %}

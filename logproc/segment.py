@@ -11,7 +11,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import date
 
-from logproc.dates import HeadWhen, head_kind, parse_when_at, resolve_whens
+from logproc.dates import USER_PATTERN_WINDOW, HeadWhen, head_kind, parse_when_at, resolve_whens
 from logproc.extract import extract_identifiers, extract_plans, extract_quantities
 from logproc.models import LogParse, Segment, SplitOptions
 from logproc.people import PeopleIndex, detect_head_author, detect_tail_author, inherit_authors
@@ -120,7 +120,7 @@ def _line_anchor(clean: str, sh: str, s: int, e: int, options: SplitOptions, not
         return None
     if sh[p] == "※":
         return "note"
-    if any(r.match(sh[:e], p) for r in extra_res):
+    if any(r.match(sh, p, min(e, p + USER_PATTERN_WINDOW)) for r in extra_res):
         return "extra"
     head = _parse_head(clean, sh, s, e, True, not_date_res)
     kind = head.kind

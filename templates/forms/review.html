@@ -83,6 +83,9 @@
     </div>
     <div class="split-pane-body">
       <form method="post" action="{{ url_for('forms.confirm', doc_id=doc.id) }}" id="reviewForm">
+        {# 入力欄で Enter を押しても送らない（既定のボタンが無効だとブラウザは送信しない）。
+           無いと最初の「AIで空欄を探す」が押されたことになり、シートの内容がAIへ送られる #}
+        <button type="submit" disabled hidden aria-hidden="true" tabindex="-1" data-no-implicit-submit></button>
         <input type="hidden" name="version" value="{{ version }}" data-version-input>
         <div data-pane="fields">
           {% for f in extraction.fields %}

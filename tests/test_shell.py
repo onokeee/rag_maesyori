@@ -276,6 +276,18 @@ def test_pages_and_json_are_not_kept_in_the_browser_cache(app, client):
     assert static.status_code == 200 and "no-store" not in (static.headers.get("Cache-Control") or "")
 
 
+def test_no_response_can_be_shown_inside_another_sites_frame(client):
+    """ほかのサイトの iframe に入れて削除ボタンなどを押させない（クリックジャッキング）。静的ファイル・エラーも同じ。"""
+    responses = {url: client.get(url) for url in ("/", "/settings/output", "/static/app.js", "/forms/999")}
+    responses["他のホスト名"] = client.get("/", headers={"Host": "evil.example"})
+    responses["他のサイトからの書き込み"] = client.post("/forms/1/delete", headers={"Origin": "http://evil.example"})
+    for name, res in responses.items():
+        assert res.headers.get("X-Frame-Options") == "DENY", name
+        assert res.headers.get("Content-Security-Policy") == "frame-ancestors 'none'", name
+    assert responses["/"].status_code == 200 and responses["/settings/output"].status_code == 200
+    assert responses["他のサイトからの書き込み"].status_code == 403
+
+
 def test_startup_removes_orphan_uploads(tmp_path):
     """起動時に、DB から参照されていない取り込み途中の残骸だけを片付ける。"""
     config = make_config(tmp_path)

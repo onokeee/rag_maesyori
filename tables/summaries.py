@@ -69,11 +69,11 @@ def fmt_average(total: float, count: int, integer_values: bool) -> int | float:
     if not count:
         return 0
     avg = total / count
-    if integer_values:
-        rounded = round_half_up(avg, 0)
-        if rounded != 0 or total == 0:
-            return rounded  # 整数だけの列でも、0 に丸まるときは小数1桁で出す（0 と書くと事実と違う）
-    return round_half_up(avg, 1)
+    rounded = round_half_up(avg, 1)
+    if integer_values and isinstance(rounded, float) and rounded.is_integer():
+        return int(rounded)  # 整数だけの列で割り切れるときは「75」（「75.0」と書かない）
+    # 整数だけの列でも整数には丸めない（9件÷18件を「平均1」と書くと合計・件数と合わない。0.5 と出す）
+    return rounded
 
 
 def month_label(month: str) -> str:
@@ -224,6 +224,25 @@ def entity_display(values: dict, spec: TableSpec) -> tuple[str, str, str]:
     return eid, name, eid or name
 
 
+def _entity_names(records: list[dict], spec: TableSpec) -> dict[str, str]:
+    """設備番号ごとの設備名。取り込み全体でいちばん多い空でない名前（同数なら名前の順で先のもの）。
+
+    グループの最初の行だけで決めると、最初の行が「CLN-502」だけのときに名前が消えたり、月によって変わったりする。
+    """
+    counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for rec in records:
+        eid, name = entity_value(rec.get("values", {}), spec)
+        if eid and name:
+            counts[eid][name] += 1
+    return {eid: sorted(c.items(), key=lambda t: (-t[1], t[0]))[0][0] for eid, c in counts.items()}
+
+
+def _display_of(eid: str, names: dict[str, str]) -> tuple[str, str]:
+    """(設備名, 表示「設備名（設備番号）」)。entity_display と同じ書き方。"""
+    name = names.get(eid, "")
+    return name, (f"{name}（{eid}）" if eid and name and name != eid else eid or name)
+
+
 def category_column(spec: TableSpec):
     """内訳に使う区分の列。故障区分があればそれ、なければ最初の category 役割の列。
 
@@ -306,6 +325,7 @@ def month_summaries(records: list[dict], spec: TableSpec, coverage: dict | None,
             by_month[m].append(values)
     cat = category_column(spec)
     entity, _label = entity_columns(spec)
+    names = _entity_names(records, spec) if entity is not None else {}
     sum_keys = metrics["sum"]
     rank_key = sum_keys[0] if sum_keys else None
     out = []
@@ -327,7 +347,7 @@ def month_summaries(records: list[dict], spec: TableSpec, coverage: dict | None,
                     cats = Counter(str(g.get(cat.key)) for g in grows if g.get(cat.key))
                     if cats:
                         main = sorted(cats.items(), key=lambda t: (-t[1], t[0]))[0][0]
-                _eid, _name, display = entity_display(grows[0], spec)
+                _name, display = _display_of(eid, names)
                 items.append({"entity": eid, "display": display, "count": len(grows), "sum": total, "main_category": main})
             items.sort(key=lambda t: (-(t["sum"] or 0) if rank_key else 0, -t["count"], t["entity"]))
             top = items[: max(1, int(summary.top_n or 5))]
@@ -358,6 +378,7 @@ def entity_fiscal_year_summaries(records: list[dict], spec: TableSpec, coverage:
             continue
         groups[(eid, fiscal_year_of(m, fs))].append(values)
     cat = category_column(spec)
+    names = _entity_names(records, spec)
     keys = sorted(set(metrics["sum"]) | set(metrics["avg"]) | set(metrics["max"]),
                   key=lambda k: [c[0] for c in measure_columns(spec)].index(k) if k in [c[0] for c in measure_columns(spec)] else 99)
     out = []
@@ -393,8 +414,7 @@ def entity_fiscal_year_summaries(records: list[dict], spec: TableSpec, coverage:
                 "avg": fmt_average(float(total), avg_base, _integer_values(vals)) if avg_base else None,
                 "max": max_item,
             }
-        first = rows[0]
-        _eid, name, display = entity_display(first, spec)
+        name, display = _display_of(eid, names)
         covered = list(months)
         out.append({
             "entity": eid, "name": name, "display": display, "fiscal_year": fy, "count": len(rows),

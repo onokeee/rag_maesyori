@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import time
 
 from excel.tables import (MIN_COLUMNS, SAME_COLUMNS_RATIO, Table, find_table, find_table_by_columns, is_table_value,
-                          list_header_keys, merge_table_values, parse_table_text, section_heading, section_of,
+                          list_header_keys, merge_table_values, parse_table_text, section_heading, sections_of,
                           seq_header, stacked_tables, table_header_keys)
 from excel.text import (EXCEL_ERROR_WARNING, MAX_LABEL_LENGTH, excel_error, numeric_unit, pick_checked, split_code_name, split_combined_value,
                         is_plain_number, to_date, to_number, value_unit, written_unit)
@@ -309,22 +309,40 @@ def locate_table(grid: SheetGrid, fd: FieldDef, stop_labels: set[str]) -> tuple[
     """戻り値: (見出しのセル, 表)。行のある表を優先し、無ければ最初に見つかった見出しと表（行なし）を返す。"""
     norms = grid.resolve_labels(fd.label_norms())
     first: tuple[Cell | None, Table | None] = (None, None)
-    for cell in grid.find_labels(norms):
+    labels = grid.find_labels(norms)
+    if fd.section:
+        # 区画（例: 回答欄）が決めてあれば、区画の中の見出しを先に見る（無ければ今までどおりシート全体）
+        labels = sorted(labels, key=lambda c: not _in_section(grid, fd, c))
+    for cell in labels:
         table = find_table(grid, cell, fd.direction, stop_labels - norms)
         if table is not None and table.to_value() is not None:
             if _columns_differ(table, fd.table_columns):
                 # 列が見本と合わない＝見出し行を1行取り違えている。見本の列見出しに合う表を優先する
-                better = find_table_by_columns(grid, fd.table_columns)
+                better = _table_by_columns(grid, fd)
                 if better is not None:
                     return cell, better
             return cell, table
         if first[0] is None or (first[1] is None and table is not None):
             first = (cell, table)
     # 見出しの書き方が違う帳票: 見本で見た列見出しと並びが似た表を探す
-    table = find_table_by_columns(grid, fd.table_columns)
+    table = _table_by_columns(grid, fd)
     if table is not None:
         return table.anchor or table.header[0], table
     return first
+
+
+def _in_section(grid: SheetGrid, fd: FieldDef, cell: Cell) -> bool:
+    """セルが項目の区画（fd.section）の中か（区画の中の小見出しの中も含む）。"""
+    return fd.section in sections_of(grid, cell)
+
+
+def _table_by_columns(grid: SheetGrid, fd: FieldDef) -> Table | None:
+    """見本の列見出しに合う表。区画が決めてあれば、列見出しが区画の中にある表を先に探す。"""
+    if fd.section:
+        table = find_table_by_columns(grid, fd.table_columns, keep=lambda t: _in_section(grid, fd, t.header[0]))
+        if table is not None:
+            return table
+    return find_table_by_columns(grid, fd.table_columns)
 
 
 def locate_value(grid: SheetGrid, fd: FieldDef, stop_labels: set[str]) -> tuple[Cell | None, list[Cell], str | None]:
@@ -405,7 +423,8 @@ def _limit_to_section(grid: SheetGrid, fd: FieldDef,
     """
     if not fd.section:
         return found_sets
-    inside = [(s, [c for c in cells if section_of(grid, c) == fd.section]) for s, cells in found_sets]
+    # 区画の中の小見出し（「▼ 回答欄」の下の「1. 暫定対策」）の中の見出しも、回答欄の中とみなす
+    inside = [(s, [c for c in cells if fd.section in sections_of(grid, c)]) for s, cells in found_sets]
     return inside if any(cells for _, cells in inside) else found_sets
 
 

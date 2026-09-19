@@ -9,7 +9,7 @@ from flask import Blueprint, render_template, request
 
 from models import database
 from views.forms import batch_save_confirm, batch_zip_confirm, delete_confirm, save_confirm
-from views.tables import SAVE_TO_FOLDER_CONFIRM as TABLE_SAVE_CONFIRM
+from views.tables import save_to_folder_confirm
 from views import TABLE_IMPORT_ACTIVE, form_link, query_all, query_value, table_import_link
 
 bp = Blueprint("home", __name__)
@@ -57,6 +57,7 @@ def _forms_ready(limit: int) -> list[dict]:
             d["href"] = form_link(d)
             d["modified_note"] = ("この帳票は修正中です。確定し直していない変更は Markdown に入らず、消えます。"
                                   if d["state"] == "modified" else "")
+            d["save_confirm"] = save_confirm(d)   # まとまりの1件だけ保存するときの文（forms と同じ文言）
         items.append({"batch": {"id": batch_id, "total": len(docs), "confirmed": len(ready),
                                 "all_confirmed": len(ready) == len(docs), "docs": ready,
                                 "zip_confirm": batch_zip_confirm(docs),
@@ -120,5 +121,5 @@ def index():
         tables_ready=tables_ready,
         hidden={key: max(0, n) for key, n in hidden.items()},
         list_limit=LIST_LIMIT,
-        table_save_confirm=TABLE_SAVE_CONFIRM,
+        table_save_confirm=save_to_folder_confirm(),
     )

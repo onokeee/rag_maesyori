@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 
-DEFAULT_NOT_DATE_PATTERNS = [r"\d+\.\d+\s*(?:mm|MPa|V|A)", r"納期\s*\d+/\d+"]
+# 「1.5mm」「2.5A」のような寸法・電気量は日付にしない。ただし単位の後ろに英数字・「-」・カタカナが続くときは
+# 「4.3 AGV」「4.3 ALM-2031」「4.3 Aライン」「4.3 Vベルト」のように日付＋設備名などなので、単位とみなさない
+DEFAULT_NOT_DATE_PATTERNS = [r"\d+\.\d+\s*(?:mm|MPa|V|A)(?![A-Za-z0-9\-\u30A0-\u30FF])", r"納期\s*\d+/\d+"]
 
 
 @dataclass

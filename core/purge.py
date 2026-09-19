@@ -17,7 +17,7 @@ import shutil
 import sqlite3
 from pathlib import Path
 
-from flask import current_app
+from flask import current_app, g, has_app_context
 
 from core.files import remove_upload
 from models import database
@@ -111,6 +111,32 @@ def sweep_orphan_ai(db) -> int:
     return removed
 
 
+def _mark_incomplete() -> None:
+    """この要求の中で、消し切れなかったもの（掴まれていて消せなかったファイル）があったと印を付ける。"""
+    if has_app_context():
+        g.purge_incomplete = True
+
+
+def purge_incomplete() -> bool:
+    """この要求の中で消したときに、消し切れなかったファイルがあったか（保存先フォルダの結果の画面で知らせるため）。
+
+    消せなかったファイルも中身は 0 バイトに切り詰めてあり、次の起動時に片付く。例外にはしない
+    （消すこと自体は DB の行まで終わっていて、画面を 500 にするより「消し切れなかった」と知らせる方がよい）。
+    """
+    return has_app_context() and bool(g.get("purge_incomplete"))
+
+
+def _truncate_leftovers(folder: Path) -> None:
+    """消し切れなかったフォルダに残ったファイルを 0 バイトに切り詰める（切り詰められないものは諦める）。"""
+    for path in folder.rglob("*"):
+        try:
+            if path.is_file():
+                with open(path, "r+b") as f:
+                    f.truncate(0)
+        except OSError:
+            pass
+
+
 def purge_after_send(response, fn, *args):
     """本文を最後まで送り終えてから消す（design.md 3.3）。
 
@@ -190,7 +216,8 @@ def purge_documents(doc_ids) -> int:
         removed += db.execute("DELETE FROM documents WHERE id = ?", (doc_id,)).rowcount
     db.commit()
     for path in stored:
-        remove_upload(path)
+        if not remove_upload(path):
+            _mark_incomplete()
     for hook in _DOCUMENT_PURGE_HOOKS:
         try:
             hook(ids)
@@ -241,13 +268,18 @@ def purge_table_import(import_id: int) -> int:
     delete_orphan_ai_items(db)
     _delete_orphan_llm_calls(db, keys)
     db.commit()
-    remove_upload(row["stored_path"])
+    if not remove_upload(row["stored_path"]):
+        _mark_incomplete()
     folder = import_dir(import_id)
     shutil.rmtree(folder, ignore_errors=True)
     if folder.exists():
-        # Windows で別のスレッド・プロセスがファイルを掴んでいると消し残る。黙って成功扱いにせず記録する
-        # （DB の行はもう無いので、残ったフォルダは次の起動時に remove_orphan_import_dirs が片付ける）
-        log.warning("取り込みのフォルダを消し切れませんでした（次の起動時に片付けます）: imports/%s", import_id)
+        # Windows で別のスレッド・プロセスがファイルを掴んでいると消し残る。黙って成功扱いにせず記録し、
+        # remove_upload と同じく残ったファイルの中身を 0 バイトに切り詰める（名前は残っても読み込んだ行・md は残さない）。
+        # DB の行はもう無いので、残ったフォルダは次の起動時に remove_orphan_import_dirs が片付ける。
+        _truncate_leftovers(folder)
+        _mark_incomplete()
+        log.warning("取り込みのフォルダを消し切れませんでした（中身は空にし、次の起動時に片付けます）: imports/%s",
+                    import_id)
     _shrink(db)
     return removed
 

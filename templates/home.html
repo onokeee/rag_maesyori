@@ -151,7 +151,7 @@
               {% if m.state == "modified" %}{{ ui.badge(m.state, label="修正中（確定済みの版あり）") }}{% endif %}
               {% if save_folder %}
                 {{ ui.save_form(url_for('forms.save_md_to_folder', doc_id=m.id),
-                     m.modified_note ~ "この帳票だけを保存先フォルダに保存すると、この帳票だけがまとまりから消えます（残りの帳票はまとまりに残ります）。もう一度保存・ダウンロードすることはできません。",
+                     m.save_confirm,
                      save_folder, next=url_for('home.index'), label="フォルダに保存", small=True, primary=False) }}
               {% endif %}
               <a class="btn small ghost" href="{{ url_for('forms.download_md', doc_id=m.id) }}"

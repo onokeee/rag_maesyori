@@ -30,7 +30,7 @@ ADMIN_KEYS = ("models", "default", "api_key", "chat_url", "models_url")
 CATALOG_TTL = 300
 _MAX_FIX = 4
 
-_clients: dict[tuple[str, str], OpenAI] = {}
+_clients: dict[tuple[str, str, float], OpenAI] = {}
 _catalog_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
 _QUIRKS: dict[str, dict] = {}
 # ジョブの並列呼び出しから _clients / _QUIRKS / 方式判定を同時に更新するためのロック
@@ -134,20 +134,27 @@ def _derived_base(full_url: str, suffix: str) -> str:
     return u[: -len(suffix)] if u.endswith(suffix) else ""
 
 
-def _client_for(base: str) -> OpenAI:
-    key = (base, llm_api_key())
+MODELS_TIMEOUT = 30.0
+
+
+def _client_for(base: str, timeout: float) -> OpenAI:
+    """明示タイムアウト・SDK の再試行なしのクライアント。
+    （SDK の既定は読み取り600秒×再試行2回で、応答しない接続先だと画面が最大30分ほど待たされる。429 は _create が待って投げ直す）"""
+    key = (base, llm_api_key(), float(timeout))
     with _lock:
         if key not in _clients:
-            _clients[key] = OpenAI(base_url=base or None, api_key=key[1] or "not-set")
+            _clients[key] = OpenAI(base_url=base or None, api_key=key[1] or "not-set", timeout=key[2], max_retries=0)
         return _clients[key]
 
 
 def client() -> OpenAI:
-    return _client_for(_derived_base(llm_chat_url(), "/chat/completions"))
+    url = llm_chat_url()
+    return _client_for(_derived_base(url, "/chat/completions"),
+                       LOCAL_TIMEOUT if is_local_endpoint(url) else CLOUD_TIMEOUT)
 
 
 def models_client() -> OpenAI:
-    return _client_for(_derived_base(llm_models_url(), "/models"))
+    return _client_for(_derived_base(llm_models_url(), "/models"), MODELS_TIMEOUT)
 
 
 def reset_llm_client() -> None:
@@ -384,13 +391,12 @@ def ask_json(system: str, user: str, what: str = "AIの応答", model: str | Non
     if not resp.choices or not resp.choices[0].message:
         raise ValueError("AIの応答が空でした。")
     content = resp.choices[0].message.content or ""
-    m = re.search(r"\{.*\}", content, re.DOTALL)
-    if not m:
-        raise ValueError(f"{what}をJSONとして解析できませんでした: {content[:200]}")
-    data = json.loads(m.group(0))
-    if not isinstance(data, dict):
-        raise ValueError(f"{what}が想定した形式ではありません。")
-    return data
+    try:
+        # <think>…</think>（推論の途中に書かれた { } を含む）を除いてから取り出す。失敗は日本語の ValueError
+        return parse_json_text(content)
+    except ValueError as e:
+        shown = _THINK_RE.sub("", content).strip()[:200]
+        raise ValueError(f"{what}をJSONとして解析できませんでした（{str(e).rstrip('。')}）: {shown}") from e
 
 
 def friendly_error(exc: Exception) -> str:
@@ -425,6 +431,9 @@ _PROBE_SCHEMA = {
 
 _job_clients: dict[tuple[str, str, float], OpenAI] = {}
 _MODES: dict[tuple[str, str], str] = {}
+# 方式判定の出力上限。推論モデルは上限を考える途中で使い切ることがある（本文が空・finish_reason=length）ので
+# 小さくしすぎない。打ち切られたら次の値でもう一度だけ試す
+_PROBE_BUDGETS = (1000, 4000)
 _THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
 
@@ -706,22 +715,33 @@ def detect_structured_mode(settings: dict, refresh: bool = False) -> str:
         {"role": "user", "content": '次のJSONをそのまま返してください: {"ok": true}'},
     ]
     mode = "prompt_only"
+    settled = True
     for candidate in ("json_schema", "json_object"):
-        try:
-            res = chat_raw(settings, probe, response_format=response_format_for(candidate, _PROBE_SCHEMA, "probe"),
-                           max_tokens=50)
-        except LLMCallError as e:
-            if e.kind == "row":
-                continue
-            raise
-        try:
-            parse_json_text(res.text)
-        except ValueError:
+        rf = response_format_for(candidate, _PROBE_SCHEMA, "probe")
+        outcome = "rejected"
+        for budget in _PROBE_BUDGETS:
+            try:
+                res = chat_raw(settings, probe, response_format=rf, max_tokens=budget)
+            except LLMCallError as e:
+                if e.kind == "row":
+                    break                # response_format を受け付けない（400 など）→ 次の方式
+                raise
+            try:
+                parse_json_text(res.text)
+                outcome = "ok"
+                break
+            except ValueError:
+                if res.finish_reason != "length":
+                    break                # 打ち切りではないのに JSON でない → 次の方式
+                outcome = "truncated"    # 推論モデルが上限を考える途中で使い切った → 上限を増やしてもう一度
+        if outcome == "rejected":
             continue
-        mode = candidate
+        # 打ち切りのまま（判定しきれない）でも、指定そのものは受け付けたのでこの方式を使う。覚えずに次回また判定する
+        mode, settled = candidate, outcome == "ok"
         break
-    with _lock:
-        _MODES[key] = mode
+    if settled:
+        with _lock:
+            _MODES[key] = mode
     return mode
 
 

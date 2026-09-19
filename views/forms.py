@@ -19,7 +19,7 @@ from flask import (Blueprint, abort, current_app, flash, jsonify, redirect, rend
                    url_for)
 
 from core import purge
-from core.files import UploadError, original_name, precheck_excel, remove_upload, save_upload, upload_path
+from core.files import FORM_MAX_MERGED_CELLS, UploadError, original_name, precheck_excel, remove_upload, save_upload, upload_path
 from excel.extractor import apply_manual_values, extract_document, is_blank_value, refresh_summary
 from excel.tables import clean_table_value, is_table_value, parse_table_text, table_text_lines
 from excel.text import EXCEL_ERROR_WARNING
@@ -48,6 +48,8 @@ BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳�
 # 保存先フォルダに保存するときも、ダウンロードと同じくデータが消える（design.md 3.3。保存したファイルは残る）
 SAVE_TO_FOLDER_CONFIRM = ("保存先フォルダに保存すると、この帳票のデータはこのPCのアプリから消えます（保存した .md は残ります）。"
                           "もう一度保存・ダウンロードすることはできません。")
+BATCH_MEMBER_SAVE_CONFIRM = ("この帳票だけを保存先フォルダに保存すると、この帳票だけがまとまりから消えます（残りの帳票はまとまりに残ります）。"
+                             "もう一度保存・ダウンロードすることはできません。")
 BATCH_SAVE_CONFIRM = ("保存先フォルダに保存すると、このまとまりの帳票のデータはこのPCのアプリからすべて消えます"
                       "（保存した .md は残ります）。もう一度保存・ダウンロードすることはできません。")
 MAX_BATCH_FILES = 50
@@ -288,7 +290,8 @@ def index():
 def new():
     return render_template("forms/new.html", steps=STEPS, active_pattern_count=db.count_active_patterns(),
                            pattern_count=len(db.list_patterns()), max_files=MAX_BATCH_FILES,
-                           max_mb=(current_app.config.get("MAX_CONTENT_LENGTH") or 0) // (1024 * 1024))
+                           max_mb=(current_app.config.get("MAX_CONTENT_LENGTH") or 0) // (1024 * 1024),
+                           **folder_save.folder_ctx())
 
 
 def upload_error_text(storage, exc: Exception, position: int | None = None) -> str:
@@ -309,7 +312,7 @@ def _store_document(storage, batch_id: str = "", order: int = 0) -> int:
     stored = save_upload(storage, "documents", cfg["ALLOWED_EXTENSIONS"], cfg["MAX_CONTENT_LENGTH"])
     try:
         path = upload_path(stored.stored_path)
-        precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"))
+        precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"), max_merged=FORM_MAX_MERGED_CELLS)
         try:
             info = load_workbook_info(path)
         except Exception as exc:
@@ -439,10 +442,14 @@ def delete_confirm(doc: dict) -> str:
 
 
 def save_confirm(doc: dict) -> str:
-    """1件を保存先フォルダに保存するときの確認文（ダウンロードと同じく、保存するとデータが消える）。"""
+    """1件を保存先フォルダに保存するときの確認文（ダウンロードと同じく、保存するとデータが消える）。
+
+    まとめ取り込みの帳票なら、この帳票だけがまとまりから消えることを伝える（ホームの各帳票のボタンと同じ文）。
+    """
+    text = BATCH_MEMBER_SAVE_CONFIRM if doc.get("batch_id") else SAVE_TO_FOLDER_CONFIRM
     if doc["state"] == "modified":
-        return MODIFIED_NOTE + SAVE_TO_FOLDER_CONFIRM
-    return SAVE_TO_FOLDER_CONFIRM
+        return MODIFIED_NOTE + text
+    return text
 
 
 # ---- 2 帳票の種類とシートを確認 -------------------------------------------------------------
@@ -771,8 +778,11 @@ def detail(doc_id: int):
 def _changed_fields(confirmed: dict, working: dict | None) -> list[str]:
     if not working:
         return []
-    before = {f["field_name"]: f.get("value") for f in confirmed.get("fields", [])}
-    changed = [f["display_name"] for f in working.get("fields", []) if before.get(f["field_name"]) != f.get("value")]
+    # 値だけでなく単位も比べる（「2.5時間」のように単位だけ直しても Markdown は変わる）
+    def key(f: dict) -> tuple:
+        return f.get("value"), f.get("unit") or ""
+    before = {f["field_name"]: key(f) for f in confirmed.get("fields", [])}
+    changed = [f["display_name"] for f in working.get("fields", []) if before.get(f["field_name"]) != key(f)]
     if confirmed.get("pattern", {}).get("id") != working.get("pattern", {}).get("id") or \
             confirmed.get("sheets") != working.get("sheets"):
         changed.insert(0, "帳票の種類・シート")
@@ -823,9 +833,16 @@ def save_md_to_folder(doc_id: int):
     """ダウンロードの代わりに、保存先フォルダへ .md を書き、書き終えたらこの帳票のデータを消す（design.md 3.3）。"""
     with output_folder.saving():
         name, body = _single_markdown(doc_id)
+        # まとめ取り込みの1件だけを保存したときは、まとまりに残った未確定の帳票と次の帳票を結果の画面に出す
+        # （消す前に調べる。消したあとはこの帳票の batch_id が分からない）
+        batch_id = _get_document(doc_id).get("batch_id") or ""
+        pending = [d for d in db.list_batch_documents(batch_id)
+                   if d["id"] != doc_id and d["state"] not in CONFIRMED_STATES] if batch_id else []
         return folder_save.save_and_purge(
             [(name, body)], purge_fn=purge.purge_documents, purge_args=([doc_id],), what="帳票",
-            back_url=safe_next(url_for(".detail", doc_id=doc_id)), next_url=url_for(".new"))
+            back_url=safe_next(url_for(".detail", doc_id=doc_id)), next_url=url_for(".new"),
+            remaining=len(pending), remaining_url=form_link(pending[0]) if pending else "",
+            detail_url=url_for(".detail", doc_id=doc_id))
 
 
 def _unique_name(name: str, used: set[str]) -> str:
@@ -916,7 +933,9 @@ def save_batch_to_folder(batch_id: str):
         purge_fn, purge_args = _batch_purge(batch_id, confirmed_ids, pending)
         return folder_save.save_and_purge(
             _batch_markdown_files(confirmed_ids), purge_fn=purge_fn, purge_args=purge_args, what="まとめ取り込み",
-            back_url=safe_next(url_for("home.index")), next_url=url_for(".new"))
+            back_url=safe_next(url_for("home.index")), next_url=url_for(".new"),
+            # 確定済みの分だけ保存したときは、残った未確定の帳票の件数と、次に確認する帳票を出す
+            remaining=len(pending), remaining_url=form_link(pending[0]) if pending else "")
 
 
 @bp.get("/<int:doc_id>/download.json")
@@ -949,5 +968,9 @@ def delete(doc_id: int):
     purge.purge_documents([doc_id])
     # ファイル名は出さない: flash はブラウザのセッションクッキーに載るので、取引先名や「社外秘」を
     # 含みうる名前をサーバー側から消したあともブラウザに残ってしまう（design.md 3.3）
-    flash("帳票を削除しました（元のファイルと読み取り結果を消しました）", "info")
+    if purge.purge_incomplete():
+        # 使用中などで消し切れなかったファイルは中身を 0 バイトにしてある（次の起動時に片付く。design.md 3.3）
+        flash("帳票を削除しました（一部のファイルは使用中で消し切れず、中身を空にしました。次の起動時に片付きます）", "info")
+    else:
+        flash("帳票を削除しました（元のファイルと読み取り結果を消しました）", "info")
     return redirect(safe_next(url_for("home.index")))

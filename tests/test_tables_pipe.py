@@ -839,7 +839,8 @@ def test_record_title_drops_a_date_only_preamble():
     spec = spec_from_dict(list_spec_dict())
     text = "【発生】R05.04.01 11:45(休日)\n【設備】ETC-305 Polyエッチャ 5号機\n【内容】PM4のVppが範囲外"
     values = {"record_no": "CA-1", "occurred_at": "2023-04-03", "equipment_id": "ETC-305", "symptom": text}
-    assert record_title(values, spec) == "【CA-1】ETC-305｜2023-04-03"
+    # 日付は繰り返さず、設備の行（見出しの設備と同じ）も飛ばして、次の行の中身を使う（R5-MD-4）
+    assert record_title(values, spec) == "【CA-1】ETC-305 PM4のVppが範囲外｜2023-04-03"
     # 日付のあとに中身が続くときは、日付だけ落として中身を見出しに使う
     values2 = dict(values, symptom="R5.4.2 16:58(休日)、ビーム電流が低下し停止")
     assert record_title(values2, spec) == "【CA-1】ETC-305 ビーム電流が低下し停止｜2023-04-03"

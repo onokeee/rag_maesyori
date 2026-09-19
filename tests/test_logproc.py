@@ -601,3 +601,16 @@ def test_extractors_are_unchanged_by_the_cached_spans():
     assert extract_identifiers(text) == ["RB-ENC-05M", "ALM-2031"]
     assert "×1" in extract_quantities(text) and "5mm" in extract_quantities(text)
     assert extract_plans(text) == ["納期1週間"] and extract_plans("") == [] and extract_plans(None) == []
+
+
+# ---- R6-AI-1: 単位の後ろに英数字・「-」・カタカナが続くときは寸法とみなさず、日付として読む ----------------------
+@pytest.mark.parametrize("text", ["4.3 AGV 停止", "4.3 ALM-2031 発生", "4.3 Aライン停止", "4.3 Vベルト交換"])
+def test_unit_letter_followed_by_word_is_still_a_date(text):
+    w = parse_when_at(shadow(text), 0, not_date_res=[__import__("re").compile(p) for p in SplitOptions().not_date_patterns])
+    assert w is not None and w.has_date and (w.month, w.day) == (4, 3)
+
+
+@pytest.mark.parametrize("text", ["2.5A 流れた", "3.3V", "1.2 A", "2.5Aの電流"])
+def test_plain_units_are_still_not_dates(text):
+    w = parse_when_at(shadow(text), 0, not_date_res=[__import__("re").compile(p) for p in SplitOptions().not_date_patterns])
+    assert w is None or not w.has_date

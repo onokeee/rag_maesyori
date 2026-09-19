@@ -203,10 +203,28 @@ def _summary_from(d) -> SummarySpec:
     return s
 
 
+def _str_field(obj, name: str) -> None:
+    value = getattr(obj, name)
+    if value is not None and not isinstance(value, str):
+        setattr(obj, name, str(value))
+
+
+def _custom_stage_from(d: dict) -> CustomStageSpec:
+    stage = CustomStageSpec(**_pick(CustomStageSpec, d))
+    for name in ("id", "output_type", "target_key"):
+        _str_field(stage, name)
+    stage.inputs = [str(v) for v in _as_list(stage.inputs)]
+    stage.choices = [str(v) for v in _as_list(stage.choices)]
+    return stage
+
+
 def _column_from(d: dict) -> ColumnSpec:
     if isinstance(d, ColumnSpec):
         return d
     col = ColumnSpec(**_pick(ColumnSpec, d))
+    # 手で書いた JSON の「"key": 1」なども文字列にして検証に回す（検証の途中で例外にしない）
+    for name in ("key", "display", "type", "role", "md"):
+        _str_field(col, name)
     col.headers = [str(h) for h in _as_list(col.headers) if str(h).strip()]
     col.normalize = [str(n) for n in _as_list(col.normalize)]
     col.allowed = [str(a) for a in _as_list(col.allowed)]
@@ -248,8 +266,7 @@ def spec_from_dict(d: dict) -> TableSpec:
         st.mask = [str(m) for m in _as_list(st.mask)]
         for name in ("context_columns", "groups", "entry_types"):
             setattr(st, name, [str(v) for v in _as_list(getattr(st, name))])
-    spec.custom_stages = [CustomStageSpec(**_pick(CustomStageSpec, c)) for c in _as_list(data.get("custom_stages"))
-                          if isinstance(c, dict)]
+    spec.custom_stages = [_custom_stage_from(c) for c in _as_list(data.get("custom_stages")) if isinstance(c, dict)]
     spec.na_tokens = [str(t) for t in _as_list(spec.na_tokens)]
     spec.name_patterns = [str(p) for p in _as_list(spec.name_patterns)]
     spec.file_types = [str(t) for t in _as_list(spec.file_types)]
@@ -315,6 +332,11 @@ def validate_spec(spec: TableSpec) -> list[str]:
         errors.append("年度の開始月は1〜12で指定してください")
     if spec.continuation_rows not in CONTINUATION_POLICIES:
         errors.append("継続行の扱いが正しくありません")
+    header = spec.header if isinstance(spec.header, dict) else {}
+    for name, label in (("rows", "見出しの行数（header.rows）"), ("search_rows", "見出しを探す行数（header.search_rows）")):
+        value = header.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1000:
+            errors.append(f"{label}は1以上の整数で指定してください")
     for name in ("hidden_rows", "strike_rows"):
         if (spec.exclude or {}).get(name) not in ROW_POLICIES:
             errors.append("非表示行・取り消し線の行の扱いが正しくありません")
@@ -374,6 +396,9 @@ def validate_spec(spec: TableSpec) -> list[str]:
             if key not in keys:
                 errors.append(f"AIの追加処理「{stage.id}」の入力列「{key}」がありません")
     rates = (spec.checks or {}).get("type_error_rate") or {}
+    if not isinstance(rates, dict):
+        errors.append("型エラーの割合の上限（checks.type_error_rate）は warn と block を持つ形で指定してください")
+        rates = {}
     try:
         if not 0 <= float(rates.get("warn", 0.02)) <= float(rates.get("block", 0.10)) <= 1:
             errors.append("型エラーの割合の上限は 0〜1 で、警告 ≦ 確定を止める にしてください")
@@ -385,8 +410,9 @@ def validate_spec(spec: TableSpec) -> list[str]:
 # 区切りの正規表現（JSON で取り込んだ設定だけが持つ）の上限。画面からは設定しない
 _MAX_SPLIT_PATTERNS = 20
 _MAX_PATTERN_CHARS = 200
-# 量指定子を含むグループにさらに量指定子が付く形（(.+)+ など）。極端に遅くなる正規表現なので受け付けない
-_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*{]")
+# 量指定子を含むグループにさらに量指定子が付く形（(.+)+ など）と、選択（|）を含むグループに量指定子が付く形
+# （(?:\d|\d)* など。選択肢が重なると同じく極端に遅くなる）。どちらも受け付けない
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*|][^)]*\)[+*{]")
 
 
 def _log_stage_errors(stage: LogStageSpec) -> list[str]:
@@ -437,7 +463,41 @@ def _log_stage_errors(stage: LogStageSpec) -> list[str]:
                 int(splitter[key])
             except (TypeError, ValueError):
                 errors.append(f"AI整形の区切りの {key} は整数で指定してください")
+    # 上限・実行条件の数値（aiproc/runner.py が int() で読む。数値でないと分割プレビュー・AI整形が止まる）
+    limits = stage.limits if isinstance(stage.limits, dict) else {}
+    for key in ("max_segments", "max_input_tokens"):
+        if key in limits and not _is_int_at_least(limits[key], 1):
+            errors.append(f"AI整形の上限（limits）の {key} は1以上の整数で指定してください")
+    if isinstance(stage.run_if, dict) and not _run_if_ok(stage.run_if, 0):
+        errors.append("AI整形の実行条件（run_if）の min_chars・min_segments は0以上の整数で、"
+                      "any・all は条件の並びで指定してください")
     return errors
+
+
+def _is_int_at_least(value, low: int) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return False
+    return n >= low and (not isinstance(value, float) or value == n)
+
+
+def _run_if_ok(rule, depth: int) -> bool:
+    """実行条件（aiproc.runner._run_if の形）の数値と入れ子を確かめる。"""
+    if not isinstance(rule, dict):
+        return True   # 条件でないものは runner が「条件なし」として扱う
+    if depth > 10:
+        return False
+    for key in ("any", "all"):
+        if key in rule:
+            items = rule[key]
+            if items is not None and not isinstance(items, list):
+                return False
+            if not all(_run_if_ok(r, depth + 1) for r in items or []):
+                return False
+    return all(_is_int_at_least(rule[k], 0) for k in ("min_chars", "min_segments") if k in rule)
 
 
 # ---- 見出しとの照合 --------------------------------------------------------------------

@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import queue
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
@@ -25,6 +27,10 @@ from models import database
 HEARTBEAT_INTERVAL = 30          # 秒。fn が呼ばなくても実行中はこの間隔で更新する
 STALE_AFTER = timedelta(minutes=2)
 PAUSE_POLL = 0.3                 # 一時停止中に再開・中止を確かめる間隔（秒）
+# 進捗・メッセージ・heartbeat の書き込みが「database is locked」になったときの再試行（回数と待ち秒の単位）。
+# 取れなければその1回の更新だけ見送る（進捗の表示のためにジョブ全体を失敗にしない）
+SOFT_UPDATE_RETRIES = 2
+SOFT_UPDATE_BACKOFF = 0.2
 
 ACTIVE_STATUSES = ("queued", "running", "paused")
 TERMINAL_STATUSES = ("done", "failed", "cancelled", "interrupted")
@@ -83,6 +89,7 @@ class JobContext:
     def __init__(self, job_id: int, conn=None):
         self.job_id = job_id
         self._conn = conn or database.connect()
+        self._db = _db_key()  # 待機中のジョブの heartbeat を更新するとき、このプロセスのものを選ぶため
         self._lock = threading.Lock()
         row = self._row()
         self._progress: dict = json.loads(row["progress_json"] or "{}") if row else {}
@@ -97,6 +104,25 @@ class JobContext:
         with self._lock:
             self._conn.execute(f"UPDATE jobs SET {sql_sets} WHERE id = ?", (*args, self.job_id))
             self._conn.commit()
+
+    def _soft_update(self, sql_sets: str, args=()) -> None:
+        """進捗など、1回飛ばしても次の更新で追いつく書き込み。ロック中なら少し待って再試行し、だめなら見送る。"""
+        for attempt in range(SOFT_UPDATE_RETRIES + 1):
+            try:
+                self._update(sql_sets, args)
+                return
+            except sqlite3.OperationalError as exc:
+                text = str(exc).lower()
+                if "locked" not in text and "busy" not in text:
+                    raise
+                with self._lock:
+                    try:
+                        self._conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                if attempt < SOFT_UPDATE_RETRIES:
+                    time.sleep(SOFT_UPDATE_BACKOFF * (attempt + 1))
+        logging.getLogger(__name__).warning("ジョブ %s の進捗の更新を見送りました（データベースが使用中）", self.job_id)
 
     def _flags(self) -> tuple[bool, bool]:
         row = self._row()
@@ -113,14 +139,33 @@ class JobContext:
         """進捗を上書きマージして保存する（例: done=10, total=100, phase="読み込み"）。heartbeat も更新。"""
         self._progress.update(kw)
         ts = _now()
-        self._update("progress_json = ?, heartbeat_at = ?, updated_at = ?",
-                     (json.dumps(self._progress, ensure_ascii=False, default=str), ts, ts))
+        self._soft_update("progress_json = ?, heartbeat_at = ?, updated_at = ?",
+                          (json.dumps(self._progress, ensure_ascii=False, default=str), ts, ts))
 
     def message(self, text: str) -> None:
-        self._update("message = ?, updated_at = ?", (text, _now()))
+        self._soft_update("message = ?, updated_at = ?", (text, _now()))
 
     def heartbeat(self) -> None:
-        self._update("heartbeat_at = ?", (_now(),))
+        self._soft_update("heartbeat_at = ?", (_now(),))
+
+    def touch_queued(self) -> None:
+        """このプロセスのキューで待っているジョブの heartbeat も更新する。
+
+        待機中のジョブは自分では heartbeat を打たない。誤って2つ目を起動したとき、その起動時の
+        recover_interrupted（別プロセス）が、1つ目で2分以上待っているジョブを「中断」にしないように。
+        """
+        with _worker_lock:
+            owned = {job_id for db, job_id in _owned if db == self._db}
+        if not owned:
+            return
+        with self._lock:
+            ids = [r[0] for r in self._conn.execute("SELECT id FROM jobs WHERE status = 'queued'") if r[0] in owned]
+            ts = _now()
+            for i in range(0, len(ids), 500):  # SQLite の変数の上限を超えないよう分ける
+                part = ids[i:i + 500]
+                self._conn.execute(f"UPDATE jobs SET heartbeat_at = ? WHERE status = 'queued' AND id IN "
+                                   f"({', '.join('?' for _ in part)})", (ts, *part))
+            self._conn.commit()
 
     def is_cancelled(self) -> bool:
         return self._flags()[0]
@@ -262,7 +307,7 @@ def _fail_left_open(app, job_id: int) -> None:
 
 
 class _Ticker:
-    """fn が長い呼び出しで止まっていても heartbeat を更新し続ける。"""
+    """fn が長い呼び出しで止まっていても heartbeat を更新し続ける（このプロセスの待機中のジョブの分も）。"""
 
     def __init__(self, ctx: JobContext):
         self._ctx = ctx
@@ -273,6 +318,9 @@ class _Ticker:
         while not self._stop.wait(HEARTBEAT_INTERVAL):
             try:
                 self._ctx.heartbeat()
+                # 待機中のジョブは、このプロセスでいずれかのジョブが動いている（か一時停止している）間だけ
+                # 待たされる。そのジョブの Ticker が代わりに更新する
+                self._ctx.touch_queued()
             except Exception:
                 return
 

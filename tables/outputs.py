@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import io
+import unicodedata
 import zipfile
 
 RAG_DIR = "RAG投入用"
@@ -17,7 +18,7 @@ _FORMULA_PREFIX = ("=", "+", "-", "@", "\t", "\r")
 # ---- 管理用CSV -----------------------------------------------------------------------------
 
 def guard_formula(value) -> str:
-    """Excel で開いたときに式として実行されないよう、= + - @ で始まる文字列の先頭に ' を付ける。"""
+    """Excel で開いたときに式として実行されないよう、= + - @（全角も）で始まる文字列の先頭に ' を付ける。"""
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -25,7 +26,8 @@ def guard_formula(value) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     s = str(value)
-    if s.startswith(_FORMULA_PREFIX):
+    # 日本語の Excel は全角の ＝ ＋ － ＠ で始まる値も式として読むので、先頭の1文字は NFKC で比べる
+    if s.startswith(_FORMULA_PREFIX) or unicodedata.normalize("NFKC", s[:1]).startswith(_FORMULA_PREFIX):
         return "'" + s
     return s
 

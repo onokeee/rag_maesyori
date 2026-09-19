@@ -108,8 +108,24 @@ def suggest_columns(headers: list[str], sample_rows, template_spec=None) -> list
         if s.matched_by != "template" and s.role in ("entity", "entity_label") and _looks_filled_down(values):
             s.fill_down_blank = True
         out.append(s)
+    _keep_one_log(out)
     _dedupe_keys(out)
     return out
+
+
+def _keep_one_log(out: list[ColumnSuggestion]) -> None:
+    """AI整形の対象（追記ログ）は1列だけ。取り込み設定・辞書で当たった列、なければ最初の列を残し、
+    ほかは長文にする（何も変えずに保存しただけで「AI整形の対象は1列だけ」と断られないように）。"""
+    logs = [s for s in out if s.role == "log"]
+    if len(logs) <= 1:
+        return
+    rank = {"template": 0, "dictionary": 1, "similar": 2}
+    best = min(logs, key=lambda s: (rank.get(s.matched_by, 3), s.index))
+    for s in logs:
+        if s is not best:
+            s.role, s.log = "text", False
+            if s.md != "omit":
+                s.md = "body"
 
 
 def match_templates(headers: list[str], sheet_or_file_name: str, specs: list) -> list[tuple[object, int, int]]:

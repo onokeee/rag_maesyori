@@ -144,8 +144,10 @@ def test_check_button_revalidates_the_folder(client, out_dir):
     assert result["ok"] and result["folder"] == str(out_dir.resolve())
     assert result["md_count"] == 1 and result["parsed_dir"] is True
     # 入力が空なら保存済みのフォルダを確かめる。消えていれば使えないと出る
-    _set_folder(client, out_dir / "__parsed__")
-    (out_dir / "__parsed__").rmdir()
+    # （__parsed__ は保存先にできないので、別のサブフォルダで試す）
+    (out_dir / "sub").mkdir()
+    assert _set_folder(client, out_dir / "sub").status_code == 302
+    (out_dir / "sub").rmdir()
     result = client.post("/settings/output/check", json={}).get_json()
     assert not result["ok"] and "このフォルダがありません" in result["errors"][0]
 

@@ -198,6 +198,15 @@ _TITLE_LEAD_DATE = re.compile(
     r"|\d{1,2}[:：]\d{2}(?:[:：]\d{2})?"
     r"|[（(][^）)]{0,10}[)）]"
     r"|[\s頃、,。.・~〜\-]+)+")
+# 日付・時刻のすぐ後にこれが続くときは、時刻が文の一部（「0:28以降、…」）なので外さない
+_TITLE_LEAD_KEEP = ("以降", "以後", "以前", "から", "まで", "より", "前後", "過ぎ", "すぎ")
+
+
+def _strip_lead_date(text: str) -> str:
+    m = _TITLE_LEAD_DATE.match(text)
+    if m is None or text[m.end():].startswith(_TITLE_LEAD_KEEP):
+        return text
+    return text[m.end():]
 
 
 def _clip_title_text(text: str, limit: int) -> str:
@@ -217,14 +226,33 @@ def _clip_title_text(text: str, limit: int) -> str:
     return (cut or text[:limit].rstrip()) + "…"
 
 
+# 2行目以降の行頭の「現象:」「設備：」のような項目名（数字で始まるもの＝時刻は含めない）
+_TITLE_LABEL = re.compile(r"^(?![\d０-９])[^\s:：、。]{1,8}[ 　]*[:：][ 　]*")
+
+
 def _title_text_line(raw) -> str:
     """見出しに使う文章。1行目の「【発生】」「発生日時:」などの札と、それに続く日付・時刻を外した残り。
 
-    「【発生】R05.04.01 11:45(休日)」のように日付だけの1行目は空になる（見出しの日付と同じものを繰り返さない）。
+    「【発生】R05.04.01 11:45(休日)」のように日付だけの1行目は使わず（見出しの日付と同じものを繰り返さない）、
+    次の行（「設備:」の行は飛ばす）の札・項目名・日付を外した残りを使う。
     """
-    first = _one_line(str(raw).split("\n")[0])
-    body = _TITLE_TAG.sub("", first).strip()
-    return _TITLE_LEAD_DATE.sub("", body).strip()
+    lines = str(raw).split("\n")
+    first = _one_line(lines[0])
+    body = _strip_lead_date(_TITLE_TAG.sub("", first).strip()).strip()
+    if body or not first:
+        return body
+    # 1行目が札と日付だけ（「発生:2024-04-28 14:50」）なら、次の行から探す。「設備:」の行は見出しの設備と重なるので飛ばす
+    for line in lines[1:]:
+        line = _one_line(line)
+        tag = _TITLE_TAG.match(line)
+        text = _strip_lead_date(_TITLE_TAG.sub("", line).strip()).strip()
+        label = _TITLE_LABEL.match(text)
+        if (tag and "設備" in tag.group(0)) or (label and "設備" in label.group(0)):
+            continue
+        text = _strip_lead_date(_TITLE_LABEL.sub("", text).strip()).strip()
+        if text:
+            return text
+    return ""
 
 
 def record_title(values: dict, spec: TableSpec) -> str:
@@ -352,7 +380,8 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
 # ---- 時系列（他の列と重複する文を省く。取り込み設定の markdown.dedupe_timeline で切り替える） ----------
 
 _SENTENCE_END = re.compile(r"(?<=[。、])")
-_LEADING_NO = re.compile(r"^\s*\d{1,3}\s*[.)．）、]\s*")
+# 行頭の番号: 「1.」「1)」「(1)」「（1）」「①〜⑳」「⑴〜⒇」「⒈〜⒛」と、箇条書きの「・」
+_LEADING_NO = re.compile(r"^\s*(?:\d{1,3}\s*[.)．）、]|[(（]\s*\d{1,3}\s*[)）]|[①-⒛]|[・･])\s*")
 _DUPLICATE_MIN_CHARS = 6  # これより短い文は偶然一致しうるので省かない
 
 
@@ -380,7 +409,9 @@ def _column_sentences(values: dict, spec: TableSpec, log_key: str) -> dict[str, 
 
 def _dedupe_parse(parse, duplicates: dict[str, str]):
     """時系列の本文から、同じ記録の他の列と同じ文を省く（全部同じなら「（処置内容と同じ）」に縮める）。"""
-    if not duplicates or parse.kind != "log":
+    # 記入が1件だけのログ（single）も時系列として出すので同じように省く。見出しごとの形（header_cell）は
+    # 「対応の時系列」ではなく「（見出しごと）」として出すので対象にしない（design.md 6.2）
+    if not duplicates or parse.kind not in ("log", "single"):
         return parse
     changed = False
     segments = []
@@ -508,7 +539,11 @@ def _hint(spec: TableSpec) -> str | None:
 
 
 class _Names:
-    """ファイル名の重複を避ける（安全化で同じ名前になった場合だけ _2 を付ける）。"""
+    """ファイル名の重複を避ける（安全化で同じ名前になった場合だけ _2 を付ける）。
+
+    Windows のフォルダは大文字・小文字を区別しないので、比較は casefold して行う
+    （「ETC-302号機」と「Etc-302号機」が同じファイルに上書きされて記録が消えるのを防ぐ）。
+    """
 
     def __init__(self):
         self.used: set[str] = set()
@@ -516,10 +551,10 @@ class _Names:
     def make(self, parts: list[str], hint: str | None = None) -> str:
         name = md_filename(parts, hint)
         n = 2
-        while name in self.used:
+        while name.casefold() in self.used:
             name = md_filename(parts + [str(n)], hint)
             n += 1
-        self.used.add(name)
+        self.used.add(name.casefold())
         return name
 
 

@@ -206,6 +206,37 @@ def test_precheck_accepts_whole_row_and_whole_column_merges(tmp_path):
     precheck_excel(_xlsx_with_merge(tmp_path / "col.xlsx", "A1:A1048576"))
 
 
+def test_precheck_for_forms_refuses_many_whole_row_merges_quickly(tmp_path):
+    """帳票は画面を開くたびに通常モードで開き直す。行全体の結合 120 個（約200万セル）は1回に約16秒かかるので断る。"""
+    many = _xlsx_with_merge(tmp_path / "rows120.xlsx", "A1:XFD1")
+    many.write_bytes(_rewrite_merges(many, [f"A{r}:XFD{r}" for r in range(1, 121)]))
+    precheck_excel(many)   # 一覧表（読み取り専用で開き、結合を展開しない）はこれまでどおり通す
+    started = time.monotonic()
+    with pytest.raises(UploadError, match="結合セルの範囲が大きすぎます"):
+        precheck_excel(many, max_merged=files.FORM_MAX_MERGED_CELLS)
+    assert time.monotonic() - started < 2
+    with pytest.raises(UploadError, match="結合セル"):   # 列全体の結合（罫線付きなら1分以上かかる）も
+        precheck_excel(_xlsx_with_merge(tmp_path / "col.xlsx", "A1:A1048576"), max_merged=files.FORM_MAX_MERGED_CELLS)
+    # 行全体の結合が数個の帳票は通す
+    few = _xlsx_with_merge(tmp_path / "rows12.xlsx", "A1:XFD1")
+    few.write_bytes(_rewrite_merges(few, [f"A{r}:XFD{r}" for r in range(1, 13)]))
+    precheck_excel(few, max_merged=files.FORM_MAX_MERGED_CELLS)
+
+
+def _rewrite_merges(path, refs):
+    """_xlsx_with_merge で作ったブックの結合範囲を refs に置き換えた中身を返す。"""
+    out = io.BytesIO()
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in zin.infolist():
+            data = zin.read(info.filename)
+            if info.filename == "xl/worksheets/sheet1.xml":
+                merges = "".join(f'<mergeCell ref="{ref}"/>' for ref in refs)
+                data = re.sub(rb"<mergeCells\b.*?</mergeCells>",
+                              f'<mergeCells count="{len(refs)}">{merges}</mergeCells>'.encode(), data, flags=re.S)
+            zout.writestr(info, data)
+    return out.getvalue()
+
+
 def test_precheck_finds_a_merge_split_across_read_chunks(tmp_path, monkeypatch):
     monkeypatch.setattr(files, "CHUNK_SIZE", 64)   # タグがチャンクの境目で切れるようにする
     for pad in range(0, 64, 7):

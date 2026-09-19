@@ -120,6 +120,11 @@ def _skip_ws(sh: str, p: int) -> int:
     return p
 
 
+# 利用者が設定で書いた正規表現（日付ではない書き方・区切りの目印）に渡す長さの上限。
+# 行頭の目印を見るだけなので、長い行の全体を渡さない（書き方によっては時間がかかる正規表現の被害を抑える）
+USER_PATTERN_WINDOW = 200
+
+
 def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=(), end: int | None = None) -> HeadWhen | None:
     """影テキストの pos から始まる日時表現を読む。何もなければ None。"""
     end = len(sh) if end is None else end
@@ -127,7 +132,7 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
     p = pos
     w = HeadWhen(start=pos, end=pos)
     found = False
-    if not (not_date_res and any(r.match(view, p) for r in not_date_res)):
+    if not (not_date_res and any(r.match(view, p, p + USER_PATTERN_WINDOW) for r in not_date_res)):
         got = _match_date(view, p, line_start)
         if got:
             w.year, w.month, w.day, w.full, p = got

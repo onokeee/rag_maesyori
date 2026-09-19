@@ -114,6 +114,10 @@ def create_app(overrides: dict | None = None) -> Flask:
         # ブラウザのキャッシュ（戻る・再表示）に残らないよう、保存させない。静的ファイル（CSS・JS）は除く
         if request.endpoint != "static":
             response.headers["Cache-Control"] = "no-store"
+        # ほかのサイトのページの中（iframe）に表示させない。枠の中でのクリックは同じサイトからの操作になり、
+        # is_cross_site_write では防げない（削除ボタンを押させる、など）。静的ファイルも含めてすべての応答に付ける
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
         return response
 
     @app.errorhandler(403)
@@ -130,7 +134,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         # ダウンロード済みでデータが消えたあとに、開いたままの画面が途中保存・プレビューを送ると
         # ここに来る。HTML を返すとトーストに「通信に失敗しました」としか出ず、理由が伝わらない。
         if request.accept_mimetypes.best == "application/json" or request.is_json:
-            return jsonify(error="このデータはこのPCに残っていません（ダウンロード済みか、削除されています）。"
+            return jsonify(error="このデータはこのPCに残っていません（ダウンロード済みか保存先フォルダに保存済み、または削除されています）。"
                                  "ホームからやり直してください"), 404
         return render_template("errors/404.html"), 404
 

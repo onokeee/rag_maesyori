@@ -112,7 +112,7 @@
   {% endif %}
 {% endcall %}
 
-<p class="notice" role="note">{{ delete_note }}</p>
+<p class="notice" role="note">{{ delete_note }}{% if save_folder %} 保存先フォルダに保存したときも同じです（保存したファイルは残ります）。{% endif %}</p>
 <form method="post" action="{{ url_for('tables.confirm', import_id=imp.id) }}" class="form-actions"
       {% if confirmed %}data-confirm="この取り込みは確定済みです。Markdownを作り直しますか？（作成済みのファイルは置き換わります）" data-confirm-ok="作り直す"{% endif %}>
   {% if blocking %}<span class="warn">エラーが残っているため確定できません。</span>{% endif %}

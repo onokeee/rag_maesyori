@@ -29,7 +29,7 @@
   <div class="form-actions">
     <button type="submit" class="btn primary">ファイルを選んで次へ</button>
   </div>
-  <p class="hint">取り込んだデータはこのPCに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
+  <p class="hint">取り込んだデータはこのPCに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。{% if save_folder %}保存先フォルダに保存したときも同じです（保存したファイルは残ります）。{% endif %}</p>
 </form>
 {% endcall %}
 {% endblock %}

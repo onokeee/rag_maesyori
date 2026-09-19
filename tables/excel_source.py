@@ -32,15 +32,22 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.xml.constants import COMMENTS_NS
 from openpyxl.xml.functions import fromstring
 
+from tables.csv_source import MAX_COLUMNS
 from tables.source import CellInfo, SheetInfo, SourceRow, UploadError, cell_text
 
 DEFAULT_MAX_CELLS = 500_000
+# これより列の多いシートは、各行をその行の最後のセルまでにする（XFD1 のような遠くの値1つで
+# 行数×16,384列のセルを作って読み込みが止まらないように）。256 は旧形式（.xls）の列数の上限
+PAD_MAX_COLUMNS = 256
 _DIMENSION_RE = re.compile(rb'<dimension ref="([A-Z]+\d+(?::[A-Z]+\d+)?)"')
 _MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _SHEETDATA_START = re.compile(rb"<((?:[A-Za-z_][\w.\-]*:)?)sheetData\b[^>]*?(/?)>")
 _SHEETDATA_END = re.compile(rb"</(?:[A-Za-z_][\w.\-]*:)?sheetData\s*>")
 _CHUNK = 1024 * 1024
-_STAT_KEYS = ("cell_count", "max_row", "max_col", "ordered", "uncached_formulas")
+_STAT_KEYS = ("cell_count", "max_row", "max_col", "ordered", "uncached_formulas", "value_cols")
+# Excel の上限。これを超える位置にセルがあるファイルは Excel が書いたものではない（壊れている・手で作った）
+EXCEL_MAX_ROWS = 1_048_576
+EXCEL_MAX_COLUMNS = 16_384
 _OPEN_ERROR = "Excelファイルとして開けませんでした。.xlsx 形式で保存し直してください"
 
 
@@ -142,7 +149,8 @@ def _sheet_extras(wb, zf: zipfile.ZipFile, ws_ro, shared_strings, table_names: s
     for key, dim in ws.column_dimensions.items():
         if dim.hidden:
             lo = dim.min or column_index_from_string(key)
-            hi = dim.max or lo
+            # Excel の列は 16,384 列まで。手で作った max="20000000" で全部の列番号を並べない
+            hi = min(dim.max or lo, EXCEL_MAX_COLUMNS)
             hidden_columns.extend(range(lo, hi + 1))
     by_name = {}
     for t in tables:
@@ -166,6 +174,7 @@ def _scan_cells(f, extra: dict, shared_strings) -> dict:
     ordered = True
     count = max_row = max_col = 0
     seen_extra: set = set()
+    value_cols: set[int] = set()  # 値のある列（列数の上限の確認用。遠くのメモ1つは1列と数える）
     # セル1つぶんの状態
     cell_row = cell_col = 0
     cell_type = "n"
@@ -278,6 +287,7 @@ def _scan_cells(f, extra: dict, shared_strings) -> dict:
                 elif value is None:
                     value = m._value
             if value is not None and value != "":
+                value_cols.add(cell_col)
                 if cell_row > max_row:
                     max_row = cell_row
                 if cell_col > max_col:
@@ -301,8 +311,9 @@ def _scan_cells(f, extra: dict, shared_strings) -> dict:
         if key in seen_extra or isinstance(m, MergedCell) or m._value is None or m._value == "":
             continue
         max_row, max_col = max(max_row, key[0]), max(max_col, key[1])
+        value_cols.add(key[1])
     return {"cell_count": count + len(extra) - len(seen_extra), "max_row": max_row, "max_col": max_col, "ordered": ordered,
-            "uncached_formulas": {str(c): n for c, n in sorted(uncached.items())}}
+            "uncached_formulas": {str(c): n for c, n in sorted(uncached.items())}, "value_cols": len(value_cols)}
 
 
 # ---- シートの XML: セルの値（WorkSheetParser） ----
@@ -409,6 +420,11 @@ class ExcelSource:
             else:
                 with zf.open(ws._worksheet_path) as f:
                     scan = _scan_cells(f, extras["extra_cells"], ws._shared_strings)
+            if int(scan["max_row"]) > EXCEL_MAX_ROWS or int(scan["max_col"]) > EXCEL_MAX_COLUMNS:
+                # 行番号だけを大きくしたセル（D5000000 など）。rows() が空の行を何百万も作って止まったようになる
+                raise UploadError(f"シート「{ws.title}」に Excel の上限（{EXCEL_MAX_ROWS:,}行・{EXCEL_MAX_COLUMNS:,}列）を"
+                                  "超える位置のセルがあります。ファイルが壊れている可能性があります。"
+                                  "Excel で開いて保存し直してから取り込んでください")
             sheets[ws.title] = {**extras, **scan, "member": ws._worksheet_path, "state": ws.sheet_state}
         return sheets
 
@@ -483,6 +499,10 @@ class ExcelSource:
 
     def rows(self, sheet: str, start: int = 1, limit: int | None = None) -> Iterator[SourceRow]:
         meta = self._meta(sheet)
+        if int(meta.get("value_cols") or 0) > MAX_COLUMNS:
+            # CSV と同じ列数の上限。見出しごとに判定・辞書引きをするので、列が桁違いに多いと画面が何十秒も止まる
+            raise UploadError(f"シート「{sheet}」の列数が上限（{MAX_COLUMNS:,}列）を超えています"
+                              f"（値のある列が{int(meta['value_cols']):,}列）。不要な列を削除して保存し直してください")
         anchors = meta["anchors"]
         extra = meta["extra_cells"]
         extra_rows = {r for r, _c in extra}
@@ -494,6 +514,18 @@ class ExcelSource:
             return
         default = self._default_style
         style_of = self._style
+        # 列が多いシート（遠くの列に値が1つあるだけのことが多い）は、行を最後の列まで埋めない
+        # （CSV と同じく行ごとに長さが違う。読む側は範囲外を空として扱う）
+        trim = max_col > PAD_MAX_COLUMNS
+        anchor_last: dict[int, int] = {}
+        extra_last: dict[int, int] = {}
+        if trim:
+            for (ar, ac) in anchors:
+                if ac <= max_col and ac > anchor_last.get(ar, 0):
+                    anchor_last[ar] = ac
+            for (er, ec) in extra:
+                if ec <= max_col and ec > extra_last.get(er, 0):
+                    extra_last[er] = ec
         done = -1  # 読み終えた行（-1: まだ行を読み始めていない）
         try:
             with zipfile.ZipFile(self.path) as zf:
@@ -516,8 +548,16 @@ class ExcelSource:
                             by_col[d["column"]] = d
                     has_extra = r in extra_rows
                     has_anchor = r in anchor_rows
+                    width = max_col
+                    if trim:
+                        # 遠くの列に値が1つだけある表でも、行ごとに全列を作らない（その行の最後のセルまで）
+                        width = max([d["column"] for d in by_col.values()] + [0])
+                        if has_anchor:
+                            width = max(width, anchor_last[r])
+                        if has_extra:
+                            width = max(width, extra_last[r])
                     row_cells = []
-                    for c in range(1, max_col + 1):
+                    for c in range(1, width + 1):
                         anchor = anchors.get((r, c)) if has_anchor else None
                         m = extra.get((r, c)) if has_extra else None
                         d = by_col.get(c)

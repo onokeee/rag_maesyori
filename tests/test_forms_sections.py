@@ -142,6 +142,37 @@ def test_section_round_trips_through_the_form():
     assert rows_to_pattern(1, meta, sheets, field_rows).fields[0].section == "回答"
 
 
+def test_section_with_two_suffixes_is_stable_through_learning_and_saving(tmp_path):
+    """「■ 処置内容欄」のように末尾の語が重なる見出し: 何度そろえても同じ名前になり、区画の中の値を読む。"""
+    from excel.tables import section_name
+
+    for text in ("■ 処置内容欄", "■ 回答内容欄（記入）", "■ 作業日時欄"):
+        assert section_name(section_name(text)) == section_name(text)
+
+    def book(name, rows):
+        cells, fills = {"A1": "報告番号", "B1": name}, {"A1": LABEL_FILL}
+        for r, (label, value) in enumerate(rows, start=3):
+            cells[f"A{r}"] = label
+            if value is not None:
+                cells[f"B{r}"] = value
+            fills[f"A{r}"] = HEAD_FILL if value is None else LABEL_FILL
+        return _book(tmp_path, name + ".xlsx", {"報告書": (cells, fills, [])})
+
+    a = book("a", [("■ 依頼内容欄", None), ("担当者", "田中"), ("依頼事項", "ポンプ異音"),
+                   ("■ 処置内容欄", None), ("担当者", "鈴木"), ("処置", "ベアリング交換")])
+    b = book("b", [("■ 処置内容欄", None), ("担当者", "佐藤"), ("処置", "清掃")])
+    sheets, rows = suggest_rows([a, b])
+    pattern = rows_to_pattern(1, {"name": "報告書"}, sheets, rows)
+    reporter = next(f for f in pattern.fields if f.display_name == "担当者")
+    assert reporter.section == section_name("■ 処置内容欄")
+    assert extract_document(a, pattern, ["報告書"])["values"][reporter.field_name] == "鈴木"
+
+    # 画面から変更せずに保存し直しても区画は変わらない
+    meta, sheet_rows = {"name": "報告書"}, [{"use": True, "sheet_name": "報告書", "required": True}]
+    _, again = pattern_to_rows(pattern)
+    assert rows_to_pattern(1, meta, sheet_rows, again).fields == pattern.fields
+
+
 def test_adding_samples_fills_an_empty_section_but_keeps_a_set_one():
     """見本の追加で見つかった区画は、登録済みの項目の区画が空のときだけ入れる（手で決めた区画は変えない）。"""
     existing = _pattern(FieldDef("repair", "処置", ["暫定対策"], data_type="text"),

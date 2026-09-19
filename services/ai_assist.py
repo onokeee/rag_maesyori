@@ -62,7 +62,8 @@ def classify_pattern(info: WorkbookInfo, matches: list[PatternMatch]) -> dict:
     ids = {m.pattern.id for m in matches}
     pattern_id = data.get("pattern_id")
     pattern_id = int(pattern_id) if str(pattern_id).isdigit() and int(pattern_id) in ids else None
-    sheets = [s for s in (data.get("sheets") or []) if s in info.grids]
+    raw_sheets = data.get("sheets") if isinstance(data.get("sheets"), list) else []
+    sheets = [s for s in raw_sheets if isinstance(s, str) and s in info.grids]   # 想定外の型（リストなど）は捨てる
     try:
         confidence = max(0, min(100, int(data.get("confidence") or 0)))
     except (TypeError, ValueError):
@@ -92,14 +93,19 @@ def fill_missing(info: WorkbookInfo, extraction: dict) -> list[str]:
 
     values = data.get("values") if isinstance(data.get("values"), dict) else {}
     filled = []
+    updates: list[tuple[dict, dict]] = []   # 途中で失敗しても一部だけ入力済みにならないよう、最後にまとめて反映する
     model = llm.current_model()
     for f in targets:
         found = values.get(f["field_name"])
         if not isinstance(found, dict):
             continue
-        text = str(found.get("value") or "").strip()
+        raw = found.get("value")
+        if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+            continue   # 値がリスト・辞書などの応答は使わない
+        text = str(raw).strip()
         if not text:
             continue
+        extra: dict = {}
         if f["data_type"] == "date":
             value, warning = to_date(text, text, info.date1904)
         elif f["data_type"] == "number":
@@ -107,19 +113,23 @@ def fill_missing(info: WorkbookInfo, extraction: dict) -> list[str]:
             # 読み取りで書かれた単位に置き換わっていることがあるので、種類で決めた単位（spec_unit）で判定する
             spec = f.get("spec_unit", f.get("unit") or "") or ""
             value, warning = to_number(text, text, spec)
-            f["unit"], warning = number_unit(value, text, spec, f["field_name"], f["display_name"], warning)
+            extra["unit"], warning = number_unit(value, text, spec, f["field_name"], f["display_name"], warning)
         else:
             value, warning = text, None
-        sheet = found.get("sheet") if found.get("sheet") in info.grids else None
-        f.update({
+        s = found.get("sheet")
+        cell = found.get("cell")
+        updates.append((f, {
+            **extra,
             "value": value,
-            "sheet": sheet,
-            "value_cell": str(found.get("cell") or "")[:20] or None,
+            "sheet": s if isinstance(s, str) and s in info.grids else None,
+            "value_cell": (cell.strip()[:20] or None) if isinstance(cell, str) else None,
             "warning": warning or f"AI（{model}）が入力しました。元のファイルと照合してください。",
             "ai_filled": True,
             "edited": False,
-        })
+        }))
         filled.append(f["display_name"])
+    for f, update in updates:
+        f.update(update)
     return filled
 
 

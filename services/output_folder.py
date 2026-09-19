@@ -80,6 +80,23 @@ def _inside(path: Path, parent: Path) -> bool:
         return False
 
 
+def _inside_same(path: Path, parent: Path) -> bool:
+    r"""path が parent の中か（別の書き方のパスも含めて）。
+
+    \\?\C:\… や \\localhost\C$\… のように、同じフォルダを別の書き方で指すと、resolve() のあとも
+    文字の比較では別のパスになる。そこで、path とその親をたどり、同じフォルダ（os.path.samefile）かも比べる。
+    """
+    if _inside(path, parent):
+        return True
+    for ancestor in (path, *path.parents):
+        try:
+            if os.path.samefile(ancestor, parent):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 # Windows のパスの長さの上限（MAX_PATH 260 から終端の1文字を引いた数）。フォルダを作るときは 8.3 形式の名前の分を
 # さらに空けておく必要がある（CreateDirectoryW は 248 未満）。レジストリの LongPathsEnabled が 1 なら上限は無い。
 MAX_PATH_CHARS = 259
@@ -155,9 +172,14 @@ def check_folder(text) -> tuple[Path | None, list[str]]:
     if not resolved.is_dir():
         return resolved, ["これはファイルです。フォルダを指定してください"]
     for app_dir in _app_dirs():
-        if _inside(resolved, app_dir):
+        if _inside_same(resolved, app_dir):
             return resolved, ["このアプリがデータを置くフォルダの中は保存先にできません"
                               "（アプリの片付けで消されることがあります）"]
+    # LightRAG の取り込み済みのフォルダ・このアプリの管理用のフォルダ（とその中）は、LightRAG のスキャンが読まない
+    for part in resolved.parts:
+        if part.casefold() in (LIGHTRAG_PARSED_DIR.casefold(), ADMIN_SUBDIR.casefold()):
+            return resolved, [f"「{part}」の中は保存先にできません（LightRAG のスキャンは INPUT_DIR の直下しか読みません）。"
+                              f"その1つ上の、LightRAG の INPUT_DIR を指定してください"]
     limit = path_limit()
     if limit is not None and len(str(resolved)) + 1 + _PROBE_NAME_CHARS > limit:
         return resolved, [f"フォルダのパスが長すぎます（{len(str(resolved))}文字）。Windows ではパス全体が{limit}文字を"

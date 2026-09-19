@@ -96,16 +96,35 @@ def md_bullet(label: str, value) -> list[str]:
     return [f"- {label}:"] + [f"  {escape_md_line(ln)}" for ln in lines]
 
 
-def estimate_tokens(text: str) -> int:
-    """推定トークン数（実トークン以上になる見積もり）。非ASCII 1文字=1.1、ASCII 2文字=1。
+# estimate_tokens 用：UTF-8 のバイトを種類の印に置き換える表（数字 → "0"、ASCII の記号 → "."、それ以外 → "x"）
+_TOKEN_CLASS = bytes(
+    ord("0") if 0x30 <= b <= 0x39 else ord(".") if (0x21 <= b <= 0x2F or 0x3A <= b <= 0x40 or 0x5B <= b <= 0x60
+                                                     or 0x7B <= b <= 0x7E) else ord("x")
+    for b in range(256))
 
-    LightRAG の o200k_base と比べた実測（実出力 6,150 ブロック）で、この式は実/推定の p95 0.98・最大 1.05。
-    旧式（非ASCII 1、ASCII 3文字=1）は中央値で 13%・最大 29% 少なく見積もっていた。
+
+def estimate_tokens(text: str) -> int:
+    """推定トークン数（実トークン以上になる見積もり）。
+
+    非ASCII 1文字=1.1、ASCII の記号 1文字=1、数字は「連続する数字のまとまり1つ=1 ＋ 3桁ごとに1」、
+    それ以外の ASCII（英字・空白・改行）2文字=1。
+    LightRAG の o200k_base は数字を3桁ずつに区切り、記号（- : / . = など）もほぼ1文字ずつ別のトークンにする。
+    日時・品番・計測値の多い記録（「2023-09-01 09:44」は実10トークン）を英字と同じ2文字=1で数えると、
+    実トークンより3割ほど少なく見積もり、記録の上限（チャンク 1,500）を超えることがあった。
+    実出力 142,952 ブロックとの実測で、この式は実/推定の最大 0.99（旧式は 1.32）、全体では 23% 多めに見積もる。
+    例外：まれな漢字（髙・﨑 など）は1文字が2〜3トークンになる。記録全体では他の文字の余裕に吸収される。
     """
     if not text:
         return 0
     ascii_count = len(text.encode("ascii", "ignore"))  # ASCII の文字数（1文字ずつ数えるより速い）
-    return -(-(11 * (len(text) - ascii_count) + 5 * ascii_count) // 10)  # 整数だけで ceil する（浮動小数の誤差を避ける）
+    marks = text.encode("utf-8", "surrogatepass").translate(_TOKEN_CLASS)
+    digits = marks.count(b"0")
+    punct = marks.count(b".")
+    digit_runs = marks.count(b"x0") + marks.count(b".0") + (marks[:1] == b"0")   # 数字のまとまりの数
+    other = ascii_count - digits - punct
+    # 30分の1トークン単位の整数で数えて ceil する（浮動小数の誤差を避ける）
+    total = 33 * (len(text) - ascii_count) + 15 * other + 30 * punct + 10 * digits + 30 * digit_runs
+    return -(-total // 30)
 
 
 def join_blocks(blocks: list[list[str]]) -> str:

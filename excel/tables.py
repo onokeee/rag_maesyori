@@ -221,8 +221,8 @@ def detect_tables(grid: SheetGrid) -> list[Table]:
     return tables
 
 
-def find_table_by_columns(grid: SheetGrid, columns: list[str]) -> Table | None:
-    """列見出しの半分以上が columns と同じ、行のある明細表（最も似ているもの）。"""
+def find_table_by_columns(grid: SheetGrid, columns: list[str], keep=None) -> Table | None:
+    """列見出しの半分以上が columns と同じ、行のある明細表（最も似ているもの）。keep(表) が偽の表は使わない。"""
     from excel.text import normalize_label
 
     wanted = {normalize_label(c) for c in columns} - {""}
@@ -232,7 +232,8 @@ def find_table_by_columns(grid: SheetGrid, columns: list[str]) -> Table | None:
     for table in detect_tables(grid):
         have = {h.norm for h in table.header}
         score = len(have & wanted) / len(have | wanted)
-        if score >= SAME_COLUMNS_RATIO and score > best_score and table.to_value() is not None:
+        if (score >= SAME_COLUMNS_RATIO and score > best_score and table.to_value() is not None
+                and (keep is None or keep(table))):
             best, best_score = table, score
     return best
 
@@ -337,13 +338,18 @@ def section_name(text) -> str:
     """区画の見出しの比較用の名前。印・項番・括弧書き・末尾の「欄」「内容」を除く（版ごとの書き方の違いを吸収する）。
 
     「▼ 回答欄（宛先部署にて記入し…）」「【回答欄】」「回答欄」→「回答」。帳票の種類の画面で入力された区画もこれでそろえる。
+    何度通しても同じ結果になる（「■ 処置内容欄」も「処置内容」も「処置」）。
     """
     from excel.text import label_base, normalize_label, section_stripped
 
     title = _title_text(text)
     norm = normalize_label(_SECTION_TAIL.sub("", title)) or normalize_label(title)
     norm = section_stripped(norm) or norm
-    return label_base(norm) or norm
+    # 「処置内容欄」→「処置内容」→「処置」のように末尾の語が重なることがあるので、変わらなくなるまで除く。
+    # 保存した区画をもう一度この関数に通しても同じ名前になる（見出しと保存値が必ずそろう）。
+    while base := label_base(norm):
+        norm = base
+    return norm
 
 
 def _section_start(cell: Cell) -> bool:
@@ -365,20 +371,51 @@ def sections(grid: SheetGrid) -> list[Section]:
     for head in heads:
         # 同じ高さ（行が重なる）で右にある次の見出しの手前までを、この区画の横幅にする
         right_heads = [h.col for h in heads if h.col > head.max_col and h.row <= head.max_row and h.max_row >= head.row]
+        # 上の行で右側に始まった区画（右上の「【回答欄】」の下に左の「■ 発行部署記入欄」がある版）の列は、
+        # その区画のまま（左の区画の横幅に入れない）。右上の区画の列に、あとから別の見出しが無いときだけ
+        for h in heads:
+            if h.col > head.max_col and h.max_row < head.row and not any(
+                    h.max_row < k.row < head.row and k.max_col >= h.col for k in heads):
+                right_heads.append(h.col)
         out.append(Section(section_key(head), head, min(right_heads, default=grid.max_col + 1) - 1))
     grid._sections = out
     return out
 
 
+def _enclosing(grid: SheetGrid, cell: Cell) -> list[Section]:
+    """セルを含む区画（見出しがセルより上か同じ行で、横幅にセルの列が入るもの）。近い見出し（下・右）から順に。"""
+    found = [sec for sec in sections(grid) if sec.cell.row <= cell.row and sec.cell.col <= cell.col <= sec.right]
+    return sorted(found, key=lambda sec: (sec.cell.row, sec.cell.col), reverse=True)
+
+
 def section_of(grid: SheetGrid, cell: Cell) -> str:
     """セルが入っている区画の名前。どの区画にも入らなければ ""。区画の見出しのセル自身はその区画に入る。"""
-    best: Section | None = None
-    for sec in sections(grid):
-        head = sec.cell
-        if head.row <= cell.row and head.col <= cell.col <= sec.right:
-            if best is None or head.row > best.cell.row or (head.row == best.cell.row and head.col > best.cell.col):
-                best = sec
-    return best.key if best else ""
+    found = _enclosing(grid, cell)
+    return found[0].key if found else ""
+
+
+def _heading_level(cell: Cell) -> int:
+    """区画の見出しの階層。「■」「▼」「【】」などの印=0、「1.」「D1」=1、「a.」=2（数字の小見出しは印の見出しの中）。"""
+    head = _compact(cell.text)
+    if re.match(r"^[a-z][.)、]", head):
+        return 2
+    return 1 if re.match(r"^(?:\d|d[1-8])", head) else 0
+
+
+def sections_of(grid: SheetGrid, cell: Cell) -> list[str]:
+    """セルが入っている区画の名前を、内側（一番近い見出し）から外側へ。
+
+    「▼ 回答欄」の下の「1. 暫定対策」の中のセルは ["暫定対策", "回答"]。外側の見出しは、それより内側の見出しより
+    上の階層（印の見出しは数字の小見出しの外側）のものだけ。同じ階層の見出しが下にあれば、上の区画はそこで終わっている。
+    """
+    out: list[str] = []
+    level = None
+    for sec in _enclosing(grid, cell):
+        lv = _heading_level(sec.cell)
+        if level is None or lv < level:
+            out.append(sec.key)
+            level = lv
+    return out
 
 
 def table_header_keys(grid: SheetGrid) -> set[tuple[int, int]]:

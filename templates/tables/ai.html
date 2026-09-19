@@ -64,8 +64,10 @@
     {% endif %}
     {% if job_active %}
     <div class="btn-row">
-      {% if job.status == 'paused' %}
+      {% if job.status == 'paused' or job.pause_requested %}
+      {# 一時停止を頼んだ直後は、送信中の呼び出しを待つ間まだ「実行中」。そのときも再開を出す #}
       <form method="post" action="{{ url_for('tables.ai_control', import_id=imp.id, action='resume') }}" class="inline"><button class="btn">再開</button></form>
+      {% if job.status != 'paused' %}<span class="hint">一時停止中…（送信中の呼び出しが終わると止まります）</span>{% endif %}
       {% else %}
       <form method="post" action="{{ url_for('tables.ai_control', import_id=imp.id, action='pause') }}" class="inline"><button class="btn">一時停止</button></form>
       {% endif %}

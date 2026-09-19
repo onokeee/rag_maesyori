@@ -37,6 +37,17 @@ ZIP_RATIO_MIN_BYTES = 16 * 1024 * 1024
 # シート全体の結合（A1:XFD1048576 など）が1つあるだけで、上のサイズ制限より前に固まる（数秒〜終わらない）。
 # 行全体の結合（A1:XFD1 = 16,384 セル）や列全体の結合（A:A = 約105万セル）は通す。
 MAX_MERGED_CELLS = 2_000_000
+# 帳票（通常モードで開く）の結合セルの面積の上限。openpyxl は結合範囲ごとに中のセルを1つずつ片付け、
+# 左上のセルに罫線があれば範囲の辺のセルを1つずつ作るので、面積に比例して遅くなる（行全体の結合 120 個
+# ＝約200万セルで約16秒、罫線付きの列全体の結合1つで1分以上）。帳票は画面を開くたびにブックを開き直すので、
+# 1回あたり2秒程度に収まるこの値で断る（行全体の結合なら12個まで通る。ふつうの帳票は数千セル）。
+# 一覧表は読み取り専用モードで開き結合を展開しないので、上の MAX_MERGED_CELLS のまま。
+FORM_MAX_MERGED_CELLS = 200_000
+# ハイパーリンク・コメントの範囲の面積（ブック全体の合計）の上限。openpyxl はリンク（<hyperlink ref>）とコメント
+# （<comment ref>）の範囲のセルを1つずつ作る（帳票の通常モードでも、一覧表の tables.excel_source でも）。
+# シート全体を指す範囲1つで開くのが終わらなくなる（A1:XFD50 の約82万セルで一覧表は約28秒）。
+# ふつうのリンク・コメントは1セルか数セルなので、1回あたり2秒以内に収まるこの値で断る。
+MAX_LINKED_CELLS = 50_000
 # セル数の上限（ブック全体の <c> の数）。openpyxl は開くときにセルを1つずつ作るので、
 # 圧縮すると小さいが展開すると大量のセルがあるブック（64KB で 100万セルなど）は、上のサイズ制限を通っても固まる。
 # 一覧表は tables.excel_source が別に上限（EXCEL_MAX_CELLS）を持ち「CSVで保存」と案内するので、ここは最後の砦の値。
@@ -136,10 +147,16 @@ def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> Stor
     return StoredFile(stored_path=stored, file_name=name, file_hash=digest.hexdigest(), size=size)
 
 
-def precheck_excel(path, max_cells: int | None = None) -> None:
+def precheck_excel(path, max_cells: int | None = None, max_merged: int | None = None,
+                   max_rows: int | None = None) -> None:
     """Excel（.xlsx/.xlsm）として開いてよいかを、中身を展開せずに確かめる。問題があれば UploadError。
 
     max_cells: セル数の上限（省略時は MAX_CELLS）。
+    max_merged: 結合セルの面積の上限（省略時は MAX_MERGED_CELLS。帳票は FORM_MAX_MERGED_CELLS を渡す）。
+    max_rows: 行（<row>）の数の上限（省略時は max_merged と同じ値）。通常モードの openpyxl は、セルの無い
+      <row ht="20" customHeight="1"/> のような行にも行の書式を1つずつ作るので、結合セルと同じくらい開くのが遅くなる
+      （100万行で約9秒）。帳票は画面を開くたびに開き直すので、結合セルと同じ目安（1回あたり2秒程度）で断る。
+      一覧表は読み取り専用モードで開き行の書式を作らないので、MAX_MERGED_CELLS のままで困らない。
     """
     path = Path(path)
     with open(path, "rb") as f:
@@ -163,7 +180,8 @@ def precheck_excel(path, max_cells: int | None = None) -> None:
                 text = wb.read(_WORKBOOK_HEAD_BYTES).decode("utf-8", errors="ignore")
             # シートの置き場所と名前（拡張子）は workbook.xml.rels で自由に決められる（sheet1.dat でも開ける）ので、
             # 名前で選ばずに部品をすべて見る（XML でない部品は、読み始めてすぐ読めなくなって終わる）
-            _check_sheet_parts(zf, sorted(names), max_cells or MAX_CELLS)
+            max_merged = max_merged or MAX_MERGED_CELLS
+            _check_sheet_parts(zf, sorted(names), max_cells or MAX_CELLS, max_merged, max_rows or max_merged)
     # zlib.error / EOFError: 圧縮データが壊れている（zipfile はこれらを包まずにそのまま投げる）
     except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, RuntimeError, NotImplementedError,
             zlib.error, EOFError) as exc:
@@ -193,16 +211,20 @@ def _merged_area(ref: str | None) -> int:
 
 
 class _PartCounter:
-    """XML の部品1つを分割して読み、結合範囲の面積とセル数を数える（xml.parsers.expat）。
+    """XML の部品1つを分割して読み、結合範囲の面積・セル数・行数・リンクとコメントの範囲の面積を数える（xml.parsers.expat）。
 
     文字列を正規表現で探すのではなく XML として読むので、ref = "..."（= の前後の空白）、文字参照（&#88;）、
     どんな名前空間の接頭辞（<x.y:c> など）でも、openpyxl（xml.etree＝同じ expat）と同じ解釈で数える。
     """
 
-    def __init__(self, merged: int, cells: int, max_cells: int):
+    def __init__(self, merged: int, cells: int, max_cells: int, max_merged: int | None = None, *,
+                 rows: int = 0, linked: int = 0, max_rows: int | None = None):
         from xml.parsers import expat
 
         self.merged, self.cells, self.max_cells = merged, cells, max_cells
+        self.max_merged = max_merged or MAX_MERGED_CELLS
+        self.rows, self.linked = rows, linked
+        self.max_rows = max_rows or self.max_merged
         self.anchors = 0              # この部品の図形（アンカー）の数
         self.drawing_targets = []     # この部品（.rels）が参照する描画部品の Target
         self.parser = expat.ParserCreate(namespace_separator=" ")
@@ -214,7 +236,7 @@ class _PartCounter:
         namespace, _, local = name.rpartition(" ")
         if local == "mergeCell":
             self.merged += _merged_area(attrs.get("ref"))
-            if self.merged > MAX_MERGED_CELLS:
+            if self.merged > self.max_merged:
                 raise UploadError("結合セルの範囲が大きすぎます（シート全体・列全体の結合など）。"
                                   "不要な結合を解除して保存し直してください")
         elif local == "c" and namespace in _SHEET_NAMESPACES:
@@ -222,6 +244,16 @@ class _PartCounter:
             if self.cells > self.max_cells:
                 raise UploadError(f"セル数が上限（{self.max_cells:,} セル）を超えています。"
                                   "不要なシート・範囲を削除して保存し直してください")
+        elif local == "row" and namespace in _SHEET_NAMESPACES:
+            self.rows += 1
+            if self.rows > self.max_rows:
+                raise UploadError(f"行数が上限（{self.max_rows:,} 行）を超えています（高さなどの書式だけの行も数えます）。"
+                                  "不要な行を削除して保存し直してください")
+        elif local in ("hyperlink", "comment") and namespace in _SHEET_NAMESPACES:
+            self.linked += _merged_area(attrs.get("ref"))
+            if self.linked > MAX_LINKED_CELLS:
+                raise UploadError("ハイパーリンクまたはコメントの範囲が大きすぎます（シート全体・列全体を指すリンクなど）。"
+                                  "不要なリンク・コメントを削除して保存し直してください")
         elif local in _ANCHOR_NAMES:
             self.anchors += 1
         elif local == "Relationship" and str(attrs.get("Type", "")).endswith(_DRAWING_REL_SUFFIX)                 and attrs.get("TargetMode") != "External":
@@ -231,8 +263,9 @@ class _PartCounter:
         raise UploadError("Excelファイルとして読み込めません（不正なファイルの可能性があります）")
 
 
-def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int) -> None:
-    """部品の XML を分割して読み、結合範囲の面積の合計とセル数を数え、上限を超えたら UploadError。
+def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int, max_merged: int | None = None,
+                       max_rows: int | None = None) -> None:
+    """部品の XML を分割して読み、結合範囲の面積・セル数・行数・リンクとコメントの範囲の面積の合計を数え、上限を超えたら UploadError。
 
     openpyxl で開く前に確かめる（開いた時点で結合範囲のセルと、すべてのセルが作られてしまうため）。
     XML として読めなくなった部品は、そこまでの分だけ数える（画像などの XML でない部品はすぐ終わる）。
@@ -242,10 +275,12 @@ def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int) ->
 
     merged = 0
     cells = 0
+    rows = 0
+    linked = 0
     anchors: dict[str, int] = {}       # 部品 → 図形の数
     references: dict[str, int] = {}    # 描画部品 → 参照される回数（シートごとに読み直されるため）
     for part in parts:
-        counter = _PartCounter(merged, cells, max_cells)
+        counter = _PartCounter(merged, cells, max_cells, max_merged, rows=rows, linked=linked, max_rows=max_rows)
         with zf.open(part) as f:
             try:
                 while True:
@@ -255,7 +290,7 @@ def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int) ->
                         break
             except expat.ExpatError:
                 pass
-        merged, cells = counter.merged, counter.cells
+        merged, cells, rows, linked = counter.merged, counter.cells, counter.rows, counter.linked
         anchors[part] = counter.anchors
         for target in counter.drawing_targets:
             drawing = _resolve_rel_target(part, target)

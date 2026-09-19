@@ -7,7 +7,7 @@ from __future__ import annotations
 from flask import Blueprint, abort, current_app, flash, redirect, render_template, request, url_for
 from werkzeug.datastructures import MultiDict
 
-from core.files import UploadError, precheck_excel, remove_upload, save_upload, upload_path
+from core.files import FORM_MAX_MERGED_CELLS, UploadError, precheck_excel, remove_upload, save_upload, upload_path
 from excel.extractor import extract_document
 from excel.workbook import load_workbook_info
 from export.formats import build_markdown, markdown_filename
@@ -52,7 +52,7 @@ def _save_samples(pattern_id: int, files) -> tuple[int, list[str]]:
             continue
         try:
             path = upload_path(stored.stored_path)
-            precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"))
+            precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"), max_merged=FORM_MAX_MERGED_CELLS)
             try:
                 load_workbook_info(path)
             except Exception as exc:

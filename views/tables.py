@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import copy
 import io
+import re
 import sqlite3
 import threading
+import unicodedata
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +70,16 @@ DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込み�
 # 保存先フォルダに保存するときも、ダウンロードと同じくデータが消える（design.md 3.3。保存したファイルは残る）
 SAVE_TO_FOLDER_CONFIRM = ("保存先フォルダに保存すると、この取り込みのデータはこのPCのアプリから消えます（保存した md は残ります）。"
                           "もう一度保存・ダウンロードすることはできません。")
+# 設定で管理用ファイルを保存しないとき（既定）に確認文へ足す（design.md 2.8。保存したあとは取り込みが消えるため）
+SAVE_ADMIN_OFF_NOTE = ("管理用のファイル（正規化データ・問題一覧・取込レポート）は保存しません（設定でオンにできます）。"
+                       "要るときは、保存の代わりに zip をダウンロードしてください。")
+
+
+def save_to_folder_confirm(save_admin: bool | None = None) -> str:
+    """一覧表を保存先フォルダに保存するときの確認文。管理用ファイルを保存しない設定なら、そのことも書く。"""
+    if save_admin is None:
+        save_admin = output_folder.load()["save_admin"]
+    return SAVE_TO_FOLDER_CONFIRM + ("" if save_admin else SAVE_ADMIN_OFF_NOTE)
 ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
                     ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16"),
                     ("utf-16-le", "UTF-16LE（BOMなし）"), ("utf-16-be", "UTF-16BE（BOMなし）")]
@@ -149,13 +161,34 @@ def _int(value, default=None):
         return default
 
 
+# 行番号の範囲「3-4」を広げる上限（見出し行の帯なので広くはならない）。static/tables.js の parseRows と同じ規則
+_MAX_ROW_SPAN = 10
+
+
+def _row_no(value) -> int | None:
+    """行番号の入力（全角数字も可）。数字だけのときだけ読む（static/tables.js の parseEnd と同じ規則）。"""
+    text = unicodedata.normalize("NFKC", str(value if value is not None else "")).strip()
+    return int(text) if text.isascii() and text.isdigit() and int(text) > 0 else None
+
+
 def _int_list(value) -> list[int]:
+    """見出し行の入力（「1,2」「1、2」「1 2」「１，２」「1-2」）。static/tables.js の parseRows と同じ規則で読む。"""
     if isinstance(value, (list, tuple)):
-        items = value
+        items = [str(x) for x in value]
     else:
-        items = str(value or "").replace("、", ",").replace(" ", ",").split(",")
-    out = sorted({n for n in (_int(x) for x in items) if n and n > 0})
-    return out
+        items = re.split(r"[,、\s]+", unicodedata.normalize("NFKC", str(value or "")))
+    out: set[int] = set()
+    for item in items:
+        m = re.fullmatch(r"(\d+)-(\d+)", item.strip())
+        if m and item.isascii():
+            a, b = int(m.group(1)), int(m.group(2))
+            if 0 < a <= b and b - a < _MAX_ROW_SPAN:
+                out.update(range(a, b + 1))
+            continue
+        n = _row_no(item)
+        if n:
+            out.add(n)
+    return sorted(out)
 
 
 def _ai_running(import_id: int) -> bool:
@@ -167,7 +200,7 @@ def _ai_running(import_id: int) -> bool:
 # 終わった試し実行が AI の結果・応答を書き戻して残してしまう（design.md 3.3）
 _TRIALS: Counter[int] = Counter()
 _TRIALS_LOCK = threading.Lock()
-TRIAL_BUSY_MESSAGE = "AIの試し実行中は削除・ダウンロードできません。試し実行が終わってからもう一度押してください"
+TRIAL_BUSY_MESSAGE = "AIの試し実行中は削除・ダウンロード・保存できません。試し実行が終わってからもう一度押してください"
 
 
 def _trial_running(import_id: int) -> bool:
@@ -251,7 +284,11 @@ def delete_import(import_id: int):
     purge.purge_table_import(import_id)
     # ファイル名は出さない: flash はブラウザのセッションクッキーに載るので、取引先名や「社外秘」を
     # 含みうる名前をサーバー側から消したあともブラウザに残ってしまう（design.md 3.3）
-    flash("取り込みを削除しました（元のファイル・読み込んだ内容・作った Markdown を消しました）", "success")
+    if purge.purge_incomplete():
+        # 使用中などで消し切れなかったファイルは中身を 0 バイトにしてある（次の起動時に片付く。design.md 3.3）
+        flash("取り込みを削除しました（一部のファイルは使用中で消し切れず、中身を空にしました。次の起動時に片付きます）", "success")
+    else:
+        flash("取り込みを削除しました（元のファイル・読み込んだ内容・作った Markdown を消しました）", "success")
     return redirect(safe_next(url_for("tables.new")))
 
 
@@ -337,15 +374,20 @@ def source(import_id: int):
         if _is_excel(imp) and len([s for s in sheets if not s.hidden]) <= 8:
             # 「一覧表らしい」「クロス集計らしい（対応していません）」を出し分ける（3画面目の判定と合わせる）
             list_like = {s.name: source_obj.list_kind(s.name) for s in sheets if not s.hidden}
-        layout = source_obj.layout(sheet, max_scan_rows=200)
+        # 3画面目で見出し行を指定してあれば、その行の見出しで候補を探す（自動判定は先頭40行しか探さない）
+        saved_rows = [int(r) for r in src.get("header_rows") or [] if r] or None
+        layout = source_obj.layout(sheet, header_rows=saved_rows, max_scan_rows=200)
         headers = layout.headers
     except UploadError as exc:
         error = str(exc)
-    if templates and headers:
+    if templates:
+        # 見出しが読み取れないときも、保存した取り込み設定は選べるように全部出す（一致数は 0 になる）
         by_id = {id(t["spec"]): t for t in templates}
         for spec, matched, total in match_templates(headers, sheet or imp["file_name"], [t["spec"] for t in templates]):
             candidates.append({"template": by_id[id(spec)], "matched": matched, "total": total})
     selected = imp.get("template_id")
+    if selected and selected not in {c["template"]["id"] for c in candidates}:
+        selected = None   # 消した取り込み設定など、選べるものが無いときは「新しく作る」を選んでおく
     if not selected and candidates and candidates[0]["total"] and candidates[0]["matched"] == candidates[0]["total"]:
         selected = candidates[0]["template"]["id"]
     return render_template(
@@ -459,7 +501,7 @@ def layout_detect(import_id: int):
         source_obj = _open(imp)
         sheet = _sheet(imp, source_obj)
         guess = _layout(imp, source_obj, sheet, header_rows=_int_list(data.get("header_rows")) or None,
-                        data_end=_int(data.get("data_end")), use_saved=False)
+                        data_end=_row_no(data.get("data_end")), use_saved=False)
     except UploadError as exc:
         return _json_error(str(exc))
     return jsonify(_layout_json(guess))
@@ -472,7 +514,7 @@ def save_layout(import_id: int):
         flash(BUSY_MESSAGE, "error")
         return redirect(url_for("tables.preview", import_id=import_id))
     header_rows = _int_list(request.form.get("header_rows"))
-    data_end = _int(request.form.get("data_end_row"))
+    data_end = _row_no(request.form.get("data_end_row"))
     try:
         source_obj = _open(imp)
         sheet = _sheet(imp, source_obj)
@@ -552,10 +594,13 @@ _SCREEN_MD_KEYS = ("file_prefix", "group_by", "max_records_per_file", "omit_pers
 def _base_column(base_spec, row: dict, taken: set[str]):
     """画面の行に対応する前の設定の列。キーで探し、無ければ見出しで探す（taken: 他の行がキーで使う列）。"""
     key = str(row.get("key") or "").strip()
-    col = base_spec.column(key) if key else None
-    if col is not None:
-        return col
     header = str(row.get("header") or "")
+    col = base_spec.column(key) if key else None
+    if col is not None and (not header or header in (col.headers or []) or header == col.display
+                            or not any(header in (c.headers or []) or header == c.display for c in base_spec.columns)):
+        # キーで当たった列でも、見出しが別の列のものなら使わない（キーを入れ替えた・重ねたときに、
+        # 別の列の見出しの別名・値の置き換えを引き継がないように）
+        return col
     if not header:
         return None
     return next((c for c in base_spec.columns if c.key not in taken and header in (c.headers or [])), None)
@@ -643,6 +688,9 @@ def _build_spec(payload: dict, base_spec=None):
     rows = [r for r in payload.get("columns") or [] if isinstance(r, dict)]
     used = [r for r in rows if r.get("use")]
     name = str(payload.get("name") or "").strip()
+    # 入力したキーの重なり。spec_from_suggestions は黙って「_2」を付けるので、validate_spec の確認に届かない
+    typed = Counter(str(r.get("key") or "").strip() for r in used if str(r.get("key") or "").strip())
+    dup_errors = [f"キー「{k}」が重複しています" for k, n in typed.items() if n > 1]
     suggestions = []
     for i, r in enumerate(used):
         role = str(r.get("role") or "attribute")
@@ -669,8 +717,12 @@ def _build_spec(payload: dict, base_spec=None):
     spec.header["ignored"] = [str(r.get("header") or "") for r in rows if not r.get("use")]
     # 空欄・設定名と同じ接頭辞は保存しない（空欄＝設定名。名前を変えたら新しい名前が使われるように）
     prefix = str(payload.get("file_prefix") or "").strip()
+    # 前の名前と同じ接頭辞は、前の設定にそう保存されていた（以前の版で空欄を設定名として保存した）ときだけ空欄に戻す。
+    # 名前を変えるときに前の名前を手で入れたなら、その接頭辞を残す（md のファイル名を変えないため）
     old_name = base_spec.name if base_spec is not None else ""
-    spec.markdown["file_prefix"] = "" if prefix in ("", name, old_name) else prefix
+    old_prefix = str((base_spec.markdown or {}).get("file_prefix") or "").strip() if base_spec is not None else ""
+    legacy = bool(old_name) and prefix == old_name and old_prefix == old_name
+    spec.markdown["file_prefix"] = "" if prefix in ("", name) or legacy else prefix
     spec.markdown["omit_person"] = bool(payload.get("omit_person", True))
     # 画面のチェックは必ず true/false で送られてくる（static/tables.js）。キーが無いのは画面以外からの呼び出しで、
     # そのときは分割ヒントは付けず、時系列の重複削除は今までどおり行う。
@@ -687,6 +739,14 @@ def _build_spec(payload: dict, base_spec=None):
         spec.header = header
         # 記録キーと日付の列は画面の役割から決める。それ以外の項目は前の設定のまま
         spec.period = {**copy.deepcopy(base_spec.period or {}), **spec.period}
+        # ただし日付の役割の列が前と同じなら、JSON で選んでいた期間の列（2列目の日付など）はそのまま
+        # （画面では期間の列を選べないので、何も変えずに保存しただけで最初の日付の列に置き換えない）
+        old_date = str((base_spec.period or {}).get("date_column") or "")
+        old_date_col = spec.column(old_date) if old_date else None
+        if (old_date_col is not None and old_date_col.type in ("date", "datetime")
+                and {c.key for c in spec.columns_with_role("date")}
+                == {c.key for c in base_spec.columns_with_role("date")}):
+            spec.period["date_column"] = old_date
         taken = {c.key for c in spec.columns}
         for col, r in zip(spec.columns, used):
             _carry_column(col, _base_column(base_spec, r, taken), str(r.get("header") or ""))
@@ -710,7 +770,7 @@ def _build_spec(payload: dict, base_spec=None):
         if old is not None and spec.log_stage is not None and old.column == spec.log_stage.column:
             old.context_columns = [k for k in old.context_columns if k in keys]
             spec.log_stage = old
-    errors = validate_spec(spec)
+    errors = dup_errors + [e for e in validate_spec(spec) if e not in dup_errors]
     if sum(1 for r in used if r.get("ai")) > 1:
         # 黙って最初の列だけを AI整形の対象にしない（2列目は追記ログとして1行につながれて出てしまう）
         errors.insert(0, "AI整形の対象は1列だけにしてください")
@@ -899,6 +959,10 @@ def ai_trial(import_id: int):
     spec = _spec_for(imp)
     if spec is None or spec.log_stage is None:
         return _json_error("AI整形の対象の列がありません")
+    if imp["status"] == "confirmed":
+        # 試し実行の結果は下書きに入るが、zip・保存先フォルダへの保存は確定したときの md を渡す。食い違わないよう断る
+        return _json_error("確定後は試し実行できません（結果が確定した Markdown に入らないため）。"
+                           "試すときは列の対応づけからもう一度読み込んでください")
     payload = _payload()
     row_key = str(payload.get("row_key") or "")
     try:
@@ -1055,7 +1119,8 @@ def preview(import_id: int):
         "tables/preview.html", imp=imp, spec=spec, stats=stats, issues=issues[:ISSUES_SHOWN], issue_total=len(issues),
         counts=count_levels(issues), blocking=has_blocking(issues), files=files, data_rows=data_rows, page=page,
         total_pages=total_pages, columns=[(c.key, _display_with_unit(c)) for c in spec.columns],
-        confirmed=imp["status"] == "confirmed", delete_note=DELETE_ON_DOWNLOAD_NOTE, **_steps_ctx(6))
+        confirmed=imp["status"] == "confirmed", delete_note=DELETE_ON_DOWNLOAD_NOTE, **folder_save.folder_ctx(),
+        **_steps_ctx(6))
 
 
 def _display_with_unit(col) -> str:
@@ -1118,9 +1183,10 @@ def done(import_id: int):
         return redirect(url_for("tables.preview", import_id=import_id))
     spec = _spec_for(imp)
     files = [{"name": p.name, "size": p.stat().st_size} for p in pipeline.md_paths(import_id)]
+    save_admin = output_folder.load()["save_admin"]
     return render_template("tables/done.html", imp=imp, spec=spec, files=files, stats=imp.get("stats") or {},
                            delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
-                           save_confirm=SAVE_TO_FOLDER_CONFIRM, save_admin=output_folder.load()["save_admin"],
+                           save_confirm=save_to_folder_confirm(save_admin), save_admin=save_admin,
                            **_steps_ctx(7))
 
 
@@ -1144,13 +1210,24 @@ def download_zip(import_id: int):
     try:
         data = pipeline.build_download(import_id, imp, spec)
     except FileNotFoundError:
-        # 同時に押した別のダウンロードが渡し終えてデータを消した（ダブルクリックなど）。500 ではなく「ダウンロード済み」
-        abort(404)
+        # 同時に押した別のダウンロードが渡し終えてデータを消した（ダブルクリックなど）。500 ではなく「ダウンロード済み」。
+        # 別のタブの読み込み直しが md を消したときは、画面に戻して知らせる
+        return _handout_lost(import_id, "ダウンロード")
     name = f"{_download_base(imp, spec)}.zip"
     response = send_file(io.BytesIO(data), mimetype="application/zip", as_attachment=True, download_name=name,
                          conditional=False)   # Range でも全体を返す（一部だけ渡して消すことが無いように）
     set_download_name(response, name, "records")
     return purge.purge_after_send(response, purge.purge_table_import, import_id)
+
+
+def _handout_lost(import_id: int, what: str):
+    """渡す途中で md が消えたとき。取り込みが残っていて確定済みでなければ、別のタブで読み込み直しが始まった
+    （「ダウンロード済み」の 404 は事実と違うので、画面に戻して知らせる）。消えていれば渡し終えた・削除した。"""
+    now = store.get_import(import_id)
+    if now is None or now["status"] == "confirmed":
+        abort(404)
+    flash(f"読み込み直しが始まったため、{what}を取りやめました。確定し直してからもう一度押してください", "error")
+    return redirect(url_for("tables.preview", import_id=import_id))
 
 
 @bp.post("/imports/<int:import_id>/save-to-folder")
@@ -1176,12 +1253,13 @@ def save_to_folder(import_id: int):
         try:
             md_files, extras = pipeline.build_download_files(import_id, imp, spec)
         except FileNotFoundError:
-            abort(404)   # 同時に押した別の保存・ダウンロードがデータを消した
+            # 同時に押した別の保存・ダウンロードがデータを消した（読み込み直しが消したときは画面に戻す）
+            return _handout_lost(import_id, "保存")
         admin = sorted(extras.items()) if output_folder.load()["save_admin"] else None
         return folder_save.save_and_purge(
             md_files, admin_files=admin, admin_stem=safe_filename_part(spec.file_prefix),
             purge_fn=purge.purge_table_import, purge_args=(import_id,), what="一覧表の取り込み",
-            back_url=safe_next(back), next_url=url_for("tables.new"))
+            back_url=safe_next(back), next_url=url_for("tables.new"), admin_skipped=admin is None)
 
 
 @bp.get("/imports/<int:import_id>/normalized.csv")

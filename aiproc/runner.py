@@ -10,12 +10,15 @@
         壊れたJSON・長さ超過（再依頼しても直らない）はその行だけエラーにして続ける。
         1行（1回目＋再依頼、再試行と待機を含む）にかける時間は row_deadline_seconds() まで。
         超えたらその行をエラーにして次へ進む（応答しない行1つでジョブ全体が何十分も止まらない）。
+        ただしレート制限（429）だけで時間切れになった行が RATE_LIMIT_PAUSE_ROWS 行続いたら、
+        それらの行をエラーにせず未処理に戻し、ジョブを一時停止する（残りの行を次々エラーにしない）。
 """
 from __future__ import annotations
 
 import gzip
 import json
 import re
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -30,6 +33,7 @@ from flask import current_app
 from aiproc import cache, custom, items, prompts
 from aiproc.common import (DEFAULT_LIMITS, DEFAULT_RUN_IF, DEFAULT_SUMMARY_TOKENS, nfkc, sget)
 from aiproc.verify import VerifyReport, verify_log_result
+from core import jobs
 from core.jobs import JobCancelled, JobError
 from core.mdtext import estimate_tokens
 from logproc import PeopleIndex, SplitOptions, mask_text, parse_log, render_timeline, review_notes
@@ -40,7 +44,12 @@ LOG_STAGE_ID = "log"
 MAX_RETRIES = 5          # 429/5xx/タイムアウトの再試行回数（1呼び出しあたり）
 MAX_WAIT = 120.0         # 1回の待機の上限（秒）
 ROW_DEADLINE_FACTOR = 2.0  # 1行にかける時間の上限＝1回のタイムアウト（ローカル300秒・クラウド120秒）×この倍率
-STOP_GRACE = 2.0         # 一時停止・中止のとき、送信中の呼び出しの応答を待つ秒数（過ぎたら見捨てる）
+RATE_LIMIT_PAUSE_ROWS = 3  # レート制限だけで打ち切りになった行がこの数だけ続いたら一時停止する
+RATE_LIMIT_PAUSE_MESSAGE = ("混み合っています（レート制限）。続けて{n}行が時間内に処理できなかったため、一時停止しました。"
+                            "時間をおいて「再開」を押してください。")
+CACHE_DB_RETRIES = 2     # キャッシュの読み書きが「database is locked」のときのやり直し回数
+CACHE_DB_BACKOFF = 0.5   # やり直しの前に待つ秒数（回数×この秒数）
+STOP_GRACE = 2.0        # 一時停止・中止のとき、送信中の呼び出しの応答を待つ秒数（過ぎたら見捨てる）
 DEFAULT_CONCURRENCY = {"local": 1, "cloud": 4}
 SCOPES = ("pending", "all", "errors", "flagged", "changed")
 SCOPE_LABELS = {"pending": "未処理のみ", "all": "全件", "errors": "エラーだけ", "flagged": "要確認だけ",
@@ -425,6 +434,7 @@ class Outcome:
     fatal: llm.LLMCallError | None = None
     stopped: bool = False
     key: str = ""
+    rate_limited: bool = False      # レート制限（429）の待機だけで使える応答が得られなかった
 
 
 def row_deadline_seconds(settings: dict) -> float:
@@ -504,19 +514,30 @@ def call_with_retry(settings: dict, messages, response_format, max_tokens, stop_
     """
     attempt = 0
     stop_event = stop_event or threading.Event()
+    rate_limit: llm.LLMCallError | None = None   # 最後に受けたレート制限（429）
+
+    def expired(e: llm.LLMCallError) -> llm.LLMCallError:
+        # 429 の後の送り直しが行の残り時間で打ち切られた（状態コードの無いタイムアウト）ときも、
+        # レート制限による打ち切りとして扱う（一時停止の判定に使う）
+        return _deadline_error(settings, e if (e.status is not None or rate_limit is None) else rate_limit)
+
     while True:
         try:
             return _chat_watched(settings, messages, response_format, max_tokens, stop_event, deadline)
         except llm.LLMCallError as e:
+            if e.kind == "retry" and e.status == 429:
+                rate_limit = e
+            if e.kind == "row" and e.status is None and rate_limit is not None:
+                raise expired(rate_limit) from e     # 送る前・待つ間に行の時間切れになった
             if e.kind == "retry" and deadline is not None and time.monotonic() >= deadline:
-                raise _deadline_error(settings, e) from e
+                raise expired(e) from e
             if e.kind != "retry" or attempt >= max_retries:
                 raise
             attempt += 1
             sec = e.retry_after if e.retry_after is not None else min(2.0 ** attempt, 60.0)
             sec = min(max(sec, 0.0), max_wait)
             if deadline is not None and time.monotonic() + sec >= deadline:
-                raise _deadline_error(settings, e) from e   # 待っても時間内に送り直せない
+                raise expired(e) from e   # 待っても時間内に送り直せない
             if stop_event.wait(sec):
                 raise _Stopped()
 
@@ -544,10 +565,26 @@ def _evaluate(work: StageWork, text: str, finish_reason: str | None):
     return res.status(), res.to_dict(), {"issues": res.to_dict()["issues"]}, problems, parsed
 
 
+def _cache_db(fn, default=None):
+    """キャッシュの読み書き。ほかの処理がDBを使っていて「database is locked」になったら少し待って
+    やり直し、それでもだめなら default を返す（キャッシュが使えないだけでジョブ全体を止めない。
+    読めなければ未保存として扱い、書けなければ応答はそのまま使う。再実行で聞き直すことがあるだけ）。"""
+    for i in range(CACHE_DB_RETRIES + 1):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "locked" not in msg and "busy" not in msg:
+                raise
+            if i < CACHE_DB_RETRIES:
+                time.sleep(CACHE_DB_BACKOFF * (i + 1))
+    return default
+
+
 def _one_call(work: StageWork, messages, key: str, settings: dict, mode: str, stop_event, out: Outcome,
               max_tokens, use_cache: bool = True, deadline: float | None = None) -> tuple[str, str | None]:
     """キャッシュを見て、無ければ呼んで即時保存する。(text, finish_reason) を返す。"""
-    hit = cache.get(key) if use_cache else None
+    hit = _cache_db(lambda: cache.get(key)) if use_cache else None
     if hit is not None:
         out.tokens_in += hit.get("tokens_in") or 0
         out.tokens_out += hit.get("tokens_out") or 0
@@ -564,7 +601,8 @@ def _one_call(work: StageWork, messages, key: str, settings: dict, mode: str, st
         parsed = llm.parse_json_text(res.text)
     except ValueError:
         pass
-    cache.put_result(key, res, model=settings.get("model", ""), structured_mode=mode, parsed=parsed)
+    _cache_db(lambda: cache.put_result(key, res, model=settings.get("model", ""), structured_mode=mode,
+                                       parsed=parsed))
     return res.text, res.finish_reason
 
 
@@ -649,6 +687,7 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
     except llm.LLMCallError as e:
         if e.kind == "fatal":
             out.fatal = e
+        out.rate_limited = e.kind != "fatal" and e.status == 429
         out.status, out.error = "error", str(e)
     return out
 
@@ -749,6 +788,16 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
 
         executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix=f"ai-job-{job_id}")
         inflight = {}
+        # レート制限だけで打ち切りになった行（続いている間は保存を保留する）
+        rate_held: list[tuple[str, Outcome]] = []
+        rate_paused = False
+
+        def flush_rate_held() -> None:
+            # 他の行は処理できている（一時的な混雑）→ 保留した行はこれまでどおりエラーとして保存する
+            for k, o in rate_held:
+                _save_outcome(o, groups[k], template_id, tv_id, job_id, conn, stats, import_id=import_id)
+            rate_held.clear()
+
         try:
             while queue or inflight:
                 if _import_gone(conn, import_id):
@@ -773,8 +822,26 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
                             fatal = fatal or out.fatal
                             queue.appendleft(key)
                             continue
+                        if out.rate_limited:
+                            if rate_paused:
+                                queue.appendleft(key)   # レート制限で一時停止する途中に打ち切りになった行も未処理に戻す
+                            else:
+                                rate_held.append((key, out))
+                            continue
+                        flush_rate_held()
                         _save_outcome(out, groups[key], template_id, tv_id, job_id, conn, stats,
                                       import_id=import_id)
+                    if len(rate_held) >= RATE_LIMIT_PAUSE_ROWS:
+                        # レート制限が続いている: 保留した行は未処理に戻し、残りの行を次々エラーにせず一時停止する
+                        queue.extendleft(k for k, _ in reversed(rate_held))
+                        n = len(rate_held)
+                        rate_held.clear()
+                        if job_id is None or not jobs.request_pause(job_id):
+                            raise AIJobError(RATE_LIMIT_PAUSE_MESSAGE.format(n=n))
+                        ctx.message(RATE_LIMIT_PAUSE_MESSAGE.format(n=n))
+                        rate_paused = True
+                    if not queue and not inflight:
+                        flush_rate_held()        # 最後まで来た: 保留した行はエラーとして残す
                     if done:
                         conn.commit()
                         _report(ctx, stats, started)
@@ -785,6 +852,9 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
                     ctx.progress(**stats)
                     ctx.check_cancel()           # 一時停止なら再開まで待つ。中止なら JobCancelled
                     stop_event.clear()
+                    if rate_paused:
+                        ctx.message("")          # 再開したのでレート制限の案内を消す
+                        rate_paused = False
         finally:
             stop_event.set()
             executor.shutdown(wait=True, cancel_futures=True)

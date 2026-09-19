@@ -99,7 +99,7 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     attachments = extraction.get("attachments") or []
     if attachments:
         tail.append(f"- 添付画像: {len(attachments)}枚")
-    tail.append(f"- 出典: {_source_text(doc, title_fields)}")
+    tail.append(f"- 出典: {_source_text(doc, title_fields, filled)}")
 
     long_fields = [f for f in filled if f["data_type"] in ("text", "table")]
     omit_person = bool(_md_options(extraction).get("omit_person_fields", True))
@@ -227,14 +227,19 @@ _NUMBER_LABEL = re.compile(r"(?:No\.?|NO\.?|番号|№)\s*$")
 
 def _fallback_identifier(filled: list[dict], title_fields: list[dict]) -> str:
     """タイトル項目で見分けられないときに足す値: 番号らしい項目 → 日付の項目の順。無ければ ""。"""
+    found = _fallback_field(filled, title_fields)
+    return _one_line(_plain_value(found)) if found else ""
+
+
+def _fallback_field(filled: list[dict], title_fields: list[dict]) -> dict | None:
+    """_fallback_identifier で使う項目（番号らしい項目 → 日付の項目）。"""
     used = {f["field_name"] for f in title_fields}
     rest = [f for f in filled if f["field_name"] not in used
             and f["field_name"] not in ("equipment_id", "equipment_name")]
     numbered = next((f for f in rest if f["data_type"] in ("string", "number")
                      and _NUMBER_LABEL.search(_one_line(f.get("display_name")))), None)
     dated = next((f for f in rest if f["data_type"] == "date"), None)
-    found = numbered or dated
-    return _one_line(_plain_value(found)) if found else ""
+    return numbered or dated
 
 
 def _title_texts(fields: list[dict], heading: bool) -> list[str]:
@@ -300,12 +305,17 @@ def _plain_value(f: dict) -> str:
     return nfkc_value(value)
 
 
-def _source_text(doc: dict, title_fields: list[dict]) -> str:
-    """出典: 元ファイル名（報告番号 R2026-00123）。報告番号がなければ最初の文字列のタイトル項目。"""
+def _source_text(doc: dict, title_fields: list[dict], filled: list[dict] | None = None) -> str:
+    """出典: 元ファイル名（報告番号 R2026-00123）。報告番号がなければ最初の文字列のタイトル項目。
+
+    タイトル項目が設備だけのときは、タイトルに足した項目（作業No.などの番号 → 日付）を書く。
+    """
     file_name = _one_line(doc["file_name"])
     ident = next((f for f in title_fields if f["field_name"] == "report_id"), None)
     ident = ident or next((f for f in title_fields if f["data_type"] == "string"
                            and f["field_name"] not in ("equipment_id", "equipment_name")), None)
+    if ident is None and filled and _has_equipment_only(title_fields):
+        ident = _fallback_field(filled, title_fields)
     if ident is None:
         return file_name
     return f"{file_name}（{_one_line(ident['display_name'])} {_plain_value(ident)}）"

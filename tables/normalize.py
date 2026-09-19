@@ -512,6 +512,12 @@ def _convert_number(value, text, col, number_format, header_unit):
         if not math.isfinite(v * factor):
             return None, f"「{_short(text)}」を数値に変換できません", None
         return _clean_number(v * factor), None, None
+    minutes = _duration_minutes(text)
+    if minutes is not None and (target or header_unit):
+        # CSV に書き出された [h]:mm（「1:30」）や「1時間30分」。Excel の時間のセルと同じく分として換算する
+        factor = unit_factor("分", target or header_unit, col.unit_conversions)
+        if factor is not None:
+            return _clean_number(minutes * factor), None, None
     number, unit = parse_number_text(text)
     if number is None:
         return nfkc_text(text), f"「{_short(text)}」を数値に変換できません", None
@@ -525,6 +531,22 @@ def _convert_number(value, text, col, number_format, header_unit):
     if not math.isfinite(number * factor):
         return nfkc_text(text), f"「{_short(text)}」を数値に変換できません", None
     return _clean_number(number * factor), None, None
+
+
+_DURATION_HMS = re.compile(r"^(\d{1,4}):([0-5]\d)(?::([0-5]\d))?$")
+_DURATION_JA = re.compile(r"^(\d{1,4})時間(\d{1,2})分$")
+
+
+def _duration_minutes(text) -> float | None:
+    """「1:30」「1:30:00」「1時間30分」を分にする（それ以外は None）。"""
+    s = "".join(unicodedata.normalize("NFKC", str(text or "")).split())
+    m = _DURATION_HMS.match(s)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2)) + int(m.group(3) or 0) / 60
+    m = _DURATION_JA.match(s)
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    return None
 
 
 def _short(text, n: int = 30) -> str:

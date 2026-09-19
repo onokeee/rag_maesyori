@@ -39,7 +39,7 @@
 {% call ui.card("いまの設定") %}
   <dl class="meta">
     <dt>保存先フォルダ</dt>
-    <dd>{% if settings.folder %}<code id="savedFolder">{{ settings.folder }}</code>{% else %}{{ ui.badge("inactive", "未設定（ダウンロードだけ）") }}{% endif %}</dd>
+    <dd>{% if saved.folder %}<code id="savedFolder">{{ saved.folder }}</code>{% else %}{{ ui.badge("inactive", "未設定（ダウンロードだけ）") }}{% endif %}</dd>
     <dt>設定ファイル</dt><dd class="small"><code>{{ settings_file }}</code></dd>
   </dl>
   {% if path_warning %}<p class="notice" role="note">{{ path_warning }}</p>{% endif %}

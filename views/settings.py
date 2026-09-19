@@ -24,6 +24,7 @@ ENTITY_TYPES_DOWNLOAD_NAME = "entity_types_setsubi.yml"
 
 # 取り込み設定のJSONとして読めないときの文言（読めない理由は利用者の対処が同じなので1つにまとめる）
 NOT_A_TEMPLATE_JSON = "このファイルは一覧表の取り込み設定として読み込めません（このアプリの［JSONで書き出す］で作ったファイルを選んでください）"
+MODEL_PREF_WRITE_ERROR = "モデルの選択を保存できませんでした。設定ファイルを開いているプログラムを閉じてから、もう一度選んでください"
 
 
 @bp.get("/settings/")
@@ -60,6 +61,9 @@ def save_ai():
         })
     except ValueError as exc:
         flash(str(exc), "error")
+    except OSError as exc:
+        flash(f"設定ファイルに書き込めませんでした（{exc.strerror or exc.__class__.__name__}）。"
+              "少し待ってから、もう一度保存してください", "error")
     else:
         flash("AI接続の設定を保存しました", "success")
     return redirect(url_for(".ai"))
@@ -111,6 +115,10 @@ def api_choose_model():
         llm.choose_model(body.get("model"))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except OSError:
+        # 設定ファイルが他のプログラムに開かれたままなどで書けない（settings_store が再試行したあと）
+        current_app.logger.exception("モデルの選択を保存できませんでした")
+        return jsonify({"error": MODEL_PREF_WRITE_ERROR}), 500
     return jsonify({"current": llm.current_model(), "models": llm.available(), "llm_ready": llm.is_configured()})
 
 
@@ -118,10 +126,12 @@ def api_choose_model():
 # 作った Markdown をダウンロードせず、選んだフォルダ（LightRAG の INPUT_DIR など）に直接書く（services/output_folder.py）
 
 def _output_page(settings: dict, errors: list[str] | None = None, status: int = 200):
-    return render_template("settings/output.html", settings=settings, errors=errors or [],
+    """settings: 入力欄に出す値。「いまの設定」には、断られたときも保存済みの設定（saved）を出す。"""
+    saved = output_folder.load()
+    return render_template("settings/output.html", settings=settings, saved=saved, errors=errors or [],
                            policies=output_folder.CONFLICT_POLICIES, admin_subdir=output_folder.ADMIN_SUBDIR,
                            settings_file=str(Path(current_app.config["DATA_DIR"]) / output_folder.SETTINGS_FILE),
-                           path_warning=output_folder.path_warning(settings.get("folder"))), status
+                           path_warning=output_folder.path_warning(saved.get("folder"))), status
 
 
 @bp.get("/settings/output")
@@ -139,6 +149,10 @@ def save_output():
     except ValueError as exc:
         # 入力した値を残したまま、理由を出す（リダイレクトすると打った値が消える）
         return _output_page(form, [str(exc)], 400)
+    except OSError as exc:
+        # 設定ファイルをほかのプログラムが掴んでいた・権限が無い（500 にせず、打った値を残して知らせる）
+        return _output_page(form, [f"設定ファイルに書き込めませんでした（{exc.strerror or exc.__class__.__name__}）。"
+                                   "少し待ってから、もう一度［設定を保存］を押してください"], 500)
     flash("保存先フォルダの設定を保存しました" if form["folder"] else
           "保存先フォルダを空にしました（［保存先フォルダに保存］のボタンは出なくなります）", "success")
     return redirect(url_for(".output"))
@@ -239,7 +253,13 @@ def import_table_template():
         return redirect(back)
     name = _clean(request.form.get("name") or data.get("name") or spec.name, 100)
     spec.name = name
-    errors = validate_spec(spec)
+    try:
+        errors = validate_spec(spec)
+    except Exception:
+        # 手で書き換えた JSON の想定外の値で落ちても 500 にしない（中身はログにだけ残す）
+        current_app.logger.exception("取り込み設定のJSONを確かめられませんでした（%s）", storage.filename)
+        flash(NOT_A_TEMPLATE_JSON, "error")
+        return redirect(back)
     if errors:
         flash("設定の内容に問題があります: " + " / ".join(errors[:5]), "error")
         return redirect(back)

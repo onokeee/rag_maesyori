@@ -308,7 +308,7 @@ def test_delete_is_refused_while_an_ai_trial_is_running(ai_app, ai_client, monke
     monkeypatch.setattr(runner, "trial_row", slow_trial)
     res = ai_client.post(f"/tables/imports/{import_id}/ai/trial", json={"row_key": "TR-001"})
     assert res.status_code == 400
-    assert "AIの試し実行中は削除・ダウンロードできません" in seen["delete"]
+    assert "AIの試し実行中は削除・ダウンロード・保存できません" in seen["delete"]
     with ai_app.app_context():
         assert store.get_import(import_id) is not None
     # 試し実行が終われば削除できる

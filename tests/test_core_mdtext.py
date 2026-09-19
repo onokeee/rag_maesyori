@@ -60,6 +60,27 @@ def test_estimate_tokens():
     assert estimate_tokens("\ud800x") == 2
 
 
+def test_estimate_tokens_is_not_below_the_real_count_for_dates_and_part_numbers():
+    """日時・品番・計測値は o200k_base で細かく区切られる。右の数は tiktoken（gpt-4o-mini）で数えた実トークン数。"""
+    real = {
+        "2023-09-01 09:44": 10,
+        "- 発生日時: 2023-09-01 09:44": 16,
+        "8/3 10:07 田中：FDC ch3 V=1039V I=2.34A P=1.11kW 0x0B73 R=11.1ohm OK": 47,
+        "PN-A12345-B67 SN:0x1F3A9C": 16,
+        "1,234,567.89": 7,
+        "2026/08/03 10:07〜2026/08/03 11:45": 21,
+        "ロット番号 L2308-0412-07 の不良率 0.35%": 20,
+    }
+    for text, count in real.items():
+        assert estimate_tokens(text) >= count, text
+    # 数字のまとまりは、前が ASCII でない文字・記号・先頭でも数える（「1年2月」は2つ）
+    assert estimate_tokens("1年2月") == estimate_tokens("x年y月") + 1
+    # 40行の計測ログ。実 1,661 トークン（チャンク 1,500 を超える）を、旧式は 1,252 と見積もり記録の上限 1,400 を通していた
+    log = "\n".join(f"8/3 {10 + i * 7 // 60}:{i * 7 % 60:02d} 田中：FDC ch{i % 8} V={1000 + i * 13}V "
+                    f"I={2.31 + i / 100:.2f}A 0x{i * 977:04X} dP={i * 0.013:.3f}kPa OK" for i in range(40))
+    assert estimate_tokens(log) >= 1661
+
+
 def test_join_blocks():
     text = join_blocks([["# タイトル"], [], ["- a: 1", "", "- b: 2\r\n  続き"], ["- 出典: x.xlsx"]])
     assert text == "# タイトル\n\n- a: 1\n- b: 2\n  続き\n\n- 出典: x.xlsx\n"

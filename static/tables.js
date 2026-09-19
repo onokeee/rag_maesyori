@@ -28,7 +28,27 @@
     let timer = null;
     let seq = 0;
 
-    const parseRows = (text) => String(text || "").split(/[,、\s]+/).map((x) => parseInt(x, 10)).filter((n) => n > 0);
+    // 行番号の読み方はサーバー（views/tables.py の _int_list・_row_no）と同じ: 全角は半角にそろえ、
+    // 数字だけ・「3-4」（10行まで）だけを読む。それ以外（「3a」など）は読まない
+    const parseEnd = (text) => {
+      const x = String(text ?? "").normalize("NFKC").trim();
+      return /^[0-9]+$/.test(x) && Number(x) > 0 ? Number(x) : null;
+    };
+    const parseRows = (text) => {
+      const out = new Set();
+      String(text || "").normalize("NFKC").split(/[,、\s]+/).forEach((x) => {
+        const m = /^([0-9]+)-([0-9]+)$/.exec(x);
+        if (m) {
+          const a = Number(m[1]);
+          const b = Number(m[2]);
+          if (a > 0 && a <= b && b - a < 10) for (let n = a; n <= b; n += 1) out.add(n);
+          return;
+        }
+        const n = parseEnd(x);
+        if (n) out.add(n);
+      });
+      return [...out].sort((a, b) => a - b);
+    };
 
     const apply = (info) => {
       layoutPage.querySelectorAll("tr[data-row]").forEach((tr) => {
@@ -66,7 +86,7 @@
         layoutPage.setAttribute("aria-busy", "true");
         try {
           const info = await postJson(layoutPage.dataset.detectUrl, {
-            header_rows: parseRows(headerInput.value), data_end: parseInt(endInput.value, 10) || null,
+            header_rows: parseRows(headerInput.value), data_end: parseEnd(endInput.value),
           });
           if (mine === seq) apply(info);
         } catch (e) {
@@ -289,7 +309,17 @@
     });
 
     // 進み具合の内訳、終わったら再表示
+    // 実行中⇔一時停止が切り替わったら再表示する（ボタンを［再開］／［一時停止］に合わせる。
+    // レート制限が続いてジョブが自分で一時停止したときも）
+    let lastStatus = aiPage.querySelector("[data-job-status]")?.dataset.jobStatus;
     aiPage.addEventListener("job:update", (event) => {
+      const status = event.detail.status;
+      const paused = (s) => s === "paused";
+      if (lastStatus && status && paused(lastStatus) !== paused(status) && ["running", "paused"].includes(status)) {
+        window.location.reload();
+        return;
+      }
+      lastStatus = status || lastStatus;
       const p = event.detail.progress || {};
       const detail = aiPage.querySelector("[data-ai-detail]");
       if (detail) {

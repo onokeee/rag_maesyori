@@ -56,9 +56,11 @@ def import_files(import_id: int) -> dict[str, Path]:
 
 
 def write_atomic(path: Path, data: bytes) -> None:
-    """一時ファイルに書いてから置き換える（途中で止まっても前のファイルが残る）。"""
+    """一時ファイルに書いてから置き換える（途中で止まっても前のファイルが残る）。
+
+    置き場所（imports/<id>/）は作らない。消された取り込みのフォルダを書き戻さないため（design.md 3.3）。
+    """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     with open(tmp, "wb") as f:
         f.write(data)
@@ -66,9 +68,11 @@ def write_atomic(path: Path, data: bytes) -> None:
 
 
 def write_rows(path: Path, records) -> None:
-    """記録を gzip の JSON Lines で保存（mtime=0・キー順固定で決定的）。一時ファイルに直接書いてから置き換える。"""
+    """記録を gzip の JSON Lines で保存（mtime=0・キー順固定で決定的）。一時ファイルに直接書いてから置き換える。
+
+    置き場所は作らない（write_atomic と同じ）。
+    """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     with open(tmp, "wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0, compresslevel=6) as gz:
         buf = io.BufferedWriter(gz, 1024 * 1024)
@@ -127,9 +131,20 @@ def md_paths(import_id: int) -> list[Path]:
 
 
 def _write_md_dir(target: Path, files: list[MdFile]) -> None:
+    from services.output_folder import path_limit
+
     tmp = target.with_name(target.name + ".new")
+    limit = path_limit()
+    if limit is not None and files:
+        longest = max(files, key=lambda f: len(f.name)).name
+        if len(os.path.abspath(tmp)) + 1 + len(longest) > limit:
+            # Windows のパスの長さの上限（260文字）を超えると、書けずに分かりにくいエラーで止まる
+            raise PipelineError(
+                f"Markdownのファイル名が長すぎて、このPCのデータの置き場所に書けません（最長 {len(longest)}文字）。"
+                "取り込み設定の設定名・ファイル名の先頭を短くするか、アプリを浅いフォルダに置いてください")
     shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    # 親（imports/<id>/）は作り直さない。消された取り込みのフォルダを復活させないため（design.md 3.3）
+    tmp.mkdir()
     for f in files:
         (tmp / f.name).write_bytes(f.data)
     shutil.rmtree(target, ignore_errors=True)
@@ -207,7 +222,11 @@ def run_read(ctx, import_id: int) -> dict:
             source, {"sheet": layout.sheet, "file_name": imp["file_name"]}, layout, spec, on_progress=on_progress)
         issues = row_issues + run_checks(records, spec, stats)
         files = import_files(import_id)
+        ctx.check_cancel()
         ctx.progress(phase="保存", done=len(records), total=len(records))
+        if store.get_import(import_id) is None:
+            # 読み込みの間に渡し終えて（または削除されて）消えた。行データ・問題一覧を書き戻さない（design.md 3.3）
+            raise PipelineError("取り込みが削除されたため、読み込んだ内容は保存しませんでした")
         write_rows(files["rows"], records)
         write_atomic(files["issues_json"], json.dumps([i.to_dict() for i in issues], ensure_ascii=False).encode("utf-8"))
         write_atomic(files["issues_csv"], outputs.issues_csv(issues))
@@ -327,7 +346,10 @@ def _md_dir_from_preview(import_id: int, signature: str) -> int | None:
         return None
     tmp = target.with_name(target.name + ".new")
     shutil.rmtree(tmp, ignore_errors=True)
-    tmp.mkdir(parents=True)
+    try:
+        tmp.mkdir()  # 親は作り直さない（消された取り込みのフォルダを復活させない）
+    except OSError:
+        return None
     try:
         for name in names:
             try:
@@ -410,12 +432,17 @@ def run_render(ctx, import_id: int) -> dict:
         records = load_rows(import_id)
         ctx.check_cancel()
         ctx.progress(phase="Markdownの作成", done=1, total=3)
+        if store.get_import(import_id) is None:
+            # 読み込みの間に渡し終えて（または削除されて）消えた。md を作り直さない（design.md 3.3）
+            raise PipelineError("取り込みが削除されたため、Markdownは作りませんでした")
         # 確認画面で同じ入力から作ったプレビューがあれば、それを置く
         file_count = _md_dir_from_preview(import_id, _preview_signature(import_id, imp, spec))
         if file_count is None:
             files = render_files(import_id, imp, spec, records)
             ctx.check_cancel()
             ctx.progress(phase="保存", done=2, total=3)
+            if store.get_import(import_id) is None:
+                raise PipelineError("取り込みが削除されたため、Markdownは作りませんでした")
             _write_md_dir(import_files(import_id)["md"], files)
             file_count = len(files)
         stats = imp.get("stats") or {}

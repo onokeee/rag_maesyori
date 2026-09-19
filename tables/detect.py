@@ -108,10 +108,17 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
     """
     head = list(source.rows(sheet, 1, HEAD_ROWS))
     warnings: list[str] = []
-    if not head or all(r.is_blank for r in head):
+    by_index = {r.index: r for r in head}
+    wanted = sorted(header_rows) if header_rows else ([header_row] if header_row else [])
+    if wanted and wanted[-1] > HEAD_ROWS:
+        # 手で指定した見出し行が先頭の読み取り範囲（HEAD_ROWS 行）より下にあるときは、
+        # その行と前後（2段見出しの確認・表の幅の確認に使う下の行）も読む
+        start = max(1, wanted[0] - 1)
+        for r in source.rows(sheet, start, wanted[-1] - start + 33):
+            by_index.setdefault(r.index, r)
+    if not any(not r.is_blank for r in by_index.values()):
         return LayoutGuess(sheet, "unknown", [], 1, 0, [], [RowClass(r.index, "blank") for r in head[:PREVIEW_ROWS]],
                            0.0, ["表が見つかりません（先頭に値のある行がありません）"])
-    by_index = {r.index: r for r in head}
     is_csv = getattr(source, "kind", "") == "csv"
 
     score = 1.0
@@ -469,6 +476,10 @@ def _dedupe(headers: list[str]) -> list[str]:
     return out
 
 
+# 見出しの右にこれ以上の空の列を挟んで見出しが1つだけあれば、表とは別の書き込み（メモなど）とみなす
+_FAR_HEADER_GAP = 20
+
+
 def _table_width(by_index: dict[int, SourceRow], rows_h: list[int], levels: list[list[str]]) -> tuple[int, str]:
     """見出しの右端。空の見出し列を挟んで右に別の表があれば、左の表だけにする。"""
     ncols = len(levels[0]) if levels else 0
@@ -483,6 +494,16 @@ def _table_width(by_index: dict[int, SourceRow], rows_h: list[int], levels: list
         if filled[gap]:
             continue
         right = sum(1 for i in range(gap + 1, last) if filled[i])
+        if right == 1:
+            # 大きく離れた列に見出しが1つだけ（XFD1 のメモなど）。下に値が無ければ表に含めない
+            # （含めると16,384列の表になり、列の対応づけも読み込みも止まったようになる）
+            far = last - 1
+            used = sum(1 for r in data_rows if far < len(r.cells) and r.cells[far].text)
+            if far - gap >= _FAR_HEADER_GAP and not (data_rows and used > 0.1 * len(data_rows)):
+                from openpyxl.utils import get_column_letter
+
+                return gap, (f"見出しから大きく離れた {get_column_letter(far + 1)}列 の値は表に含めません。"
+                             "表の一部なら範囲を指定して取り込んでください")
         if right < 2:
             continue
         used = sum(1 for r in data_rows if gap < len(r.cells) and r.cells[gap].text)
