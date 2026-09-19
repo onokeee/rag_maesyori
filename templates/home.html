@@ -67,8 +67,9 @@
 
 <div class="notice" role="note">
   取り込んだデータはこのPCに残しません。Markdown をダウンロードすると、元のファイル・読み取った内容・作ったファイルは消えます
-  （もう一度ダウンロードすることはできません）。残るのは <a href="{{ url_for('form_types.index') }}">帳票の種類</a>・<a href="{{ url_for('settings.table_templates') }}">一覧表の取り込み設定</a>・<a href="{{ url_for('settings.ai') }}">AI接続</a>の設定だけです。
-  この画面には、まだダウンロードしていないものだけが出ます。
+  （もう一度ダウンロードすることはできません）。残るのは <a href="{{ url_for('form_types.index') }}">帳票の種類</a>・<a href="{{ url_for('settings.table_templates') }}">一覧表の取り込み設定</a>・<a href="{{ url_for('settings.ai') }}">AI接続</a>・<a href="{{ url_for('settings.output') }}">保存先フォルダ</a>の設定だけです。
+  {% if save_folder %}［保存先フォルダに保存］したときも同じです（保存したファイルは残ります）。{% endif %}
+  この画面には、まだダウンロード{% if save_folder %}・保存{% endif %}していないものだけが出ます。
 </div>
 
 <div class="grid-2">
@@ -117,7 +118,7 @@
     {{ more_note(hidden.tables_working) }}
   {% endcall %}
 
-  {% call ui.card("ダウンロード待ちの帳票", subtitle="確定済み。ダウンロードすると消えます") %}
+  {% call ui.card("ダウンロード待ちの帳票", subtitle="確定済み。ダウンロード" ~ ("・保存" if save_folder else "") ~ "すると消えます") %}
     {% if forms_ready %}
     <ul class="list-plain list-rows">
       {% for item in forms_ready %}
@@ -130,6 +131,10 @@
           <span class="item-sub">{{ d.pattern_name or d.extraction_pattern_name or "" }} ・ {{ (d.confirmed_at or "") | replace("T", " ") }}</span>
         </div>
         <div class="cluster">{{ ui.badge(d.state, label="修正中（確定済みの版あり）" if d.state == "modified" else None) }}
+          {% if save_folder %}
+            {{ ui.save_form(url_for('forms.save_md_to_folder', doc_id=d.id), d.save_confirm, save_folder,
+                 next=url_for('home.index'), label="フォルダに保存", small=True, primary=False) }}
+          {% endif %}
           <a class="btn small" href="{{ url_for('forms.download_md', doc_id=d.id) }}"
              data-confirm="{{ d.download_confirm }}"
              data-confirm-ok="ダウンロードして消す">.mdをダウンロード</a></div>
@@ -144,6 +149,11 @@
             <li class="cluster">
               <a href="{{ m.href }}">{{ m.title or m.file_name }}</a>
               {% if m.state == "modified" %}{{ ui.badge(m.state, label="修正中（確定済みの版あり）") }}{% endif %}
+              {% if save_folder %}
+                {{ ui.save_form(url_for('forms.save_md_to_folder', doc_id=m.id),
+                     m.modified_note ~ "この帳票だけを保存先フォルダに保存すると、この帳票だけがまとまりから消えます（残りの帳票はまとまりに残ります）。もう一度保存・ダウンロードすることはできません。",
+                     save_folder, next=url_for('home.index'), label="フォルダに保存", small=True, primary=False) }}
+              {% endif %}
               <a class="btn small ghost" href="{{ url_for('forms.download_md', doc_id=m.id) }}"
                  data-confirm="{{ m.modified_note }}この帳票だけをダウンロードすると、この帳票だけがまとまりから消えます（zip は残りの帳票だけになります）。もう一度ダウンロードすることはできません。"
                  data-confirm-ok="この帳票だけダウンロードして消す">.mdだけ</a>
@@ -152,6 +162,12 @@
           </ul>
         </div>
         <div class="cluster">
+          {% if save_folder %}
+            {{ ui.save_form(url_for('forms.save_batch_to_folder', batch_id=b.id), b.save_confirm, save_folder,
+                 next=url_for('home.index'),
+                 label=("フォルダに保存（" ~ b.total ~ "件）") if b.all_confirmed else ("確定済み" ~ b.confirmed ~ "件だけフォルダに保存"),
+                 small=True, primary=False, fields={} if b.all_confirmed else {"confirmed_only": "1"}) }}
+          {% endif %}
           {% if b.all_confirmed %}
           <a class="btn small" href="{{ url_for('forms.download_batch', batch_id=b.id) }}"
              data-confirm="{{ b.zip_confirm }}"
@@ -172,7 +188,7 @@
     {{ more_note(hidden.forms_ready) }}
   {% endcall %}
 
-  {% call ui.card("ダウンロード待ちの一覧表", subtitle="確定済み。ダウンロードすると消えます") %}
+  {% call ui.card("ダウンロード待ちの一覧表", subtitle="確定済み。ダウンロード" ~ ("・保存" if save_folder else "") ~ "すると消えます") %}
     {% if tables_ready %}
     <ul class="list-plain list-rows">
       {% for t in tables_ready %}
@@ -181,6 +197,10 @@
           <a class="item-title" href="{{ t.href }}">{{ t.template_name or t.file_name }}</a>
           <span class="item-sub">{{ t.file_name }} ・ {{ (t.confirmed_at or "") | replace("T", " ") }}</span>
         </div>
+        {% if save_folder %}
+          {{ ui.save_form(url_for('tables.save_to_folder', import_id=t.id), table_save_confirm, save_folder,
+               next=url_for('home.index'), label="フォルダに保存", small=True, primary=False) }}
+        {% endif %}
         <a class="btn small" href="{{ url_for('tables.download_zip', import_id=t.id) }}"
            data-confirm="ダウンロードすると、この取り込みのデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
            data-confirm-ok="ダウンロードして消す">zipをダウンロード</a>

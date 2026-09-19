@@ -117,6 +117,18 @@ ENTITY_TYPE_PROMPT_FILE={{ download_name }}</code></pre>
   <p class="hint">帳票は、確定し直したものだけを「削除してから入れ直す」で更新します。</p>
 {% endcall %}
 
+{% call ui.card("6. 保存先フォルダを LightRAG の入力フォルダにする", id="save-folder") %}
+  <p><a href="{{ url_for('settings.output') }}">設定 → 保存先フォルダ</a>に LightRAG サーバーの入力フォルダ（<code>INPUT_DIR</code>。<code>WORKSPACE</code> を使っているときは <code>INPUT_DIR\ワークスペース名</code>）を指定すると、完了画面の［保存先フォルダに保存］で md をそこへ直接書けます（ダウンロードと同じく、アプリからはデータが消えます）。</p>
+  <ol>
+    <li>入れ替えるファイル（同じ名前の文書）が LightRAG に入っていれば、LightRAG で<strong>先に削除</strong>し、処理が終わる（idle になる）のを待ちます。1.5.x は文書をファイル名（末尾の <code>.[…]</code> を除く）で見分けるので、削除しないまま同じ名前で入れても、スキャンで取り込まれず <code>__parsed__</code> に移されるだけです（LightRAG の中身は古いまま）。
+      この削除では「アップロードされたファイルも削除」に<strong>チェックを入れます</strong>（API では <code>delete_file=true</code>）。入れないと <code>__parsed__</code> に古いファイルが残り、アプリが同じ名前とみなして保存を止めます（そのときは <code>__parsed__</code> の古いファイルを手で消します）。</li>
+    <li>アプリで［保存先フォルダに保存］を押します。同じ名前のファイルがフォルダか <code>__parsed__</code> にあると、既定では何も保存せずに名前の一覧を出します。</li>
+    <li>LightRAG の文書の画面で［スキャン］を押します（コマンドなら <code>POST /documents/scan</code>）。取り込み終えたファイルは LightRAG が <code>__parsed__</code> フォルダに移します。</li>
+  </ol>
+  <p class="notice" role="note"><strong>保存したあと</strong>で古い文書を LightRAG から削除するときは、逆に「アップロードされたファイルも削除」に<strong>チェックを入れないで</strong>ください（<code>delete_file=false</code>）。チェックを入れると、LightRAG は同じ名前のファイルを直下と <code>__parsed__</code> の両方から消すので（1.5.7 の <code>document_routes.py</code> の <code>delete_file_variants_by_file_path</code>）、いま保存したファイルも消え、アプリにもデータが残っていません。</p>
+  <p class="hint">スキャンは入力フォルダの<strong>直下のファイルだけ</strong>を読み、サブフォルダの中は読みません（1.5.7 の <code>document_routes.py</code> の <code>iter_new_files</code>）。管理用のファイル（正規化データ・問題一覧・取込レポート）を保存する設定にすると、サブフォルダ <code>_管理用_RAGには入れない</code> に入るので、LightRAG には入りません。</p>
+{% endcall %}
+
 {% call ui.card("設備保全向けのエンティティ種別（YAML）", id="entity-types") %}
   <p>種別: 設備 / 部品 / 不具合現象 / 原因 / 処置 / 工程/ライン / 部署 / アラーム（当てはまらないものは その他）。<code>ENTITY_EXTRACTION_USE_JSON</code> が true でも false でも使えるよう、両方の例を入れています。</p>
   <div class="btn-row" style="margin-bottom:.5rem">

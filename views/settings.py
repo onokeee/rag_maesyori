@@ -1,4 +1,4 @@
-"""設定: AI接続（＋接続テスト）、LightRAGへの入れ方、一覧表の取り込み設定の一覧、ヘッダーのモデル切り替えAPI。"""
+"""設定: AI接続（＋接続テスト）、保存先フォルダ、LightRAGへの入れ方、一覧表の取り込み設定の一覧、ヘッダーのモデル切り替えAPI。"""
 from __future__ import annotations
 
 import io
@@ -13,7 +13,7 @@ from flask import (Blueprint, Response, abort, current_app, flash, jsonify, redi
 
 from core.naming import LIGHTRAG_HINT_RECORDS
 from models import database
-from services import llm
+from services import llm, output_folder
 from tables import store
 from tables.spec import spec_from_dict, spec_to_dict, validate_spec
 
@@ -112,6 +112,51 @@ def api_choose_model():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify({"current": llm.current_model(), "models": llm.available(), "llm_ready": llm.is_configured()})
+
+
+# ---- 保存先フォルダ -----------------------------------------------------------------------
+# 作った Markdown をダウンロードせず、選んだフォルダ（LightRAG の INPUT_DIR など）に直接書く（services/output_folder.py）
+
+def _output_page(settings: dict, errors: list[str] | None = None, status: int = 200):
+    return render_template("settings/output.html", settings=settings, errors=errors or [],
+                           policies=output_folder.CONFLICT_POLICIES, admin_subdir=output_folder.ADMIN_SUBDIR,
+                           settings_file=str(Path(current_app.config["DATA_DIR"]) / output_folder.SETTINGS_FILE),
+                           path_warning=output_folder.path_warning(settings.get("folder"))), status
+
+
+@bp.get("/settings/output")
+def output():
+    return _output_page(output_folder.load())
+
+
+@bp.post("/settings/output")
+def save_output():
+    form = {"folder": output_folder.clean_folder_text(request.form.get("folder")),
+            "save_admin": request.form.get("save_admin") == "on",
+            "on_conflict": request.form.get("on_conflict", output_folder.DEFAULT_POLICY)}
+    try:
+        output_folder.save_settings(form["folder"], form["save_admin"], form["on_conflict"])
+    except ValueError as exc:
+        # 入力した値を残したまま、理由を出す（リダイレクトすると打った値が消える）
+        return _output_page(form, [str(exc)], 400)
+    flash("保存先フォルダの設定を保存しました" if form["folder"] else
+          "保存先フォルダを空にしました（［保存先フォルダに保存］のボタンは出なくなります）", "success")
+    return redirect(url_for(".output"))
+
+
+@bp.post("/settings/output/check")
+def check_output():
+    """[フォルダを確かめる]: 保存済みの（または入力中の）フォルダを、保存するときと同じ手順で確かめ直す。"""
+    body = request.get_json(silent=True) or {}
+    text = output_folder.clean_folder_text(body.get("folder") or output_folder.configured_folder())
+    if not text:
+        return jsonify({"ok": False, "folder": "", "errors": ["保存先フォルダが入力されていません"]})
+    resolved, errors = output_folder.check_folder(text)
+    result = {"ok": not errors, "folder": str(resolved) if resolved else text, "errors": errors}
+    if not errors:
+        result.update(output_folder.folder_report(resolved))
+        result["warning"] = output_folder.path_warning(resolved)
+    return jsonify(result)
 
 
 # ---- LightRAGへの入れ方 -----------------------------------------------------------------

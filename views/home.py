@@ -8,7 +8,8 @@ from __future__ import annotations
 from flask import Blueprint, render_template, request
 
 from models import database
-from views.forms import batch_zip_confirm, delete_confirm
+from views.forms import batch_save_confirm, batch_zip_confirm, delete_confirm, save_confirm
+from views.tables import SAVE_TO_FOLDER_CONFIRM as TABLE_SAVE_CONFIRM
 from views import TABLE_IMPORT_ACTIVE, form_link, query_all, query_value, table_import_link
 
 bp = Blueprint("home", __name__)
@@ -42,6 +43,7 @@ def _forms_ready(limit: int) -> list[dict]:
         row["href"] = form_link(row)
         # 修正中なら「確定し直していない変更は入らずに消える」ことを確認文で先に伝える
         row["download_confirm"] = delete_confirm(row)
+        row["save_confirm"] = save_confirm(row)
         batch_id = row.get("batch_id") or ""
         if not batch_id:
             items.append({"doc": row})
@@ -57,7 +59,8 @@ def _forms_ready(limit: int) -> list[dict]:
                                   if d["state"] == "modified" else "")
         items.append({"batch": {"id": batch_id, "total": len(docs), "confirmed": len(ready),
                                 "all_confirmed": len(ready) == len(docs), "docs": ready,
-                                "zip_confirm": batch_zip_confirm(docs)}})
+                                "zip_confirm": batch_zip_confirm(docs),
+                                "save_confirm": batch_save_confirm(docs)}})
     return items
 
 
@@ -117,4 +120,5 @@ def index():
         tables_ready=tables_ready,
         hidden={key: max(0, n) for key, n in hidden.items()},
         list_limit=LIST_LIMIT,
+        table_save_confirm=TABLE_SAVE_CONFIRM,
     )

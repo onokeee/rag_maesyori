@@ -5,7 +5,7 @@
 ## 0. 前提と範囲
 
 - 利用者は1人。**ログインなし**。起動は `127.0.0.1` のみ（`app.py` が他のアドレスを拒否）。
-- 目的：Excel/CSV を読み取り、**LightRAG に手作業で投入しやすい Markdown(.md) を作ってダウンロードする**まで。LightRAG への送信・アプリ内のSQL照会は作らない。
+- 目的：Excel/CSV を読み取り、**LightRAG に手作業で投入しやすい Markdown(.md) を作ってダウンロードする**（または決めたフォルダ＝LightRAG の `INPUT_DIR` などに保存する。2.8）まで。LightRAG への送信・アプリ内のSQL照会は作らない。
 - 取り込みは2系統に分ける。
   - **帳票**（1ファイル＝1件。例：設備修理報告書）… 既存の「ラベル探索」方式を改良。
   - **一覧表**（Excel/CSV、1行＝1件。例：トラブル対応一覧、故障履歴CSV、月別停止時間のクロス集計）… 新規。
@@ -42,7 +42,7 @@
 
 ### 2.1 ナビゲーション（base.html）
 
-`ホーム` / `帳票を取り込む` / `一覧表を取り込む` / `設定 ▼`（帳票の種類・一覧表の取り込み設定・AI接続・LightRAGへの入れ方）。右端にヘッダーのAIモデル選択（既存）。
+`ホーム` / `帳票を取り込む` / `一覧表を取り込む` / `設定 ▼`（帳票の種類・一覧表の取り込み設定・AI接続・保存先フォルダ・LightRAGへの入れ方）。右端にヘッダーのAIモデル選択（既存）。
 
 取り込み履歴の画面は無い（3.3 のとおりデータを残さないため、履歴に出せるものが無い）。
 
@@ -53,6 +53,7 @@
 - 「ダウンロード待ちの帳票」「ダウンロード待ちの一覧表」（確定済みでまだダウンロードしていないもの）：ダウンロード（押すと消える確認つき）。
   まとめ取り込みは**まとまり1行**にまとめ、zip のボタン（全件確定なら全部、未確定が残っていれば「確定済みN件だけ」）と
   中の帳票を出す。1件だけの `.md` には「この帳票だけがまとまりから消えます」の確認を付ける。
+  保存先フォルダ（2.8）が設定されていれば、各行に［フォルダに保存］（POST・確認つき）も出す。行ごとのボタンは小さい普通のボタンにする（1画面に主ボタンは1つ）。
 - ダウンロードすると消えるので、この画面が残っているものの一覧そのものになる（取り込み履歴の代わり）。
 - 初回（帳票の種類も一覧表の取り込み設定も0件）は「はじめに」3ステップ（見本から種類/設定を作る → 取り込む → Markdownをダウンロード）。
 
@@ -75,6 +76,8 @@
 | `POST /forms/<id>/discard-changes` | 修正中の変更を破棄し確定済みの版に戻す |
 | `GET /forms/<id>/download.md` | ダウンロード。md は **確定済みデータから毎回生成**。**渡したあとその帳票のデータを消す**（3.3） |
 | `GET /forms/batches/<batch_id>/download.zip` | まとまりの全 md を zip で渡し、**まとまり全体を消す**。未確定が残っていれば断ってその帳票へ戻す。`?confirmed_only=1` なら確定済みの分だけを zip にして**その分だけ**消す（読めない帳票が1件混ざっても作業が止まらないように） |
+| `POST /forms/<id>/save-to-folder` | ダウンロードの代わりに、同じ .md を保存先フォルダ（2.8）に書き、書き終えたらダウンロードと同じくその帳票のデータを消す |
+| `POST /forms/batches/<batch_id>/save-to-folder` | まとまりの .md を zip にせず1ファイルずつ保存先フォルダに書き、zip のダウンロードと同じ分を消す（フォームの `confirmed_only=1` で確定済みの分だけ） |
 | `GET /forms/<id>/download.json` / `original` | 確認用のダウンロード（消さない。ボタンにも「（消えません）」と書く）。JSON の `source` はファイル名・ハッシュ・シートだけで、`original` への URL は書かない（md をダウンロードすると消えて 404 になるため） |
 | `POST /forms/<id>/delete` | 削除（確認文「元のファイルと読み取り結果を削除します。元に戻せません」）。`next=` で戻り先を指定（ホームから使う） |
 | `POST /forms/<id>/reread` | 種類/シートを選び直して再読み取り（確定済み・修正中なら「手修正とAI入力が失われます」確認必須） |
@@ -97,6 +100,7 @@
 | `GET /tables/imports/<id>/preview` | 概要（読込件数・除外件数と理由・エラー/警告・合計の照合）、**作られる md の一覧と中身**（下書きはジョブで作り、待ち画面を出す）、問題一覧（CSV）、データ（100行ずつ）。ダウンロードで消えることの一文。期間の置き換え・投入済みとの差分は持たない（8.1） |
 | `POST /tables/imports/<id>/confirm` | エラーが残っていれば止める。ジョブで全 md を作る→ done |
 | `GET /tables/imports/<id>/done` | [Markdownをまとめてダウンロード（zip）]（押すと消える確認つき）[正規化CSVをダウンロード]。zip は渡したあと**その取り込みのデータを消す**（3.3）。正規化CSVは zip の「管理用_RAGには入れない」フォルダにも入る |
+| `POST /tables/imports/<id>/save-to-folder` | zip の代わりに、`RAG投入用/` と同じ md を保存先フォルダ（2.8）の直下に1ファイルずつ書く。設定でオンなら `管理用_RAGには入れない/` と同じファイルを `<保存先>/_管理用_RAGには入れない/<取り込み名>_<日時>/` に書く。書き終えたら zip のダウンロードと同じくその取り込みのデータを消す |
 | `GET /tables/imports/<id>/normalized.csv` | 正規化CSV（消さない。zip にも同じものが入る） |
 | `POST /tables/imports/<id>/delete` | 取り込みを削除（`core.purge.purge_table_import`）。戻り先はホーム |
 | `GET /api/jobs/<job_id>` | ジョブ進捗（JSON） |
@@ -112,6 +116,7 @@
 | `/settings/form-types` | 帳票の種類の一覧・作成（見本ファイル→候補確認→読み取りテスト→**使用開始**）・編集（保存しても使用中にしない。作成中のものは読み取りテスト後に[使用開始]）・停止/再開・削除（影響：確定済み帳票N件は残る） |
 | `/settings/table-templates` | 一覧表の取り込み設定の一覧・編集・JSON書き出し/読み込み・削除 |
 | `/settings/ai` | AI接続（既存）＋[接続テスト]（models.list と 1回の短い chat） |
+| `/settings/output` | 保存先フォルダ（2.8）: md の保存先フォルダ（絶対パス。空欄＝使わない）、管理用ファイルもサブフォルダに保存するか、同じ名前があるとき（止める＝既定／上書き）。保存のときに確かめる。[フォルダを確認する]（`POST /settings/output/check`、JSON）で確かめ直す |
 | `/settings/lightrag` | LightRAGへの入れ方（サーバー設定の推奨、ファイルの入れ方・入れ替え手順、エンティティ種別YAMLのダウンロード） |
 
 旧ルート（`/documents/*`, `/patterns/*`, `/settings/models`, `/settings/aliases`（名寄せ辞書は 8.1）, `/history/*`（2.5））は削除。`/api/models` は維持。
@@ -119,7 +124,31 @@
 エラー画面（`templates/errors/`）はすべて日本語で、ホームへのボタンを置く。403 は他サイトからの書き込みを断ったとき（`app._refuse_cross_site_write`）で、画面の JSON 送信（`Accept: application/json`）には同じ理由を JSON で返す。404 は「ダウンロード済みか削除されたか URL 違い」、500 は起動した画面のメッセージを見るよう案内する。
 
 ### 2.7 UI共通部品（templates/components/_ui.html のマクロ）
-`steps(items, current)`、`card`, `badge(state)`, `chips`, `empty_state`, `confirm_delete_form`, `progress(job)`, `data_grid(rows)`（セルグリッド）, `file_drop(name, accept)`。CSS はデザイントークン（色・余白・角丸）を `:root` 変数で統一。ライト基調、配色は現行を踏襲しつつ整理。
+`steps(items, current)`、`card`, `badge(state)`, `chips`, `empty_state`, `confirm_delete_form`, `save_form`（保存先フォルダに保存する POST フォーム）, `progress(job)`, `data_grid(rows)`（セルグリッド）, `file_drop(name, accept)`。CSS はデザイントークン（色・余白・角丸）を `:root` 変数で統一。ライト基調、配色は現行を踏襲しつつ整理。
+
+### 2.8 保存先フォルダ（2026-09-19 追加。`services/output_folder.py`・`views/folder_save.py`）
+ダウンロードしたファイルをエクスプローラーで探して LightRAG に入れ直す手間をなくすため、作った md を**利用者が決めたフォルダに直接保存**できる。
+ふつうは LightRAG サーバーの `INPUT_DIR`（`WORKSPACE` を使うなら `INPUT_DIR/<ワークスペース名>`）を指定し、保存したあと LightRAG の［スキャン］（`POST /documents/scan`）で取り込む。LightRAG への送信はしない（0章のまま。書くのはファイルだけ）。
+- **設定**（`data/output_settings.yaml`。AI接続と同じく `services/settings_store` で書く。設定なので残す）：`folder`（絶対パス。空＝使わない）、`save_admin`（管理用ファイルも保存）、`on_conflict`（`stop`＝保存を止めて知らせる〈既定〉／`overwrite`＝上書き）。
+  保存時と［フォルダを確認する］で、絶対パスか・あるか・フォルダか・書き込めるか（一時ファイルを作って消す）を確かめる。エクスプローラーの「パスのコピー」が付ける `"` は外す。アプリ自身のデータの置き場所（`UPLOAD_DIR`・`DATA_DIR`・`TABLES_DIR`）の中は断る（起動時の片付けで消されるため）。
+- **ボタン**：フォルダが設定されているときだけ、ダウンロードがある所（帳票の完了・詳細の .md、まとまりの zip と「確定済みN件だけ」、一覧表の完了の zip、ホームのダウンロード待ちの行）に［保存先フォルダに保存］を出す。完了・詳細画面ではこれを主ボタンにし、ダウンロードは次の選択肢として残す。POST なので他サイトからの書き込みを断る仕組み（`app._refuse_cross_site_write`）がそのまま効く。確認文はダウンロードと同じく「このPCのアプリから消える／もう一度保存・ダウンロードできない」（修正中の帳票は変更が入らないことを先に書く）。
+- **書くもの**：ダウンロードと**同じ中身**（帳票は `download.md`／まとまりの zip の中身と同じ名前・バイト列。一覧表は `tables/pipeline.build_download_files` を zip と共有）を zip にせず1ファイルずつ。md は保存先の直下。一覧表の管理用ファイル（正規化データ・問題一覧・取込レポート）は `save_admin` がオンのときだけ `<保存先>/_管理用_RAGには入れない/<取り込み名>_<日時>/` に置く。
+- **LightRAG がサブフォルダを読まないことの根拠**（LightRAG 1.5.7 `lightrag/api/routers/document_routes.py`）：`POST /documents/scan`（4409〜4412行）は `run_scanning_process` の中で `doc_manager.iter_new_files()`（3785行）だけから候補を集める。`iter_new_files`（1502〜1547行）は `os.scandir(self.input_dir)` で `INPUT_DIR` の**直下だけ**を見て（1530行）、拡張子が読める種類にない物と**ファイルでない物（フォルダ）は飛ばす**（1533〜1536行「`__parsed__` and any other directory is skipped」）。再帰はしない。だからサブフォルダ `_管理用_RAGには入れない/` の CSV は取り込まれない（兄弟フォルダに分ける必要は無い）。
+- **書き方**：各ファイルは同じフォルダの一時ファイル `.rag_<乱数>.tmp`（`.tmp` は LightRAG の対応拡張子に無いので、書き途中をスキャンが拾わない）に書いて `fsync` し、`os.replace` で本来の名前にする。名前は `core/naming` で作ったものだが、保存先の直下を指すか（区切り文字・`..`・`:` を含まない、`resolve()` した親が保存先）を必ず確かめる。
+- **同じ名前**：LightRAG 1.5.x は文書をファイル名で見分ける（doc_id＝名前の MD5。末尾の分割ヒント `.[…]` は外して比べる: `lightrag/parser/routing.py` 62行・1085〜1099行）。取り込み終えたファイルは `INPUT_DIR/__parsed__/` に移り、そこに同名があれば `_001` などを足す（`lightrag/utils.py` 917〜942行、`document_routes.py` 164行）。同じ名前のまま**スキャン**すると、`classify_scan_file`（`document_routes.py` 3040〜3135行）が既存の行を見て分ける：`PROCESSED` なら取り込まず `__parsed__/<名前>_001.md` などに移すだけ（3101行・3843〜3850行「Skipping already processed file」。文書の一覧には何も出ない）、取り込み待ち・取り込み中の行で同じ物理名なら `RESUME_SAME_PHYSICAL_SOURCE`（3126〜3129行・3897〜3904行）で**前の内容（full_docs）のまま**処理を続け、上書きした中身は使われない。どちらも LightRAG の中身は古いまま。（アップロード・insert の経路では `[DUPLICATE:filename]` になる: `lightrag/pipeline.py` 1340〜1409行。）
+  **削除と `delete_file`**：LightRAG の文書の削除は、既定ではファイルを消さない（`DeleteDocRequest.delete_file` の既定は False: 1065〜1068行。WebUI の「アップロードされたファイルも削除」も既定はオフ: `lightrag_webui/src/components/documents/DeleteDocumentsDialog.tsx` 45行）。オンにすると `delete_file_variants_by_file_path`（2153〜2200行、4232〜4236行から呼ぶ）が `INPUT_DIR` と `INPUT_DIR/__parsed__` の**両方**から同じ名前（`__parsed__` では `_001` などを外して比べる）のファイルを消す。
+  そこで利用者への案内は、**保存の前に**削除するなら `delete_file=true`（`__parsed__` の古いファイルも消え、アプリの「止める」に引っかからない）、**保存のあとで**削除するなら `delete_file=false`（true だと、いま保存したファイルも消える。アプリにはもうデータが無い）とする（保存の結果の画面・LightRAGへの入れ方 6・設定の画面・README）。
+  そこで保存の前に、保存先の直下と `__parsed__/` にある「LightRAG で同じ文書になる名前」（ヒントを外し、大文字・小文字をそろえて比べる。`__parsed__` では末尾の `_001` などが LightRAG の番号か名前の一部（`No._123` など）か分からないので、番号を外した名前と外さない名前の**どちらか**が合えば同じとみなす。`output_folder.lightrag_key`・`find_clashes`）を探す。
+  `stop` なら**何も書かずに**名前の一覧と「LightRAG で先に削除してから入れ直す」説明を出す（409）。`overwrite` なら同じ名前のファイルは上書きし、結果の画面に上書きした名前と、LightRAG で同じ文書とみなされる別のファイル（ヒント違い・`__parsed__`）を出す。
+- **失敗したとき**：1つでも書けなければ、この回に書いたファイルを消し、上書きしたファイルは退避しておいた元の中身に戻し、作ったサブフォルダも消す。データは消さない（もう一度押せる）。失敗の画面には書けなかったファイルの名前を出す。
+  消すときは `core.files.remove_upload` と同じく少し待って何度か試し（読み取り専用なら外してから）、それでも消せなかったファイル（ウイルス対策・同期ソフトが掴んでいたなど）は「消した」とは言わず、失敗の画面にパスを並べて「スキャンの前に消す」よう案内する（画面に出すだけで flash には入れない）。上書きで退避した `.rag_….bak` が消せなかったときも結果の画面に出す。
+- **パスの長さ**：Windows の長いパスが無効（`LongPathsEnabled`=0）なら、パス全体で259文字（フォルダを作るときは247文字）まで。保存の前にすべての名前（一時ファイル `.rag_<16桁>.tmp` の長さも含む）を確かめ、超える名前があれば何も書かずに 400 で知らせる。設定の画面と［フォルダを確認する］では、名前に使える文字数が120文字を切るフォルダに注意を出し、確かめ用の一時ファイルも書けない長さなら「パスが長すぎます」と出す（権限の問題とは言わない）。
+- **書けるかの確かめ**：一時ファイルを `os.open(O_CREAT|O_EXCL)` で1回だけ作って消す。`tempfile.mkstemp` は使わない（Windows でアクセス権で断られたフォルダだと、`PermissionError` を名前の衝突とみなして試し続け、戻ってこない。保存はロックの中で確かめるので、ほかの保存まで止まる）。
+- **管理用のサブフォルダ**：`_管理用_RAGには入れない` がジャンクション・シンボリックリンクなら（あるいは解決した先が保存先の直下でなければ）何も書かずに断る。作った日時のフォルダも、解決した先が保存先の中かを確かめてから書く。
+- **消す**：すべて書けたあとにだけ、ダウンロードを渡し終えたときと同じ関数（`purge_documents` / `purge_batch` / `purge_table_import`）で消す（3.3）。同じものを2回押しても重ならないよう、保存と削除はプロセス内のロックで1つずつ行う（2回目は「もう無い」404）。
+- **結果の画面**：POST の応答でそのまま出す（リダイレクトしない・`Cache-Control: no-store`）。保存先、md の件数、ファイル名（スクロールする一覧）、上書きした名前、次に LightRAG で行うこと（［スキャン］か `POST /documents/scan`、入れ替えなら削除してから。**この時点の削除は「アップロードされたファイルも削除」をオフで**。上書きした名前か同じ文書とみなす別のファイルがあれば、その注意を目立たせて出す）。ファイル名は flash（セッションクッキー）に入れない（3.3）。
+  同じ名前で止めた画面（409）は、`__parsed__` にあるものについては「削除のときに『アップロードされたファイルも削除』を入れる（または `__parsed__` の古いファイルを手で消す）」と案内し、「上書きする」への切り替えは直下にあるときだけ勧める（`__parsed__` の重なりは上書きしても LightRAG に入らないため）。
+- **ボタン（ホームのまとまりの中）**：まとまりの中の1件ずつにある「.mdだけ」の横にも、フォルダが設定されていれば「フォルダに保存」を出す（その1件だけがまとまりから消える）。
 
 ## 3. データモデル（SQLite `instance/app.db`）
 
@@ -158,10 +187,15 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 
 | | 消すもの | いつ |
 |---|---|---|
-| 帳票 | `uploads/documents/<保存名>`、`documents` の行（と `document_id` を持つ表の行） | `GET /forms/<id>/download.md` を**送り終えたあと**。まとまりは `GET /forms/batches/<batch_id>/download.zip` でまとまり全体（`?confirmed_only=1` なら確定済みの分だけ） |
-| 一覧表 | `uploads/tables/<保存名>`、`TABLES_DIR/imports/<id>/`（rows.jsonl.gz・issues・控え・md・preview_md）、`table_imports` の行、`jobs`（`ref_type='table_import'`）、`ai_items`（`import_id` がこの取り込みの分）、どの `ai_items` からも参照されなくなった `llm_calls` | `GET /tables/imports/<id>/download.zip` を**送り終えたあと** |
+| 帳票 | `uploads/documents/<保存名>`、`documents` の行（と `document_id` を持つ表の行） | `GET /forms/<id>/download.md` を**送り終えたあと**。まとまりは `GET /forms/batches/<batch_id>/download.zip` でまとまり全体（`?confirmed_only=1` なら確定済みの分だけ）。保存先フォルダに保存したとき（`POST …/save-to-folder`）は、**全ファイルを書き終えたあと**に同じ範囲 |
+| 一覧表 | `uploads/tables/<保存名>`、`TABLES_DIR/imports/<id>/`（rows.jsonl.gz・issues・控え・md・preview_md）、`table_imports` の行、`jobs`（`ref_type='table_import'`）、`ai_items`（`import_id` がこの取り込みの分）、どの `ai_items` からも参照されなくなった `llm_calls` | `GET /tables/imports/<id>/download.zip` を**送り終えたあと**。保存先フォルダに保存したとき（`POST /tables/imports/<id>/save-to-folder`）は**全ファイルを書き終えたあと** |
 
-- **残すもの**：帳票の種類（`patterns` 系）・一覧表の取り込み設定（`table_templates` 系）・AI接続の設定（`data/model_settings.yaml`・`data/prefs.yaml`）。これらは設定であってデータではない。
+- **保存先フォルダへの保存も「渡した」とみなす**（2.8）：保存先フォルダに書いたものはアプリの外のファイルなので、ダウンロードと同じくアプリのデータを消す。
+  消すのは全ファイルを書き終えたあとだけ。1つでも書けなかったとき・同じ名前があって止めたときは、その回に書いたファイルを消して（上書きしたものは戻して）、データは残す。
+  ダウンロードと違って「受け取られる前に消える」ことは無い（書き終えたことをアプリ自身が確かめてから消す）。保存したファイルはアプリの管理の外で、消すのは利用者（LightRAG が取り込むと `__parsed__/` に移す）。
+  残るのは設定 `data/output_settings.yaml`（フォルダのパスと2つの選択。取り込んだデータは入らない）。
+
+- **残すもの**：帳票の種類（`patterns` 系）・一覧表の取り込み設定（`table_templates` 系）・AI接続の設定（`data/model_settings.yaml`・`data/prefs.yaml`）・保存先フォルダの設定（`data/output_settings.yaml`）。これらは設定であってデータではない。
 - **履歴は持たない**：何をいつ取り込んだかの1行も残さない。だから取り込み履歴の画面が無い（2.5）。
   番号の続き（`sqlite_sequence`。AUTOINCREMENT の表が「これまでに使った一番大きい番号」＝取り込んだ件数を覚えている）も、
   取り込みの表（`documents`・`table_imports`・`jobs`・`ai_items`）が空になったとき乱数（2^31〜2^52）に置き換える
@@ -202,6 +236,7 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 - **他サイトからのダウンロード（＝削除）を断る**：消すダウンロード（`forms.download_md` / `forms.download_batch` / `tables.download_zip`）は GET でも、`Sec-Fetch-Site` が same-origin / none 以外、他サイトの `Origin`、（`Sec-Fetch-Site` が無いときは）他サイトの `Referer` なら 403（`views.PURGING_ENDPOINTS`）。
 - **読み取れないアップロード**：事前チェックや読み込みで思わぬ例外が出ても、アップロードしたファイルは消してから落とす（帳票・一覧表とも）。
 - **画面の知らせ**：ダウンロードのボタンには確認ダイアログ（`data-confirm`）、完了・確認画面には「ダウンロードするとこのPCから消える／もう一度ダウンロードできない」の一文を出す。
+  保存先フォルダが設定されているときは［保存先フォルダに保存］にも同じ意味の確認（`views.forms.save_confirm` / `batch_save_confirm`、`views.tables.SAVE_TO_FOLDER_CONFIRM`）を付け、完了・詳細画面とホームの案内に「保存したときも同じ」を足す。
   修正中（確定済みの版あり）の帳票は、確定し直していない変更が入らずに消えることを確認文の先頭に書く（確認・完了画面とホームの .md / zip ボタン。`views.forms.delete_confirm` / `batch_zip_confirm`）。
   消えないボタン（帳票の `download.json`・`original`）には「（消えません）」と書く。ホームではまとめ取り込みを1行にまとめ、
   1件だけダウンロードするとまとまりが崩れることを押す前に知らせる。
@@ -536,6 +571,7 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 3. 分割：サーバー設定ごとの可否を表で示す。`LIGHTRAG_PARSER` 未設定（1,200トークン固定窓）では記録ファイルの 2〜6 割が途中で切れ文字化けも出るので**使えない**、`env.example` のまま（native-P 2,000）は可、サーバー全体の `legacy-R(chunk_ts=800)` は帳票が割れるので不可。一覧表の記録ファイルは**ヒントを付ける**（推奨）。ヒントの有無で doc_id は変わらないので入れ直す前に削除する。帳票にはヒントを付けない（短い帳票は1断片。明細表を読む帳票は 1,200トークンを超えて分かれることがあるが、長文項目の見出しに識別子が入る）。
 4. 件数・ランキング・推移は集計ファイルで答える。記録ファイルだけでは数えられない。
 5. 更新手順：このアプリは投入済みファイルとの差分を管理しない（8.1）。取り込みごとに、その取り込みの全ファイルを zip で渡す。完了画面で zip をダウンロード→同じファイル名のものが LightRAG に入っていれば LightRAG 側で先に削除（1.5.x は同名で 409）→idle を待つ→zip の `RAG投入用/` を投入（`管理用_RAGには入れない/` は入れない）。帳票は確定し直したものだけを「削除してから入れ直す」で更新する。
+6. 保存先フォルダを `INPUT_DIR` にする使い方（2.8）：LightRAG で同じ名前の文書を先に削除（このときは「アップロードされたファイルも削除」をオン＝`delete_file=true`。オフだと `__parsed__` に古いファイルが残り、アプリの「止める」で保存が止まる）→idle を待つ→アプリで［保存先フォルダに保存］→LightRAG で［スキャン］（`POST /documents/scan`）。保存の**あとで**削除するときは逆にオフにする（オンだと保存したファイルも消える）。スキャンは直下のファイルだけを読み、`_管理用_RAGには入れない/` は読まない。取り込み終えたファイルは `__parsed__/` に移る。
 
 ## 7. テスト方針
 - 既存テストは新ルートに合わせて書き換える（test_extraction は維持）。

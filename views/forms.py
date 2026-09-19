@@ -28,8 +28,8 @@ from export.formats import build_json, build_markdown, markdown_filename
 from models import database as db
 from pattern.matcher import rank_patterns, table_like_sheets
 from pattern.model import DATA_TYPES
-from services import ai_assist, llm
-from views import form_link, safe_next, set_download_name
+from services import ai_assist, llm, output_folder
+from views import folder_save, form_link, safe_next, set_download_name
 
 bp = Blueprint("forms", __name__, url_prefix="/forms")
 
@@ -45,6 +45,11 @@ DELETE_ON_DOWNLOAD_NOTE = ("ダウンロードすると、この帳票の元の�
 DELETE_ON_DOWNLOAD_CONFIRM = "ダウンロードすると、この帳票のデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
 BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳票のデータはこのPCからすべて消えます。"
                         "もう一度ダウンロードすることはできません。")
+# 保存先フォルダに保存するときも、ダウンロードと同じくデータが消える（design.md 3.3。保存したファイルは残る）
+SAVE_TO_FOLDER_CONFIRM = ("保存先フォルダに保存すると、この帳票のデータはこのPCのアプリから消えます（保存した .md は残ります）。"
+                          "もう一度保存・ダウンロードすることはできません。")
+BATCH_SAVE_CONFIRM = ("保存先フォルダに保存すると、このまとまりの帳票のデータはこのPCのアプリからすべて消えます"
+                      "（保存した .md は残ります）。もう一度保存・ダウンロードすることはできません。")
 MAX_BATCH_FILES = 50
 # 別のタブ・戻るボタンで開いた古い確認画面から保存・確定されたときの案内
 STALE_MESSAGE = "別の画面で内容が変わりました。読み込み直してください"
@@ -382,6 +387,7 @@ def _batch_info(doc: dict) -> dict | None:
         "pending": pending,
         "modified": modified,
         "zip_confirm": zip_confirm,
+        "save_confirm": batch_save_confirm(docs),
         "all_confirmed": not pending,
         "next": (after or pending or [None])[0],
     }
@@ -403,18 +409,40 @@ def batch_zip_confirm(docs: list[dict]) -> str:
     return _modified_warning(modified) + text if modified else text
 
 
-def _modified_warning(docs: list[dict]) -> str:
+def batch_save_confirm(docs: list[dict]) -> str:
+    """まとまりを保存先フォルダに保存するときの確認文（zip のダウンロードと同じく、渡した分のデータが消える）。"""
+    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
+    modified = [d for d in docs if d["state"] == "modified"]
+    confirmed = len(docs) - len(pending)
+    if pending:
+        text = (f"確定済みの{confirmed}件だけを保存先フォルダに保存します。その{confirmed}件のデータはこのPCから消えます"
+                f"（未確定の{len(pending)}件は残ります）。")
+    else:
+        text = BATCH_SAVE_CONFIRM
+    return _modified_warning(modified, "保存するファイル") + text if modified else text
+
+
+def _modified_warning(docs: list[dict], into: str = "zip") -> str:
     names = "、".join(d.get("title") or d["file_name"] for d in docs)
-    return (f"修正中の帳票が{len(docs)}件あります（{names}）。確定し直していない変更は zip に入らず、消えます。"
+    return (f"修正中の帳票が{len(docs)}件あります（{names}）。確定し直していない変更は {into} に入らず、消えます。"
             "変更を残すときは、先に確定し直してください。")
+
+
+MODIFIED_NOTE = "この帳票は修正中です。確定し直していない変更は Markdown に入らず、消えます。"
 
 
 def delete_confirm(doc: dict) -> str:
     """1件ダウンロードの確認文。修正中なら、確定し直していない変更が入らずに消えることを先に書く。"""
     if doc["state"] == "modified":
-        return ("この帳票は修正中です。確定し直していない変更は Markdown に入らず、消えます。"
-                + DELETE_ON_DOWNLOAD_CONFIRM)
+        return MODIFIED_NOTE + DELETE_ON_DOWNLOAD_CONFIRM
     return DELETE_ON_DOWNLOAD_CONFIRM
+
+
+def save_confirm(doc: dict) -> str:
+    """1件を保存先フォルダに保存するときの確認文（ダウンロードと同じく、保存するとデータが消える）。"""
+    if doc["state"] == "modified":
+        return MODIFIED_NOTE + SAVE_TO_FOLDER_CONFIRM
+    return SAVE_TO_FOLDER_CONFIRM
 
 
 # ---- 2 帳票の種類とシートを確認 -------------------------------------------------------------
@@ -633,6 +661,7 @@ def preview(doc_id: int):
         # 途中保存で「修正中」になると、まとまりの zip の確認文と修正中の一覧が変わる（画面のまとまりの欄を書き替える）
         summary["batch"] = {
             "zip_confirm": batch["zip_confirm"],
+            "save_confirm": batch["save_confirm"],
             "modified": [{"name": d.get("title") or d["file_name"], "href": url_for(".review", doc_id=d["id"])}
                          for d in batch["modified"]],
         }
@@ -712,7 +741,7 @@ def done(doc_id: int):
                            hash_suffix=bool(hash8) and Path(file_name).stem.endswith(hash8),
                            markdown=build_markdown(doc, confirmed), batch=_batch_info(doc),
                            delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=delete_confirm(doc),
-                           batch_confirm=BATCH_DELETE_CONFIRM)
+                           save_confirm=save_confirm(doc), batch_confirm=BATCH_DELETE_CONFIRM)
 
 
 # ---- 詳細・修正・削除 --------------------------------------------------------------------
@@ -735,6 +764,7 @@ def detail(doc_id: int):
         batch=_batch_info(doc),
         delete_note=DELETE_ON_DOWNLOAD_NOTE,
         delete_confirm=delete_confirm(doc),
+        save_confirm=save_confirm(doc),
     )
 
 
@@ -771,12 +801,7 @@ def download_md(doc_id: int):
     Markdown は全文をメモリに作ってから消すので、消す処理で中身が欠けることはない。作れなかったときは
     何も消さない。消すのは応答を送り終えたあと（purge.purge_after_send）。
     """
-    doc = _get_document(doc_id)
-    confirmed = _data(doc, "confirmed_json")
-    if confirmed is None:
-        abort(404)
-    body = build_markdown(doc, confirmed).encode("utf-8")
-    name = markdown_filename(doc, confirmed)
+    name, body = _single_markdown(doc_id)
     # charset は Flask が text/* に付ける。ここで付けると「charset=utf-8」が二重になる
     response = send_file(io.BytesIO(body), mimetype="text/markdown", as_attachment=True, download_name=name,
                          conditional=False)   # Range でも全体を返す（一部だけ渡して消すことが無いように）
@@ -784,14 +809,73 @@ def download_md(doc_id: int):
     return purge.purge_after_send(response, purge.purge_documents, [doc_id])
 
 
+def _single_markdown(doc_id: int) -> tuple[str, bytes]:
+    """1件の帳票の (ファイル名, Markdown の中身)。確定済みの版が無ければ 404（何も消さない）。"""
+    doc = _get_document(doc_id)
+    confirmed = _data(doc, "confirmed_json")
+    if confirmed is None:
+        abort(404)
+    return markdown_filename(doc, confirmed), build_markdown(doc, confirmed).encode("utf-8")
+
+
+@bp.post("/<int:doc_id>/save-to-folder")
+def save_md_to_folder(doc_id: int):
+    """ダウンロードの代わりに、保存先フォルダへ .md を書き、書き終えたらこの帳票のデータを消す（design.md 3.3）。"""
+    with output_folder.saving():
+        name, body = _single_markdown(doc_id)
+        return folder_save.save_and_purge(
+            [(name, body)], purge_fn=purge.purge_documents, purge_args=([doc_id],), what="帳票",
+            back_url=safe_next(url_for(".detail", doc_id=doc_id)), next_url=url_for(".new"))
+
+
 def _unique_name(name: str, used: set[str]) -> str:
+    """まとまりの中で重ならない名前（大文字・小文字だけの違いも重なりとみなす。Windows では同じファイルになるため）。"""
     stem, suffix = Path(name).stem, Path(name).suffix or ".md"
     candidate, n = name, 2
-    while candidate in used:
+    while candidate.casefold() in used:
         candidate = f"{stem}_{n}{suffix}"
         n += 1
-    used.add(candidate)
+    used.add(candidate.casefold())
     return candidate
+
+
+def _batch_selection(batch_id: str, confirmed_only: bool):
+    """まとまりの中で渡す帳票を決める。戻り値: (確定済みの id, 未確定の帳票) か、断るときのリダイレクト応答。"""
+    docs = db.list_batch_documents(batch_id)
+    if not docs:
+        abort(404)
+    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
+    confirmed_ids = [d["id"] for d in docs if d["state"] in CONFIRMED_STATES]
+    if pending and not confirmed_only:
+        flash(f"まだ確定していない帳票が{len(pending)}件あります。すべて確定するか、"
+              f"確定済みの{len(confirmed_ids)}件だけをダウンロード（または保存）してください", "error")
+        # 確認中の帳票は確認画面へ（種類の画面の「読み取り直す」で手の修正を失わないように）
+        return redirect(form_link(pending[0]))
+    if not confirmed_ids:
+        flash("確定済みの帳票がありません", "error")
+        return redirect(url_for("home.index"))
+    return confirmed_ids, pending
+
+
+def _batch_markdown_files(confirmed_ids: list[int]) -> list[tuple[str, bytes]]:
+    """まとまりの確定済みの帳票の [(ファイル名, Markdown の中身)]（zip と保存先フォルダで同じ名前・中身）。"""
+    files, used = [], set()
+    for doc in db.list_confirmed_documents(confirmed_ids):
+        # 修正中の帳票も、確定済みの版で作る（Markdown は確定済みデータから毎回生成）
+        try:
+            extraction = json.loads(doc["confirmed_json"])
+        except (TypeError, ValueError):
+            continue
+        files.append((_unique_name(markdown_filename(doc, extraction), used),
+                      build_markdown(doc, extraction).encode("utf-8")))
+    return files
+
+
+def _batch_purge(batch_id: str, confirmed_ids: list[int], pending: list[dict]):
+    """渡し終えたあとに消すもの: 未確定が残っていれば確定済みの分だけ、無ければまとまり全体。"""
+    if pending:
+        return purge.purge_documents, (confirmed_ids,)
+    return purge.purge_batch, (batch_id,)
 
 
 @bp.get("/batches/<batch_id>/download.zip")
@@ -801,38 +885,38 @@ def download_batch(batch_id: str):
     ?confirmed_only=1 のときは、確定済みの帳票だけを zip にして、その分だけ消す（未確定の帳票は残す）。
     読めない帳票が1件混ざっただけで、確定済みの帳票を取り出せなくならないようにするため。
     """
-    docs = db.list_batch_documents(batch_id)
-    if not docs:
-        abort(404)
-    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
-    confirmed_ids = [d["id"] for d in docs if d["state"] in CONFIRMED_STATES]
-    confirmed_only = request.args.get("confirmed_only") == "1"
-    if pending and not confirmed_only:
-        flash(f"まだ確定していない帳票が{len(pending)}件あります。すべて確定するか、"
-              f"確定済みの{len(confirmed_ids)}件だけをダウンロードしてください", "error")
-        # 確認中の帳票は確認画面へ（種類の画面の「読み取り直す」で手の修正を失わないように）
-        return redirect(form_link(pending[0]))
-    if not confirmed_ids:
-        flash("確定済みの帳票がありません", "error")
-        return redirect(url_for("home.index"))
-    buffer, used = io.BytesIO(), set()
+    selection = _batch_selection(batch_id, request.args.get("confirmed_only") == "1")
+    if not isinstance(selection, tuple):
+        return selection
+    confirmed_ids, pending = selection
+    buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for doc in db.list_confirmed_documents(confirmed_ids):
-            # 修正中の帳票も、確定済みの版で作る（Markdown は確定済みデータから毎回生成）
-            try:
-                extraction = json.loads(doc["confirmed_json"])
-            except (TypeError, ValueError):
-                continue
-            zf.writestr(_unique_name(markdown_filename(doc, extraction), used),
-                        build_markdown(doc, extraction).encode("utf-8"))
+        for name, body in _batch_markdown_files(confirmed_ids):
+            zf.writestr(name, body)
     buffer.seek(0)
     zip_name = f"帳票Markdown_{datetime.now():%Y%m%d_%H%M%S}.zip"
     response = send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=zip_name,
                          conditional=False)   # Range でも全体を返す
     set_download_name(response, zip_name, "forms_markdown")
-    if pending:
-        return purge.purge_after_send(response, purge.purge_documents, confirmed_ids)
-    return purge.purge_after_send(response, purge.purge_batch, batch_id)
+    purge_fn, purge_args = _batch_purge(batch_id, confirmed_ids, pending)
+    return purge.purge_after_send(response, purge_fn, *purge_args)
+
+
+@bp.post("/batches/<batch_id>/save-to-folder")
+def save_batch_to_folder(batch_id: str):
+    """まとまりの .md を保存先フォルダに1ファイルずつ書き、書き終えたら zip のダウンロードと同じ分を消す。
+
+    confirmed_only=1（フォームの値）のときは確定済みの帳票だけを保存して、その分だけ消す。
+    """
+    with output_folder.saving():
+        selection = _batch_selection(batch_id, request.form.get("confirmed_only") == "1")
+        if not isinstance(selection, tuple):
+            return selection
+        confirmed_ids, pending = selection
+        purge_fn, purge_args = _batch_purge(batch_id, confirmed_ids, pending)
+        return folder_save.save_and_purge(
+            _batch_markdown_files(confirmed_ids), purge_fn=purge_fn, purge_args=purge_args, what="まとめ取り込み",
+            back_url=safe_next(url_for("home.index")), next_url=url_for(".new"))
 
 
 @bp.get("/<int:doc_id>/download.json")

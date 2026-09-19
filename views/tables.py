@@ -32,7 +32,8 @@ from tables.source import open_source
 from tables.spec import (
     COLUMN_ROLES, COLUMN_TYPES, MD_MODES, LogStageSpec, resolve_columns, spec_from_suggestions, validate_spec,
 )
-from views import safe_next, set_download_name
+from services import output_folder
+from views import folder_save, safe_next, set_download_name
 
 bp = Blueprint("tables", __name__, url_prefix="/tables")
 
@@ -64,6 +65,9 @@ DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この取り込
                            "正規化CSVは zip の「管理用_RAGには入れない」フォルダにも入っています。")
 DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込みのデータはこのPCから消えます。"
                               "もう一度ダウンロードすることはできません。")
+# 保存先フォルダに保存するときも、ダウンロードと同じくデータが消える（design.md 3.3。保存したファイルは残る）
+SAVE_TO_FOLDER_CONFIRM = ("保存先フォルダに保存すると、この取り込みのデータはこのPCのアプリから消えます（保存した md は残ります）。"
+                          "もう一度保存・ダウンロードすることはできません。")
 ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
                     ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16"),
                     ("utf-16-le", "UTF-16LE（BOMなし）"), ("utf-16-be", "UTF-16BE（BOMなし）")]
@@ -1116,6 +1120,7 @@ def done(import_id: int):
     files = [{"name": p.name, "size": p.stat().st_size} for p in pipeline.md_paths(import_id)]
     return render_template("tables/done.html", imp=imp, spec=spec, files=files, stats=imp.get("stats") or {},
                            delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
+                           save_confirm=SAVE_TO_FOLDER_CONFIRM, save_admin=output_folder.load()["save_admin"],
                            **_steps_ctx(7))
 
 
@@ -1146,6 +1151,37 @@ def download_zip(import_id: int):
                          conditional=False)   # Range でも全体を返す（一部だけ渡して消すことが無いように）
     set_download_name(response, name, "records")
     return purge.purge_after_send(response, purge.purge_table_import, import_id)
+
+
+@bp.post("/imports/<int:import_id>/save-to-folder")
+def save_to_folder(import_id: int):
+    """zip の代わりに、保存先フォルダへ md を1ファイルずつ書き、書き終えたらこの取り込みのデータを消す（design.md 3.3）。
+
+    md（zip の RAG投入用/ と同じ中身）はフォルダの直下に置く。管理用のファイル（zip の 管理用_RAGには入れない/ と同じ中身）は、
+    設定でオンのときだけ _管理用_RAGには入れない/<取り込み名>_<日時>/ に置く（LightRAG のスキャンはサブフォルダを読まない）。
+    """
+    with output_folder.saving():
+        imp = _load_import(import_id)
+        spec = _spec_for(imp)
+        back = url_for("tables.done", import_id=import_id)
+        if imp["status"] != "confirmed" or spec is None or not pipeline.md_paths(import_id):
+            flash("先に [確定してMarkdownを作成] を押してください", "error")
+            return redirect(url_for("tables.preview", import_id=import_id))
+        if _ai_running(import_id):
+            flash("AI整形の実行中は保存できません。終わるか中止してから保存してください", "error")
+            return redirect(back)
+        if _trial_running(import_id):
+            flash(TRIAL_BUSY_MESSAGE, "error")
+            return redirect(back)
+        try:
+            md_files, extras = pipeline.build_download_files(import_id, imp, spec)
+        except FileNotFoundError:
+            abort(404)   # 同時に押した別の保存・ダウンロードがデータを消した
+        admin = sorted(extras.items()) if output_folder.load()["save_admin"] else None
+        return folder_save.save_and_purge(
+            md_files, admin_files=admin, admin_stem=safe_filename_part(spec.file_prefix),
+            purge_fn=purge.purge_table_import, purge_args=(import_id,), what="一覧表の取り込み",
+            back_url=safe_next(back), next_url=url_for("tables.new"))
 
 
 @bp.get("/imports/<int:import_id>/normalized.csv")

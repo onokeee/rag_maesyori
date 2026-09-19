@@ -244,6 +244,8 @@
   // まとめ取り込みの欄: 途中保存で「修正中」になった帳票を、zip の確認文と修正中の一覧に出す
   function applyBatch(b) {
     document.querySelectorAll("[data-batch-zip]").forEach((a) => { a.dataset.confirm = b.zip_confirm; });
+    // 保存先フォルダに保存するフォームも、確認文を今の状態に合わせる（保存でも渡した分のデータが消える）
+    if (b.save_confirm) document.querySelectorAll("[data-batch-save]").forEach((f) => { f.dataset.confirm = b.save_confirm; });
     const box = document.querySelector("[data-batch-modified]");
     if (!box) return;
     const list = b.modified || [];

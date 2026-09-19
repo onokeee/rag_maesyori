@@ -1,8 +1,9 @@
 {#- まとめ取り込み（複数ファイル）の進み具合。batch と doc を受け取る -#}
+{% import "components/_ui.html" as ui %}
 {% if batch %}
 <div class="notice info" role="note" data-batch>
   <strong>まとめ取り込み {{ batch.position }}/{{ batch.total }}件目</strong>（確定済み {{ batch.confirmed }}/{{ batch.total }}件）。
-  1件ずつ確認して確定し、最後に Markdown をまとめて zip でダウンロードします。ダウンロードするとこのPCからデータは消えます。
+  1件ずつ確認して確定し、最後に Markdown をまとめて zip でダウンロード{% if save_folder %}（または保存先フォルダに保存）{% endif %}します。ダウンロード{% if save_folder %}・保存{% endif %}するとこのPCからデータは消えます。
   {#- 確認画面の途中保存で「修正中」になったときは review.js が中身を書き替えて出す -#}
   <p class="warn" role="note" data-batch-modified{% if not batch.modified %} hidden{% endif %}>修正中の帳票が<span data-batch-modified-count>{{ batch.modified|length }}</span>件あります。確定し直していない変更は zip に入らず、ダウンロードすると消えます:
     <span data-batch-modified-list>{% for d in batch.modified %}<a href="{{ url_for('forms.review', doc_id=d.id) }}">{{ d.title or d.file_name }}</a>{{ "、" if not loop.last }}{% endfor %}</span></p>
@@ -11,10 +12,19 @@
       <a class="btn small" href="{{ batch.next.href }}">次の帳票へ</a>
     {% endif %}
     {% if batch.all_confirmed %}
-      <a class="btn small primary" href="{{ url_for('forms.download_batch', batch_id=batch.id) }}"
+      {% if save_folder %}
+        {{ ui.save_form(url_for('forms.save_batch_to_folder', batch_id=batch.id), batch.save_confirm, save_folder,
+             next=request.path, label="まとめて保存先フォルダに保存", small=True, attrs="data-batch-save") }}
+      {% endif %}
+      <a class="btn small {{ 'primary' if not save_folder }}" href="{{ url_for('forms.download_batch', batch_id=batch.id) }}"
          data-confirm="{{ batch.zip_confirm }}"
          data-confirm-ok="ダウンロードして消す" data-batch-zip>まとめてMarkdownをダウンロード（zip）</a>
     {% elif batch.confirmed %}
+      {% if save_folder %}
+        {{ ui.save_form(url_for('forms.save_batch_to_folder', batch_id=batch.id), batch.save_confirm, save_folder,
+             next=request.path, label="確定済み" ~ batch.confirmed ~ "件だけを保存先フォルダに保存", primary=False, small=True,
+             fields={"confirmed_only": "1"}, attrs="data-batch-save") }}
+      {% endif %}
       <a class="btn small" href="{{ url_for('forms.download_batch', batch_id=batch.id, confirmed_only=1) }}"
          data-confirm="{{ batch.zip_confirm }}"
          data-confirm-ok="ダウンロードして消す" data-batch-zip>確定済み{{ batch.confirmed }}件だけをダウンロード（zip）</a>

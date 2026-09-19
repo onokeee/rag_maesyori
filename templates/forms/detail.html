@@ -39,15 +39,18 @@
 
 {% if confirmed %}
   {% call ui.card("Markdown（確定済みの版）", subtitle=file_name) %}
-    <p class="notice" role="note">{{ delete_note }}</p>
+    <p class="notice" role="note">{{ delete_note }}{% if save_folder %} 保存先フォルダに保存したときも同じです（保存した .md は残ります）。{% endif %}</p>
     <div class="btn-row">
-      <a class="btn primary" href="{{ url_for('forms.download_md', doc_id=doc.id) }}"
+      {% if save_folder %}
+        {{ ui.save_form(url_for('forms.save_md_to_folder', doc_id=doc.id), save_confirm, save_folder, next=request.path) }}
+      {% endif %}
+      <a class="btn {{ 'primary' if not save_folder }}" href="{{ url_for('forms.download_md', doc_id=doc.id) }}"
          data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdownをダウンロード（.md）</a>
       <a class="btn" href="{{ url_for('forms.download_json', doc_id=doc.id) }}">JSONをダウンロード（消えません）</a>
       <a class="btn" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード（消えません）</a>
       <button type="button" class="btn small" data-copy="#mdText">コピー</button>
     </div>
-    <p class="hint">データがこのPCから消えるのは［Markdownをダウンロード（.md）］だけです。
+    <p class="hint">データがこのPCから消えるのは［Markdownをダウンロード（.md）］{% if save_folder %}と［保存先フォルダに保存］{% endif %}だけです。
       JSON と元のファイルは何度でもダウンロードできます（データは残ったままです）。</p>
     <pre class="code md-preview" id="mdText">{{ markdown }}</pre>
   {% endcall %}

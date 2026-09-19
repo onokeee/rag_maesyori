@@ -9,7 +9,7 @@ from flask import Flask, abort, jsonify, render_template, request
 from config import BASE_DIR, Config
 from models import database
 from services import llm
-from views import form_types, forms, home, is_cross_site_write, settings, tables
+from views import folder_save, form_types, forms, home, is_cross_site_write, settings, tables
 
 _SECRET_FILE = BASE_DIR / ".flask_secret"
 
@@ -163,6 +163,11 @@ def create_app(overrides: dict | None = None) -> Flask:
         # ヘッダーのモデル選択（全画面共通）
         return {"model_picker": {"current": llm.current_model(), "models": llm.available(),
                                  "llm_ready": llm.is_configured()}}
+
+    @app.context_processor
+    def inject_save_folder():
+        # 保存先フォルダ（設定 → 保存先フォルダ）。空でなければ、ダウンロードの横に［保存先フォルダに保存］を出す
+        return folder_save.folder_ctx()
 
     return app
 

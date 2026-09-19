@@ -91,6 +91,17 @@
 </form>
 {%- endmacro %}
 
+{#- 保存先フォルダに保存するボタン（POST。送信前に確認ダイアログ）。message はダウンロードと同じく「消える」ことを書く。
+    保存先フォルダが設定されているとき（save_folder）だけ呼ぶ。folder は保存先（ボタンの説明に出す）、next は失敗・同名のときの戻り先、
+    attrs はフォームに付ける属性（data-batch-save など） -#}
+{% macro save_form(action, message, folder, next=None, label="保存先フォルダに保存", primary=True, small=False, fields=None, attrs="") -%}
+<form method="post" action="{{ action }}" class="inline" data-confirm="{{ message }}" data-confirm-ok="保存して消す" {{ attrs }}>
+  {%- if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+  {%- for k, v in (fields or {}).items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+  <button type="submit" class="btn{{ ' primary' if primary }}{{ ' small' if small }}" title="保存先: {{ folder }}">{{ label }}</button>
+</form>
+{%- endmacro %}
+
 {#- ジョブの進捗。job: {"id","status","progress" or "progress_json", "message"}、url を渡すと app.js が自動で更新 -#}
 {% macro progress(job, url=None, label="進み具合") -%}
 {%- set prog = job.progress if job.progress is defined and job.progress is mapping else (job.progress_json if job.progress_json is mapping else {}) -%}

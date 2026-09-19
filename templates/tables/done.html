@@ -12,9 +12,13 @@
 </div>
 
 {% call ui.card() %}
-  <p class="notice" role="note">{{ delete_note }}</p>
+  <p class="notice" role="note">{{ delete_note }}{% if save_folder %} 保存先フォルダに保存したときも同じです（保存したファイルは残ります）。{% endif %}</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('tables.download_zip', import_id=imp.id) }}"
+    {% if save_folder %}
+      {{ ui.save_form(url_for('tables.save_to_folder', import_id=imp.id), save_confirm, save_folder, next=request.path,
+           label="Markdownを保存先フォルダに保存") }}
+    {% endif %}
+    <a class="btn {{ 'primary' if not save_folder }}" href="{{ url_for('tables.download_zip', import_id=imp.id) }}"
        data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdownをまとめてダウンロード（zip）</a>
     <a class="btn" href="{{ url_for('tables.download_csv', import_id=imp.id) }}">正規化CSVをダウンロード</a>
     {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=imp.id),
@@ -23,6 +27,10 @@
   </div>
   <p class="hint">zip の中身: 「RAG投入用」フォルダに Markdown、「管理用_RAGには入れない」フォルダに 正規化データ.csv・問題一覧.csv・取込レポート.csv が入っています。LightRAG には「RAG投入用」の中身だけを入れてください。
     入れる手順は<a href="{{ url_for('settings.lightrag') }}">LightRAGへの入れ方</a>を見てください。</p>
+  {% if save_folder %}
+  <p class="hint">保存先フォルダ（<code>{{ save_folder }}</code>）に保存すると、md をフォルダの直下に1ファイルずつ書きます（zip にはしません）。
+    {% if save_admin %}管理用のファイルはサブフォルダ <code>_管理用_RAGには入れない</code> に入ります（LightRAG のスキャンはサブフォルダを読みません）。{% else %}管理用のファイルは保存しません（設定でサブフォルダに保存できます。要るときは zip をダウンロードしてください）。{% endif %}</p>
+  {% endif %}
 {% endcall %}
 
 {% call ui.card("作成したファイル") %}

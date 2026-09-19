@@ -435,12 +435,21 @@ def start_render_job(import_id: int) -> int:
 
 # ---- ダウンロード ----------------------------------------------------------------------------
 
-def build_download(import_id: int, imp: dict, spec) -> bytes:
-    """RAG投入用/*.md と 管理用_RAGには入れない/（正規化データ・問題一覧・取込レポート）の zip。"""
+def build_download_files(import_id: int, imp: dict, spec) -> tuple[list[tuple[str, bytes]], dict[str, bytes]]:
+    """渡すファイルの中身: (RAG投入用の md の [(名前, 中身)], 管理用のファイル {名前: 中身})。
+
+    zip（build_download）と保存先フォルダへの保存（views.tables.save_to_folder）で同じ中身にするため、ここで1回だけ作る。
+    """
     paths = md_paths(import_id)
     extras = {
         "正規化データ.csv": outputs.normalized_csv(spec, load_rows(import_id)),
         "問題一覧.csv": outputs.issues_csv(load_issues(import_id)),
         "取込レポート.csv": outputs.report_csv(outputs.import_report_items(imp, spec, len(paths))),
     }
-    return outputs.build_zip([(p.name, p.read_bytes()) for p in paths], extras)
+    return [(p.name, p.read_bytes()) for p in paths], extras
+
+
+def build_download(import_id: int, imp: dict, spec) -> bytes:
+    """RAG投入用/*.md と 管理用_RAGには入れない/（正規化データ・問題一覧・取込レポート）の zip。"""
+    md_files, extras = build_download_files(import_id, imp, spec)
+    return outputs.build_zip(md_files, extras)

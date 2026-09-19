@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{#- 保存先フォルダへの保存の結果（views/folder_save.py）。POST の応答でそのまま出す（ファイル名を flash に入れない）。
+    mode: saved（保存した）/ conflict（同じ名前があって止めた）/ error（保存できなかった） -#}
+{% block title %}{% if mode == "saved" %}保存先フォルダに保存しました{% elif mode == "conflict" %}同じ名前のファイルがあります{% else %}保存できませんでした{% endif %}{% endblock %}
+{% block content %}
+{% if mode == "saved" %}
+<div class="page-head">
+  <div>
+    <h1>保存先フォルダに保存しました</h1>
+    <p class="page-lead">{{ what }}の Markdown {{ result.md_names | length }}件を保存しました。このアプリからはデータを消しました（ダウンロードしたときと同じです）。</p>
+  </div>
+</div>
+
+{% if purge_failed %}
+<p class="notice" role="alert">保存は終わりましたが、このアプリのデータを消し切れませんでした。ホームに残っている場合は、そこから削除してください。</p>
+{% endif %}
+
+{% call ui.card("保存したもの") %}
+  <dl class="meta">
+    <dt>保存先フォルダ</dt><dd><code>{{ result.folder }}</code></dd>
+    <dt>md ファイル</dt><dd>{{ result.md_names | length }}件（フォルダの直下）</dd>
+    {% if result.admin_dir %}
+    <dt>管理用ファイル</dt><dd>{{ result.admin_names | length }}件 <code>{{ result.admin_dir }}</code>（LightRAG には入りません）</dd>
+    {% endif %}
+  </dl>
+  <ul class="list-plain scroll-list" aria-label="保存した md ファイル">
+    {% for name in result.md_names %}<li class="mono">{{ name }}{% if name in result.overwritten %} {{ ui.badge("modified", "上書き") }}{% endif %}</li>{% endfor %}
+  </ul>
+  {% if result.overwritten %}
+  <p class="notice" role="note">同じ名前のファイルを{{ result.overwritten | length }}件上書きしました: {{ result.overwritten | join("、") }}。
+    LightRAG がそのファイルをすでに取り込み待ち・取り込み中にしていた場合は、スキャンしても前の内容のまま処理されます（LightRAG でその文書を削除するまで入れ替わりません）。</p>
+  {% endif %}
+  {% if result.already_parsed %}
+  <p class="notice" role="note">LightRAG で同じ文書とみなされるファイルが{{ result.already_parsed | length }}件あります（分割ヒントだけが違う名前か、取り込み済みのフォルダ <code>__parsed__</code> の中）: {{ result.already_parsed | join("、") }}。
+    LightRAG 1.5.x は文書をファイル名（ヒントを除く）で見分けるので、このままスキャンしても取り込まれず、<code>__parsed__</code> に移されるだけです（LightRAG の中身は古いまま）。
+    ヒントだけが違う古いファイルが直下にあれば、それ（いま保存したファイルではない方）を消してください。</p>
+  {% endif %}
+  {% if result.overwritten or result.already_parsed %}
+  <p class="notice" role="alert"><strong>LightRAG で古い文書を削除するときは、「アップロードされたファイルも削除」に<em>チェックを入れないで</em>ください</strong>（API では <code>delete_file=false</code>）。
+    チェックを入れると、LightRAG は同じ名前のファイルを直下と <code>__parsed__</code> の両方から消すので、<strong>いま保存したファイルも消えます</strong>（このアプリにはもうデータがありません）。</p>
+  {% endif %}
+  {% if result.leftover_backups %}
+  <p class="notice" role="note">上書きする前の元のファイルを退避したものを{{ result.leftover_backups | length }}件消せませんでした（LightRAG は読みません。不要ならエクスプローラーで消してください）:</p>
+  <ul class="list-plain">{% for path in result.leftover_backups %}<li class="mono">{{ path }}</li>{% endfor %}</ul>
+  {% endif %}
+{% endcall %}
+
+{% call ui.card("次に LightRAG で行うこと") %}
+  <ol>
+    <li>同じ名前の文書がすでに LightRAG に入っていて入れ替えるときは、LightRAG でその文書を削除して、処理が終わる（idle になる）のを待ちます。
+      <strong>このときは「アップロードされたファイルも削除」にチェックを入れません</strong>（入れると、いま保存したファイルも消えます）。</li>
+    <li>LightRAG の画面（文書の一覧）を開いて［スキャン］を押します。コマンドなら <code>POST /documents/scan</code> です。</li>
+    <li>保存先フォルダの直下の .md だけが取り込まれます。取り込み終えたファイルは LightRAG が <code>__parsed__</code> に移します。</li>
+  </ol>
+  <p class="hint">詳しくは<a href="{{ url_for('settings.lightrag') }}#save-folder">LightRAGへの入れ方</a>を見てください。</p>
+{% endcall %}
+
+<div class="form-actions">
+  <a class="btn primary" href="{{ url_for('home.index') }}">ホームへ</a>
+  {% if next_url %}<a class="btn" href="{{ next_url }}">次のファイルを取り込む</a>{% endif %}
+</div>
+
+{% elif mode == "conflict" %}
+<div class="page-head">
+  <div>
+    <h1>同じ名前のファイルがあります</h1>
+    <p class="page-lead">保存先フォルダ{% if parsed and not existing %}の中の、LightRAG が取り込み済みのファイルを移すフォルダ <code>__parsed__</code>{% elif parsed %}（直下と <code>__parsed__</code>）{% endif %}に同じ名前のファイルがあるため、<strong>何も保存していません</strong>。データはこのアプリに残っています。</p>
+  </div>
+</div>
+{% call ui.card("同じ名前のファイル") %}
+  <dl class="meta"><dt>保存先フォルダ</dt><dd><code>{{ folder }}</code></dd></dl>
+  {% if existing %}
+  <p>保存先フォルダの直下（同じ名前か、分割ヒント <code>.[…]</code> だけが違う名前。スキャン待ちか、取り込みに失敗したもの）: {{ existing | length }}件</p>
+  <ul class="list-plain scroll-list">{% for name in existing %}<li class="mono">{{ name }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if parsed %}
+  <p>LightRAG が取り込み済みのフォルダ（<code>__parsed__</code>）: {{ parsed | length }}件</p>
+  <ul class="list-plain scroll-list">{% for name in parsed %}<li class="mono">{{ name }}</li>{% endfor %}</ul>
+  {% endif %}
+  <p class="notice" role="note">LightRAG 1.5.x は文書をファイル名で見分けます（文書ID＝ファイル名の MD5）。同じ名前のまま入れても、スキャンで取り込まれず <code>__parsed__</code> に移されるだけで、LightRAG の中身は古いままです。
+    すでに LightRAG に入っている文書を入れ替えるときは、LightRAG で<strong>先に削除してから</strong>保存し直してください。</p>
+  <ul>
+    {% if parsed %}
+    <li>入れ替えるつもりなら: LightRAG で該当の文書を削除します。このとき「アップロードされたファイルも削除」に<strong>チェックを入れる</strong>と（API では <code>delete_file=true</code>）、<code>__parsed__</code> の古いファイルも一緒に消えます（入れずに削除したときは、上の <code>__parsed__</code> の中のファイルをエクスプローラーで消します）
+      → 処理が終わる（idle になる）のを待つ → もう一度［保存先フォルダに保存］。</li>
+    {% endif %}
+    {% if existing %}
+    <li>直下のファイルを入れ替えるつもりなら: そのファイルがすでに LightRAG に入っていれば LightRAG で削除し、保存先フォルダの直下の古いファイルを消す → もう一度［保存先フォルダに保存］。</li>
+    <li>上書きしてよいなら: <a href="{{ url_for('settings.output') }}">設定 → 保存先フォルダ</a>で「同じ名前のファイルがあるとき」を「上書きする」にします。</li>
+    {% endif %}
+    <li>別の場所に置くなら: ダウンロードで受け取れます。</li>
+  </ul>
+{% endcall %}
+<div class="form-actions">
+  <a class="btn primary" href="{{ back_url }}">戻る</a>
+  <a class="btn ghost" href="{{ url_for('home.index') }}">ホームへ</a>
+</div>
+
+{% else %}
+<div class="page-head">
+  <div>
+    <h1>保存できませんでした</h1>
+    <p class="page-lead">{{ what }}のデータはこのアプリに残っています。直してからもう一度保存するか、ダウンロードしてください。</p>
+  </div>
+</div>
+{% call ui.card() %}
+  <p class="notice" role="alert">{{ message }}</p>
+  {% if leftovers %}
+  <p>消せずに残ったファイル（LightRAG でスキャンする前に消してください）:</p>
+  <ul class="list-plain scroll-list" aria-label="消せずに残ったファイル">{% for path in leftovers %}<li class="mono">{{ path }}</li>{% endfor %}</ul>
+  {% endif %}
+  <p class="hint">保存先は<a href="{{ url_for('settings.output') }}">設定 → 保存先フォルダ</a>で確かめられます。</p>
+{% endcall %}
+<div class="form-actions">
+  <a class="btn primary" href="{{ back_url }}">戻る</a>
+  <a class="btn ghost" href="{{ url_for('home.index') }}">ホームへ</a>
+</div>
+{% endif %}
+{% endblock %}
