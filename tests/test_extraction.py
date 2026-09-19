@@ -434,6 +434,19 @@ def test_evaluator_compares_table_rows_and_treats_empty_marks_as_empty():
     assert column_value(lots, "品番") is False
 
 
+def test_evaluator_accepts_the_normalized_value_and_checkbox_booleans():
+    """正解の *_norm（ISO の日時）も照合に使い、真偽値のチェック欄は ☑ / □ とみなす。"""
+    from scripts.samples.evaluate_forms import compare_table
+
+    timeline = [{"datetime": "5/23 12:07", "datetime_norm": "2025-05-23 12:07", "event": "停止"}]
+    got = {"columns": ["日時", "内容"], "rows": [["2025-05-23 12:07", "停止"]]}
+    assert compare_table(got, timeline)["matched_rows"] == 1
+    targets = [{"target": "2号機", "checked": True}, {"target": "3号機", "checked": False}]
+    got = {"columns": ["", "展開先"], "rows": [["☑", "2号機"], ["□", "3号機"]]}
+    assert compare_table(got, targets)["matched_rows"] == 2
+    assert compare_table({"columns": ["", "展開先"], "rows": [["□", "2号機"], ["☑", "3号機"]]}, targets)["matched_rows"] == 0
+
+
 def test_combined_label_takes_the_matching_part_of_the_value(tmp_path):
     from excel.text import label_parts
 

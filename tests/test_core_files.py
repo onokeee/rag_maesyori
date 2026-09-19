@@ -400,3 +400,79 @@ def test_precheck_refuses_entity_definitions(tmp_path):
 
     with pytest.raises(UploadError, match="不正なファイル"):
         precheck_excel(_xlsx_with_sheet_xml(tmp_path / "entity.xlsx", edit))
+
+
+_XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+_DRAWING_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+
+
+def _xlsx_sharing_one_drawing(path, sheets: int, anchors: int, absolute_target: bool = False):
+    """多数のシートが同じ1つの描画部品（大量の図形）を参照するブック（圧縮後は小さい）。"""
+    wb = Workbook()
+    wb.active.title = "S1"
+    for i in range(2, sheets + 1):
+        wb.create_sheet(f"S{i}")
+    wb.save(path)
+    anchor = ('<xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/>'
+              '<xdr:clientData/></xdr:absoluteAnchor>')
+    drawing = f'<?xml version="1.0"?><xdr:wsDr xmlns:xdr="{_XDR}">{anchor * anchors}</xdr:wsDr>'
+    target = "/xl/drawings/drawing1.xml" if absolute_target else "../drawings/drawing1.xml"
+    rels = ('<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rIdD" Type="{_DRAWING_REL}" Target="{target}"/></Relationships>')
+    src = path.with_suffix(".src.xlsx")
+    path.rename(src)
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", item.filename):
+                text = data.decode("utf-8").replace(
+                    "<worksheet ", '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ', 1)
+                data = text.replace("</worksheet>", '<drawing r:id="rIdD"/></worksheet>').encode("utf-8")
+            zout.writestr(item, data)
+        for i in range(1, sheets + 1):
+            zout.writestr(f"xl/worksheets/_rels/sheet{i}.xml.rels", rels)
+        zout.writestr("xl/drawings/drawing1.xml", drawing)
+    src.unlink()
+    return path
+
+
+def test_precheck_refuses_many_sheets_sharing_one_large_drawing_quickly(tmp_path):
+    """図形の多い描画を多数のシートが共有するブックは、openpyxl が開く前に断る（開くたびに数十秒かかるため）。"""
+    path = _xlsx_sharing_one_drawing(tmp_path / "shared.xlsx", sheets=20, anchors=40_000)
+    assert path.stat().st_size < 200_000
+    started = time.monotonic()
+    with pytest.raises(UploadError, match="図形や画像の数が多すぎる"):
+        precheck_excel(path)
+    assert time.monotonic() - started < 2
+
+
+def test_precheck_multiplies_drawing_anchors_by_referencing_sheets(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "MAX_DRAWING_ANCHORS", 100)
+    precheck_excel(_xlsx_sharing_one_drawing(tmp_path / "ok.xlsx", sheets=4, anchors=25))       # 100 は通す
+    with pytest.raises(UploadError, match="図形や画像"):
+        precheck_excel(_xlsx_sharing_one_drawing(tmp_path / "ng.xlsx", sheets=5, anchors=25))   # 125
+    with pytest.raises(UploadError, match="図形や画像"):                                          # 絶対パスの Target も数える
+        precheck_excel(_xlsx_sharing_one_drawing(tmp_path / "abs.xlsx", sheets=5, anchors=25, absolute_target=True))
+
+
+def test_precheck_limits_drawing_bytes_times_referencing_sheets(tmp_path, monkeypatch):
+    monkeypatch.setattr(files, "MAX_DRAWING_BYTES", 10_000)
+    with pytest.raises(UploadError, match="図形や画像"):
+        precheck_excel(_xlsx_sharing_one_drawing(tmp_path / "big.xlsx", sheets=10, anchors=20))
+
+
+def test_precheck_accepts_a_workbook_with_a_few_images(tmp_path):
+    from openpyxl.drawing.image import Image as XLImage
+    from PIL import Image as PILImage
+
+    png = tmp_path / "p.png"
+    PILImage.new("RGB", (4, 4), "red").save(png)
+    wb = Workbook()
+    for i in range(3):
+        ws = wb.active if i == 0 else wb.create_sheet(f"S{i}")
+        ws["A1"] = "管理No"
+        ws.add_image(XLImage(str(png)), "C3")
+        ws.add_image(XLImage(str(png)), "E5")
+    path = tmp_path / "images.xlsx"
+    wb.save(path)
+    precheck_excel(path)

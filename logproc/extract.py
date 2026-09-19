@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from logproc.text import shadow
 
@@ -31,32 +32,40 @@ _QTY_RE = re.compile(
     rf"|¥\s*\d[\d,]*"
     rf"|(?<![\d.\-,±])\d+(?:[.,]\d+)*(?:E[-+]?\d+)?(?:\s*[〜~]\s*\d+(?:\.\d+)?)?\s*{_QTY_UNIT}"
 )
+_HAS_ALPHA_RE = re.compile(r"[A-Za-z]")
+_HAS_DIGIT_RE = re.compile(r"\d")
 _PLAN_KEY_RE = re.compile(r"納期|予定|目処|目途|見込み|までに")
 _CLAUSE_SEP_RE = re.compile(r"[、。,，()（）\s→・「」【】]+")
 
 
 def identifier_spans(text: str) -> list[tuple[int, int, str]]:
     """英字と数字を両方含む語の位置。戻り値の語は NFKC 後の表記。"""
+    return list(_identifier_spans(text))
+
+
+@lru_cache(maxsize=4096)
+def _identifier_spans(text: str) -> tuple[tuple[int, int, str], ...]:
+    # 同じ本文を識別子・数量の抜き出しで続けて調べるので、結果を覚えておく（変更されないよう tuple で持つ）
     sh = shadow(text)
     out = []
     for m in _ID_RE.finditer(sh):
         tok = m.group(0)
-        if not (re.search(r"[A-Za-z]", tok) and re.search(r"\d", tok)):
+        if not (_HAS_ALPHA_RE.search(tok) and _HAS_DIGIT_RE.search(tok)):
             continue
         if tok in _FORMULAS or _ASCII_UNIT_RE.fullmatch(tok) or any(r.fullmatch(tok) for r in _NOT_ID_RES):
             continue
         out.append((m.start(), m.end(), tok))
-    return out
+    return tuple(out)
 
 
 def extract_identifiers(text: str) -> list[str]:
-    return _dedupe(tok for _, _, tok in identifier_spans(text))
+    return _dedupe(tok for _, _, tok in _identifier_spans(text))
 
 
 def extract_quantities(text: str) -> list[str]:
     """数値＋単位、×1、2回、金額。原文の表記（NFKC 後）で返す。"""
     sh = shadow(text)
-    id_spans = identifier_spans(text)
+    id_spans = _identifier_spans(text)
     out = []
     for m in _QTY_RE.finditer(sh):
         if any(s <= m.start() and m.end() <= e for s, e, _ in id_spans):
@@ -67,8 +76,11 @@ def extract_quantities(text: str) -> list[str]:
 
 def extract_plans(text: str) -> list[str]:
     """「納期1週間」「6月末目処」「交換予定」などの予定句（原文の表記）。"""
+    # 予定の語は区切り記号を含まないので、全体に無ければどの句にも無い（句ごとに写しを作らない）
+    if not text or not _PLAN_KEY_RE.search(shadow(text)):
+        return []
     out = []
-    for piece in _CLAUSE_SEP_RE.split(text or ""):
+    for piece in _CLAUSE_SEP_RE.split(text):
         if piece and _PLAN_KEY_RE.search(shadow(piece)):
             out.append(piece)
     return _dedupe(out)

@@ -39,7 +39,7 @@ def _spec_or_none(spec_text):
 
 
 # ---- 取り込み設定と版 -------------------------------------------------------------------
-# 版の履歴は画面で扱わない。保存は今の版を上書きする（確定に使われた版だけ新しい版にする）。
+# 版の履歴は画面で扱わない。保存は今の版を上書きする（確定に使われた版・取り込みが使っている版だけ新しい版にする）。
 
 def create_template(name: str, spec: TableSpec, description: str = "", note: str = "", conn=None) -> tuple[int, int]:
     """設定と版1を作る。戻り値: (template_id, version_id)"""
@@ -56,13 +56,23 @@ def create_template(name: str, spec: TableSpec, description: str = "", note: str
     return template_id, version_id
 
 
-def save_template_version(template_id: int, spec: TableSpec, note: str = "", conn=None) -> int:
-    """設定を保存する。今の版が確定に使われていなければ上書き、使われていれば新しい版を作る。戻り値: version_id"""
+def save_template_version(template_id: int, spec: TableSpec, note: str = "", conn=None,
+                          allow_import_id: int | None = None) -> int:
+    """設定を保存する。戻り値: version_id
+
+    今の版が確定に使われておらず、どの取り込みにも使われていなければ上書きする。使われていれば新しい版を作る
+    （読み込み済みでまだ確定していない取り込みは、読み込んだときの設定のまま。上書きすると、古い設定で読んだ値を
+    新しい単位・列キーで出してしまう）。allow_import_id: その取り込みだけが使っている版は上書きしてよい
+    （取り込み自身の列の対応づけ。保存のあと読み込み直す）。
+    """
     db = _db(conn)
     ts = database.now()
     current = db.execute("SELECT v.* FROM table_templates t JOIN table_template_versions v ON v.id = t.current_version_id "
                          "WHERE t.id = ?", (template_id,)).fetchone()
-    if current is not None and not current["used"]:
+    in_use = current is not None and db.execute(
+        "SELECT 1 FROM table_imports WHERE template_version_id = ? AND id IS NOT ? LIMIT 1",
+        (current["id"], allow_import_id)).fetchone() is not None
+    if current is not None and (current["spec_hash"] == spec_hash(spec) or (not current["used"] and not in_use)):
         if current["spec_hash"] != spec_hash(spec):
             db.execute("UPDATE table_template_versions SET spec_json = ?, spec_hash = ?, note = ? WHERE id = ?",
                        (spec_json(spec), spec_hash(spec), note or current["note"], current["id"]))

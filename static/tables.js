@@ -107,15 +107,26 @@
       if (!tr) return;
       const field = event.target.dataset.field;
       if (field === "use") tr.classList.toggle("is-unused", !event.target.checked);
+      // AI整形の対象（役割＝追記ログ）は1列だけ。ほかの行のチェックを外し、追記ログの役割は長文に戻す
+      const onlyThisLog = () => {
+        editor.querySelectorAll("tr[data-col]").forEach((other) => {
+          if (other === tr) return;
+          const box = other.querySelector("input[data-field=ai]");
+          if (box) box.checked = false;
+          const role = other.querySelector("[data-field=role]");
+          if (role && role.value === "log") role.value = "text";
+        });
+      };
       if (field === "ai" && event.target.checked) {
-        // AI整形の対象は1列だけ。役割を追記ログ・型を長文にする
-        editor.querySelectorAll("input[data-field=ai]").forEach((box) => { if (box !== event.target) box.checked = false; });
+        // 役割を追記ログ・型を長文にする
+        onlyThisLog();
         tr.querySelector("[data-field=role]").value = "log";
         tr.querySelector("[data-field=type]").value = "text";
         tr.querySelector("[data-field=use]").checked = true;
         tr.classList.remove("is-unused");
       }
       if (field === "role" && event.target.value === "log") {
+        onlyThisLog();
         tr.querySelector("[data-field=ai]").checked = true;
         tr.querySelector("[data-field=type]").value = "text";
       }
@@ -252,7 +263,7 @@
       try {
         const r = await postJson(aiPage.dataset.estimateUrl, { ...runOptions(), trials });
         out.textContent = `AIに送る行 ${r.ai_rows}件（呼び出し ${r.calls}回、保存済み ${r.cached}件、ルールのみ ${r.rule_only_rows}件）`
-          + `／入力 約${r.tokens_in}トークン・出力 約${r.tokens_out}トークン／約${Math.ceil(r.minutes || 0)}分`
+          + `／入力 約${r.tokens_in}トークン・出力 約${r.tokens_out}トークン／${r.duration_text || `約${Math.ceil(r.minutes || 0)}分`}`
           + (r.basis === "trial" ? "（試し実行の実測から）" : "（目安）");
       } catch (e) {
         out.textContent = "";
@@ -282,7 +293,7 @@
       const p = event.detail.progress || {};
       const detail = aiPage.querySelector("[data-ai-detail]");
       if (detail) {
-        const rest = p.remaining_sec ? `／残り約${Math.ceil(p.remaining_sec / 60)}分` : "";
+        const rest = !p.remaining_sec ? "" : p.remaining_sec < 60 ? "／残り1分未満" : `／残り約${Math.ceil(p.remaining_sec / 60)}分`;
         detail.textContent = `OK ${p.ok || 0}／要確認 ${p.flagged || 0}／エラー ${p.error || 0}／ルールのみ ${p.rule_only || 0}${rest}`;
       }
     });

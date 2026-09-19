@@ -10,8 +10,11 @@
 """
 from __future__ import annotations
 
+import copy
 import io
 import sqlite3
+import threading
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -27,7 +30,7 @@ from tables.mapping import match_templates, suggest_columns
 from tables.markdown import ai_point_lines, people_index_for, record_block
 from tables.source import open_source
 from tables.spec import (
-    COLUMN_ROLES, COLUMN_TYPES, MD_MODES, resolve_columns, spec_from_suggestions, validate_spec,
+    COLUMN_ROLES, COLUMN_TYPES, MD_MODES, LogStageSpec, resolve_columns, spec_from_suggestions, validate_spec,
 )
 from views import safe_next, set_download_name
 
@@ -156,6 +159,18 @@ def _ai_running(import_id: int) -> bool:
     return bool(job and not job.get("finished"))
 
 
+# AIの試し実行（同期の要求でジョブが無い）をしている取り込み → 実行中の数。実行中に取り込みを消すと、
+# 終わった試し実行が AI の結果・応答を書き戻して残してしまう（design.md 3.3）
+_TRIALS: Counter[int] = Counter()
+_TRIALS_LOCK = threading.Lock()
+TRIAL_BUSY_MESSAGE = "AIの試し実行中は削除・ダウンロードできません。試し実行が終わってからもう一度押してください"
+
+
+def _trial_running(import_id: int) -> bool:
+    with _TRIALS_LOCK:
+        return _TRIALS[import_id] > 0
+
+
 def _processing(imp: dict) -> bool:
     """読み込み中・Markdown作成中・AI整形の実行中か。途中で設定やデータを変えると、古い設定の結果が残ったり、
     消したはずの AI の結果が書き戻されたりする（design.md 3.3）。"""
@@ -221,6 +236,9 @@ def delete_import(import_id: int):
     if _ai_running(import_id):
         flash("AI整形の実行中は削除できません。AI整形を中止してから削除してください", "error")
         return redirect(url_for("tables.ai", import_id=import_id))
+    if _trial_running(import_id):
+        flash(TRIAL_BUSY_MESSAGE, "error")
+        return redirect(url_for("tables.ai", import_id=import_id))
     preview_job = jobs.latest_job("table_import", import_id, kind="table_preview")
     if preview_job is not None and not preview_job.get("finished"):
         # 下書きの作成中に消すと、開いているファイルが消え残ったり、消したあとに記録の md が書き戻されたりする
@@ -265,8 +283,10 @@ def upload():
             sheets = [s for s in source.sheets() if not s.hidden] or source.sheets()
             if not sheets:
                 raise UploadError("シートがないブックです。シートのあるブックを選んでください")
-            # 開けても値を読めないブック（<v>NaN</v> など）は、取り込みを作る前にここで断る
-            list(source.rows(sheets[0].name, 1, 50))
+            # 開けても値を読めないブック（<v>NaN</v> など）は、取り込みを作る前にここで断る。
+            # 先頭だけでなく全行を読む（下の方の値が読めないと、取り込みが読み込みの段から先へ進めない）
+            for _row in source.rows(sheets[0].name):
+                pass
             source_info = {"kind": "excel", "sheet": sheets[0].name}
         else:
             source = open_source(path, stored.file_name)
@@ -521,6 +541,99 @@ def _column_row(index: int, header: str, col=None, sugg=None, use: bool = True) 
     }
 
 
+# 画面に出す markdown の項目（それ以外は前の設定から引き継ぐ）
+_SCREEN_MD_KEYS = ("file_prefix", "group_by", "max_records_per_file", "omit_person", "lightrag_hint", "dedupe_timeline")
+
+
+def _base_column(base_spec, row: dict, taken: set[str]):
+    """画面の行に対応する前の設定の列。キーで探し、無ければ見出しで探す（taken: 他の行がキーで使う列）。"""
+    key = str(row.get("key") or "").strip()
+    col = base_spec.column(key) if key else None
+    if col is not None:
+        return col
+    header = str(row.get("header") or "")
+    if not header:
+        return None
+    return next((c for c in base_spec.columns if c.key not in taken and header in (c.headers or [])), None)
+
+
+def _carry_column(col, old, header: str) -> None:
+    """JSON で取り込んだ設定だけが持つ列の設定（見出しの別名・単位換算・値の置き換えなど）を引き継ぐ。
+
+    画面では見出しを1つしか扱わないので、見出しは前の見出しとの和にする（新しいファイルで見出しが変わっても、
+    前の見出しのファイルがそのまま読めるように）。
+    """
+    if old is None:
+        return
+    headers = [header] if header else []
+    if not old.headers and header == old.display:
+        headers = []   # 見出しを持たず表示名で照合していた列は、そのまま
+    headers += [h for h in old.headers or [] if h not in headers]
+    col.headers = headers
+    col.allowed = list(old.allowed or [])
+    col.value_map = dict(old.value_map or {})
+    if (col.unit or "") == (old.unit or ""):
+        col.unit_conversions = dict(old.unit_conversions or {})
+    if col.role == old.role and col.type == old.type:
+        # 型・役割を変えていなければ、正規化と必須も前のまま（変えたときは画面の選択に合わせた既定値）
+        col.normalize = list(old.normalize or [])
+        col.required = bool(old.required)
+
+
+def _carry_markdown(spec, base_spec) -> None:
+    """画面に出さない markdown の設定（集計の指標・上位件数・dataset_card など）を前の設定から引き継ぐ。"""
+    old = copy.deepcopy(base_spec.markdown or {})
+    for k in _SCREEN_MD_KEYS:
+        old.pop(k, None)
+    old.pop("title_columns", None)
+    numbers = {c.key for c in spec.columns if c.type == "number"}
+    summaries = []
+    for s in base_spec.summaries():
+        s = copy.deepcopy(s)
+        # 消した列・数値でなくなった列の指標は落とす（残すと保存できなくなる）
+        s.metrics = [m for m in s.metrics if ":" not in m or m.split(":", 1)[1] in numbers] or ["count"]
+        summaries.append(s)
+    old["summaries"] = summaries
+    spec.markdown.update(old)
+
+
+_UNIQUE_ROLES = ("key", "date", "entity", "entity_label", "log")
+
+
+def _absent_columns(base_spec, rows: list[dict]) -> list:
+    """前の設定の列のうち、画面のどの行（使う・使わないとも）にも対応しないもの。必須の列は含めない。"""
+    matched: set[str] = set()
+    for r in rows:
+        col = _base_column(base_spec, r, set())
+        if col is not None:
+            matched.add(col.key)
+    ignored = set((base_spec.header or {}).get("ignored") or [])
+    ignored |= {str(r.get("header") or "") for r in rows if not r.get("use")}
+    return [c for c in base_spec.columns if c.key not in matched and not c.required
+            and not ({c.display, *(c.headers or [])} & ignored)]
+
+
+def _carry_record(spec, base_spec, keys: set[str]) -> dict:
+    """記録キー・代わりのキーは、画面で記録番号・日付・設備の役割を変えていなければ前の設定のまま
+    （JSON で取り込んだ複数列のキーを、何も変えずに保存しただけで置き換えないように）。"""
+    old = copy.deepcopy(base_spec.record or {})
+    record = {**old, **spec.record}
+
+    def role_key(s, role):
+        col = s.first_role(role)
+        return col.key if col is not None else None
+
+    def parts_exist(parts) -> bool:
+        return all(str(p).split(":")[0] in keys for p in parts or [])
+
+    if "key" in old and role_key(spec, "key") == role_key(base_spec, "key") and parts_exist(old["key"]):
+        record["key"] = old["key"]
+    if ("fallback_key" in old and parts_exist(old["fallback_key"])
+            and all(role_key(spec, r) == role_key(base_spec, r) for r in ("date", "entity", "text"))):
+        record["fallback_key"] = old["fallback_key"]
+    return record
+
+
 def _build_spec(payload: dict, base_spec=None):
     """列の対応づけ表（JSON）から取り込み設定を作る。戻り値: (spec, errors)"""
     rows = [r for r in payload.get("columns") or [] if isinstance(r, dict)]
@@ -550,7 +663,10 @@ def _build_spec(payload: dict, base_spec=None):
     for col, r in zip(spec.columns, used):
         col.description = str(r.get("description") or "").strip()
     spec.header["ignored"] = [str(r.get("header") or "") for r in rows if not r.get("use")]
-    spec.markdown["file_prefix"] = str(payload.get("file_prefix") or "").strip() or name
+    # 空欄・設定名と同じ接頭辞は保存しない（空欄＝設定名。名前を変えたら新しい名前が使われるように）
+    prefix = str(payload.get("file_prefix") or "").strip()
+    old_name = base_spec.name if base_spec is not None else ""
+    spec.markdown["file_prefix"] = "" if prefix in ("", name, old_name) else prefix
     spec.markdown["omit_person"] = bool(payload.get("omit_person", True))
     # 画面のチェックは必ず true/false で送られてくる（static/tables.js）。キーが無いのは画面以外からの呼び出しで、
     # そのときは分割ヒントは付けず、時系列の重複削除は今までどおり行う。
@@ -560,17 +676,41 @@ def _build_spec(payload: dict, base_spec=None):
         # 画面で扱わない細かい設定は前の設定から引き継ぐ
         for attr in ("name_patterns", "file_types", "na_tokens", "fiscal_year_start_month", "data_end", "exclude",
                      "continuation_rows", "checks", "custom_stages"):
-            setattr(spec, attr, getattr(base_spec, attr))
-        spec.header["anchors"] = (base_spec.header or {}).get("anchors") or []
+            setattr(spec, attr, copy.deepcopy(getattr(base_spec, attr)))
+        header = copy.deepcopy(base_spec.header or {})
+        header.update({"rows": spec.header["rows"], "ignored": spec.header["ignored"]})
+        header["anchors"] = header.get("anchors") or []
+        spec.header = header
+        # 記録キーと日付の列は画面の役割から決める。それ以外の項目は前の設定のまま
+        spec.period = {**copy.deepcopy(base_spec.period or {}), **spec.period}
+        taken = {c.key for c in spec.columns}
+        for col, r in zip(spec.columns, used):
+            _carry_column(col, _base_column(base_spec, r, taken), str(r.get("header") or ""))
+        # 今回のファイルに無いだけの列（どの行にも対応せず、外してもいない列）は設定に残す。
+        # 残さないと、その列の指標・AIの追加処理・タイトル列まで設定から消えてしまう
+        for old_col in _absent_columns(base_spec, rows):
+            if old_col.key in taken or (old_col.role in _UNIQUE_ROLES and spec.first_role(old_col.role) is not None):
+                continue
+            spec.columns.append(copy.deepcopy(old_col))
+            taken.add(old_col.key)
         keys = {c.key for c in spec.columns}
+        spec.record = _carry_record(spec, base_spec, keys)
+        _carry_markdown(spec, base_spec)
         spec.markdown["title_columns"] = [k for k in (base_spec.markdown or {}).get("title_columns") or []
                                           if str(k).split(":")[0] in keys]
         spec.custom_stages = [s for s in spec.custom_stages if all(k in keys for k in s.inputs)]
         old = base_spec.log_stage
+        log_col = spec.first_role("log")
+        if spec.log_stage is None and old is not None and log_col is not None and log_col.key == old.column:
+            spec.log_stage = LogStageSpec(column=old.column)  # 今回のファイルに無いAI整形の列（下で前の設定に戻す）
         if old is not None and spec.log_stage is not None and old.column == spec.log_stage.column:
             old.context_columns = [k for k in old.context_columns if k in keys]
             spec.log_stage = old
-    return spec, validate_spec(spec)
+    errors = validate_spec(spec)
+    if sum(1 for r in used if r.get("ai")) > 1:
+        # 黙って最初の列だけを AI整形の対象にしない（2列目は追記ログとして1行につながれて出てしまう）
+        errors.insert(0, "AI整形の対象は1列だけにしてください")
+    return spec, errors
 
 
 @bp.get("/imports/<int:import_id>/columns")
@@ -602,11 +742,12 @@ def columns(import_id: int):
         else:
             use = col is not None or s.header not in ignored
         rows.append(_column_row(s.index, s.header, col, s, use))
+    absent = [c.display for c in _absent_columns(spec, rows)] if spec is not None else []
     src = imp.get("source") or {}
     return render_template(
         # 設定の名前の初期値にファイル名を使わない（R5・design.md 3.3）。名前は 2画面目で必ず入力させる
         "tables/columns.html", imp=imp, rows=rows, settings=_settings_of(spec, src.get("new_template_name") or ""),
-        changed=src.get("headers_changed"), is_new=spec is None, header_rows_count=len(guess.header_rows) or 1,
+        changed=src.get("headers_changed"), absent=absent, is_new=spec is None, header_rows_count=len(guess.header_rows) or 1,
         save_url=url_for("tables.save_columns", import_id=import_id), **_options_ctx(), **_steps_ctx(4))
 
 
@@ -623,7 +764,7 @@ def save_columns(import_id: int):
         return _json_error(errors[0], errors=errors)
     try:
         if template is not None:
-            version_id = store.save_template_version(template["id"], spec)
+            version_id = store.save_template_version(template["id"], spec, allow_import_id=import_id)
             template_id = template["id"]
         else:
             template_id, version_id = store.create_template(spec.name, spec)
@@ -643,8 +784,10 @@ def reread(import_id: int):
     spec = _spec_for(imp)
     if spec is None:
         return redirect(url_for("tables.columns", import_id=import_id))
-    if imp["status"] in ("reading", "confirming"):
-        return redirect(url_for("tables.preview", import_id=import_id))
+    if _processing(imp):
+        # AI整形の実行中・一時停止中に読み込み直すと、読み込みが AI整形の後ろで待ち続け、AI整形の画面にも戻れなくなる
+        flash(BUSY_MESSAGE, "error")
+        return redirect(url_for("tables.ai" if _ai_running(import_id) else "tables.preview", import_id=import_id))
     pipeline.start_read_job(import_id)
     return redirect(_after_read_url(import_id, spec))
 
@@ -758,8 +901,16 @@ def ai_trial(import_id: int):
         settings = llm.job_client_settings()
         if not llm.is_local_endpoint(settings.get("chat_url") or "") and not payload.get("confirm_external"):
             return _json_error("対応内容が外部のAIサービスに送信されます。確認のチェックを入れてください")
-        data = runner.load_rows_for_ai(import_id)
-        result = runner.trial_row(import_id, row_key, stage_ids=["log"], data=data)
+        with _TRIALS_LOCK:
+            _TRIALS[import_id] += 1
+        try:
+            data = runner.load_rows_for_ai(import_id)
+            result = runner.trial_row(import_id, row_key, stage_ids=["log"], data=data)
+        finally:
+            with _TRIALS_LOCK:
+                _TRIALS[import_id] -= 1
+                if _TRIALS[import_id] <= 0:
+                    del _TRIALS[import_id]
     except llm.LLMNotConfigured:
         return _json_error("AI接続が設定されていません。設定の「AI接続」で設定してください")
     except llm.LLMCallError as exc:
@@ -981,6 +1132,9 @@ def download_zip(import_id: int):
         return redirect(url_for("tables.preview", import_id=import_id))
     if _ai_running(import_id):
         flash("AI整形の実行中はダウンロードできません。終わるか中止してからダウンロードしてください", "error")
+        return redirect(url_for("tables.done", import_id=import_id))
+    if _trial_running(import_id):
+        flash(TRIAL_BUSY_MESSAGE, "error")
         return redirect(url_for("tables.done", import_id=import_id))
     try:
         data = pipeline.build_download(import_id, imp, spec)

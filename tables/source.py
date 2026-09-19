@@ -21,7 +21,8 @@ except ImportError:  # WP-core 未統合の間の代替
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
 CSV_EXTENSIONS = {".csv", ".tsv", ".txt"}
 
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# 制御文字と見えない文字（ゼロ幅スペース・BOM・向き指定・ソフトハイフン。excel.text._INVISIBLE_RE と同じ集合）
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200d\u2060\ufeff\u202a-\u202e\u2066-\u2069\u00ad]")
 _EXCEL_ERRORS = {"#N/A", "#DIV/0!", "#REF!", "#VALUE!", "#NAME?", "#NUM!", "#NULL!", "#GETTING_DATA"}
 
 

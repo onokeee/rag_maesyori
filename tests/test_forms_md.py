@@ -146,6 +146,15 @@ def test_rag_output_omit_fields_are_not_written(standard):
     assert next(f for f in data["fields"] if f["field_name"] == "work_hours")["unit"] == "時間"
 
 
+def test_json_has_no_link_to_the_purged_original(standard):
+    """ダウンロードで帳票ごと消すので、元ファイルへのリンク（消えた後は404）は書かない。"""
+    info, _, extraction = standard
+    data = build_json(_doc(info), extraction)
+    assert "url" not in data["source"]
+    assert data["source"]["file_name"] == _doc(info)["file_name"]
+    assert "/original" not in str(data)
+
+
 def test_long_documents_get_identifier_headings(standard):
     info, _, extraction = standard
     _field(extraction, "symptom")["value"] = "搬送アームが停止した。\n" * 120

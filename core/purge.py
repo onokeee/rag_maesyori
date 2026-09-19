@@ -12,6 +12,7 @@ sqlite_master から探して消す（後から表が増えても消し残さな
 from __future__ import annotations
 
 import logging
+import secrets
 import shutil
 import sqlite3
 from pathlib import Path
@@ -117,6 +118,10 @@ def purge_after_send(response, fn, *args):
     「手元にファイルが無いのにサーバー側は消えている」ことになり、取り戻せない（再ダウンロードもできない）。
     本文を最後まで渡しきったときだけ消し、途中で切れたときは残す（もう一度ダウンロードできる）。
 
+    「渡しきった」はサーバー（waitress）の送信の溜めに入れ終えたことで、相手が受け取ったことではない。
+    溜めの上限は app.OUTBUF_HIGH_WATERMARK（16KB）で、OS の溜めと合わせて最後の数十KBは受け取られる前に
+    消すことになる（数十KBより小さい md は、途中で切れても消える。design.md 3.3）。
+
     send_file の応答は direct_passthrough が立っていて、そのままだと WSGI が close のときの
     呼び出し（call_on_close）を拾わないので、ここで解除して本文を包み直す。
     """
@@ -156,6 +161,18 @@ def purge_after_send(response, fn, *args):
 
 # ---- 帳票 --------------------------------------------------------------------------
 
+# 帳票を消したときに呼ぶ関数（画面側がメモリに持っている帳票ごとの目印を一緒に捨てるため）。
+# 引数は消した帳票の id のリスト。
+_DOCUMENT_PURGE_HOOKS: list = []
+
+
+def on_documents_purged(fn):
+    """帳票を消したあとに fn(doc_ids) を呼ぶよう登録する（同じ関数は1回だけ）。デコレーターとしても使える。"""
+    if fn not in _DOCUMENT_PURGE_HOOKS:
+        _DOCUMENT_PURGE_HOOKS.append(fn)
+    return fn
+
+
 def purge_documents(doc_ids) -> int:
     """帳票を消す（元のファイルと DB の行）。戻り値: 消した帳票の件数。"""
     ids = [int(i) for i in doc_ids]
@@ -174,6 +191,11 @@ def purge_documents(doc_ids) -> int:
     db.commit()
     for path in stored:
         remove_upload(path)
+    for hook in _DOCUMENT_PURGE_HOOKS:
+        try:
+            hook(ids)
+        except Exception:  # 目印の片付けに失敗しても、消すこと自体は終わっている
+            log.exception("帳票を消したあとの片付けに失敗しました")
     _shrink(db)
     return removed
 
@@ -242,6 +264,7 @@ def _shrink(db) -> None:
     一時停止中のジョブがあるときは VACUUM をしない（消した中身は secure_delete で上書き済み。
     ファイルの大きさは、ジョブが無いときの次の削除か起動時の片付けで戻る）。
     """
+    forget_id_counters(db)
     statements = ["PRAGMA wal_checkpoint(TRUNCATE)"]
     if not _jobs_active(db):
         statements.append("VACUUM")
@@ -254,6 +277,40 @@ def _shrink(db) -> None:
 
 def _jobs_active(db) -> bool:
     try:
-        return db.execute("SELECT 1 FROM jobs WHERE status IN ('queued', 'running', 'paused') LIMIT 1").fetchone()             is not None
+        row = db.execute("SELECT 1 FROM jobs WHERE status IN ('queued', 'running', 'paused') LIMIT 1").fetchone()
+        return row is not None
     except sqlite3.Error:
         return True   # 確かめられないときは、動いているかもしれないジョブを止めない側に倒す
+
+
+# ---- 番号の続きを忘れる ------------------------------------------------------------
+# 取り込むたびに行を作り、ダウンロードで消す表。AUTOINCREMENT の表は、消したあとも sqlite_sequence に
+# 「これまでに使った一番大きい番号」が残り、何件取り込んだかの記録になってしまう（design.md 3.3「履歴は持たない」）。
+WORK_TABLES = ("documents", "table_imports", "jobs", "ai_items")
+# 表が空になったら、続きの番号をこの範囲の乱数にする。最初の番号（1〜）とも前回の番号とも重ならないので、
+# 開いたままの古い画面やブラウザに残った画面が、消した番号で別の取り込みを開いたり書き換えたりしない
+# （重なる確率は 1回あたり 取り込み件数 / 約4.5×10^15。JavaScript で正確に扱える 2^53 未満に収める）。
+_ID_BASE_MIN = 2 ** 31
+_ID_BASE_MAX = 2 ** 52
+
+
+def forget_id_counters(db) -> int:
+    """空になった取り込みの表の、番号の続き（sqlite_sequence）を乱数に置き換える。戻り値: 置き換えた表の数。
+
+    AUTOINCREMENT は外さない（外すと、消した番号がすぐ使い回され、古い画面が別の取り込みを指す）。
+    行が残っている表は置き換えない（作業中の取り込みの番号が見えている間は、続きの番号を隠しても意味が無い）。
+    """
+    changed = 0
+    try:
+        for table in WORK_TABLES:
+            base = _ID_BASE_MIN + secrets.randbelow(_ID_BASE_MAX - _ID_BASE_MIN)
+            # 空かどうかの確認と置き換えを1文で行う（あいだに別のスレッドが行を足しても番号が重ならない）
+            changed += db.execute(f'UPDATE sqlite_sequence SET seq = ? WHERE name = ? '
+                                  f'AND NOT EXISTS (SELECT 1 FROM "{table}")', (base, table)).rowcount
+        db.commit()
+    except sqlite3.Error:
+        # sqlite_sequence がまだ無い（AUTOINCREMENT の表に1行も入れていない新しいDB）か、ロック中。
+        # 次に消したとき・次の起動時にもう一度行う
+        db.rollback()
+        return 0
+    return changed

@@ -277,17 +277,21 @@ def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, 
 
     推定トークンが RECORD_TOKEN_BUDGET を超える場合だけ、時系列を切って収める（要点と時系列の合計で判定する）。
     """
-    lines, timeline_tokens = _record_lines(record, spec, ai_results, people, None)
-    if timeline_tokens:
-        total = estimate_tokens("\n".join(lines))
-        if total > RECORD_TOKEN_BUDGET:
-            budget = RECORD_TOKEN_BUDGET - (total - timeline_tokens)
-            lines, _ = _record_lines(record, spec, ai_results, people, max(0, budget))
+    lines, timeline_text = _record_lines(record, spec, ai_results, people, None)
+    if timeline_text:
+        joined = "\n".join(lines)
+        # 推定は1文字あたり最大1.1トークン。それでも上限以下なら数えずに済む（大半の記録。判定の結果は同じ）
+        if len(joined) * 11 > RECORD_TOKEN_BUDGET * 10:
+            total = estimate_tokens(joined)
+            if total > RECORD_TOKEN_BUDGET:
+                budget = RECORD_TOKEN_BUDGET - (total - estimate_tokens(timeline_text))
+                lines, _ = _record_lines(record, spec, ai_results, people, max(0, budget))
     return lines
 
 
 def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people,
-                  timeline_budget: int | None) -> tuple[list[str], int]:
+                  timeline_budget: int | None) -> tuple[list[str], str]:
+    """1件分の行と、時系列の本文（改行つなぎ。時系列がなければ空）。"""
     values = record.get("values", {}) or {}
     key = record.get("key", "")
     lines = [f"## {record_title(values, spec)}"]
@@ -296,7 +300,7 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
     date_key = spec.date_key
     log_key = spec.log_stage.column if spec.log_stage else None
     entity_done = False
-    timeline_tokens = 0
+    timeline_text = ""
     status, result = _ai_item(ai_results, key)
     for col in spec.columns:
         if _is_hidden(col, spec):
@@ -323,7 +327,7 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
                 continue
         value = values.get(col.key)
         if col.key == log_key:
-            log, timeline_tokens = _log_lines(col, values, spec, status, result, people, timeline_budget)
+            log, timeline_text = _log_lines(col, values, spec, status, result, people, timeline_budget)
             lines += log
             continue
         if value in (None, ""):
@@ -342,7 +346,7 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
                 lines += md_bullet(f"{target.display if target else stage.id}（AI分類）", _one_line(v))
     source = record.get("source", {}) or {}
     lines += md_bullet("出典", _source_text(values, spec, source))
-    return lines, timeline_tokens
+    return lines, timeline_text
 
 
 # ---- 時系列（他の列と重複する文を省く。取り込み設定の markdown.dedupe_timeline で切り替える） ----------
@@ -405,6 +409,31 @@ def _dedupe_parse(parse, duplicates: dict[str, str]):
     return replace(parse, segments=segments) if changed else parse
 
 
+def _authors_as_written(parse):
+    """人名を出さない設定では、記入者をログに書かれたとおりにする（担当者の列から補ったフルネームは出さない）。
+
+    書かれていないセグメントの記入者は、直前に書かれた表記に（推定）を付ける。書かれた記入者が無ければ出さない。
+    """
+    from logproc.models import AuthorInfo
+
+    if parse.kind != "log":
+        return parse
+    segments, last_raw, changed = [], "", False
+    for seg in parse.segments:
+        a = seg.author
+        if a is None:
+            segments.append(seg)
+            continue
+        if a.raw:
+            last_raw = a.raw
+            new = AuthorInfo(a.raw, None, a.estimated, a.note)
+        else:
+            new = AuthorInfo(last_raw, None, True, a.note) if last_raw else None
+        segments.append(replace(seg, author=new))
+        changed = True
+    return replace(parse, segments=segments) if changed else parse
+
+
 def _fit_timeline(timeline: list[str], limit: int, budget: int) -> list[str]:
     """時系列を、設定の件数と残りの推定トークンに収める（決定的）。1件は必ず残す。"""
     costs = [estimate_tokens(line) + 1 for line in timeline]  # +1 は2字下げと改行の分
@@ -417,11 +446,12 @@ def _fit_timeline(timeline: list[str], limit: int, budget: int) -> list[str]:
 
 
 def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people,
-               timeline_budget: int | None) -> tuple[list[str], int]:
+               timeline_budget: int | None) -> tuple[list[str], str]:
+    """ログ列の行と、時系列の本文（改行つなぎ。推定トークンは必要なときだけ record_block で数える）。"""
     stage = spec.log_stage
     parse = parse_log_cell(spec, values, people)
     if parse is None or parse.kind == "empty":
-        return [], 0
+        return [], ""
     out: list[str] = []
     types: dict[str, list[str]] = {}
     if status == "ok" and result:
@@ -430,22 +460,25 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people,
             out.append("- 対応の要点（AI抽出）:")
             out += [f"  {p}" for p in points]
         types = _segment_types(result)
-    entity_label = entity_display(values, spec)[1] or entity_display(values, spec)[2]
+    _eid, entity_name, entity_text = entity_display(values, spec)
+    entity_label = entity_name or entity_text
     from logproc import render_timeline
 
     if (spec.markdown or {}).get("dedupe_timeline", True):
         parse = _dedupe_parse(parse, _column_sentences(values, spec, col.key))
+    if (spec.markdown or {}).get("omit_person", True):
+        parse = _authors_as_written(parse)
     timeline = render_timeline(parse, entity_label, types=types or None, glossary=stage.glossary or None)
     if parse.kind == "header_cell":
         out += md_bullet(f"{col.display}（見出しごと）", timeline)
-        return out, 0
+        return out, ""
     if not timeline:
-        return out, 0
+        return out, ""
     if timeline_budget is not None:
         timeline = _fit_timeline(timeline, max(1, int(stage.max_timeline_entries or 20)), timeline_budget)
     out.append("- 対応の時系列:")
     out += [f"  {line}" for line in timeline]
-    return out, estimate_tokens("\n".join(timeline))
+    return out, "\n".join(timeline)
 
 
 def _source_text(values: dict, spec: TableSpec, source: dict) -> str:

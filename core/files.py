@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import posixpath
 import re
 import shutil
 import time
@@ -40,6 +41,17 @@ MAX_MERGED_CELLS = 2_000_000
 # 圧縮すると小さいが展開すると大量のセルがあるブック（64KB で 100万セルなど）は、上のサイズ制限を通っても固まる。
 # 一覧表は tables.excel_source が別に上限（EXCEL_MAX_CELLS）を持ち「CSVで保存」と案内するので、ここは最後の砦の値。
 MAX_CELLS = 1_000_000
+# 図形（描画）の上限。openpyxl は開くときに、シートが参照する描画部品（xl/drawings/*.xml）をシートごとに読み直し、
+# 図形（アンカー）を1つずつ作る。1つの大きな描画を多数のシートから参照させると、圧縮後は小さくても
+# 開くたびに（書類の画面を開くたびにも）数十秒〜終わらない。そこで「描画部品の図形数 × 参照するシート数」と
+# 「描画部品の展開後の大きさ × 参照するシート数」の合計を数えて上限を設ける。
+# 普通の帳票は1シートに数十個程度の図形なので、十分に余裕のある値にしている。
+MAX_DRAWING_ANCHORS = 10_000
+MAX_DRAWING_BYTES = 20 * 1024 * 1024
+# 図形（アンカー）として数える要素の名前（DrawingML の spreadsheetDrawing）
+_ANCHOR_NAMES = ("absoluteAnchor", "oneCellAnchor", "twoCellAnchor")
+_DRAWING_REL_SUFFIX = "/drawing"
+_DRAWING_ERROR = "図形や画像の数が多すぎるため読み込めません。不要な図形・画像を削除して保存し直してください"
 # セルとして数える要素の名前空間（SpreadsheetML 本体の <c> だけ。グラフの <c:chart> などは名前空間が違う）
 _SHEET_NAMESPACES = ("http://schemas.openxmlformats.org/spreadsheetml/2006/main", STRICT_NS)
 # workbook.xml の名前空間判定で読む先頭バイト数
@@ -191,6 +203,8 @@ class _PartCounter:
         from xml.parsers import expat
 
         self.merged, self.cells, self.max_cells = merged, cells, max_cells
+        self.anchors = 0              # この部品の図形（アンカー）の数
+        self.drawing_targets = []     # この部品（.rels）が参照する描画部品の Target
         self.parser = expat.ParserCreate(namespace_separator=" ")
         self.parser.StartElementHandler = self._start
         # DTD で実体を定義して大量に展開させる細工は、正しいブックには無いので断る
@@ -208,6 +222,10 @@ class _PartCounter:
             if self.cells > self.max_cells:
                 raise UploadError(f"セル数が上限（{self.max_cells:,} セル）を超えています。"
                                   "不要なシート・範囲を削除して保存し直してください")
+        elif local in _ANCHOR_NAMES:
+            self.anchors += 1
+        elif local == "Relationship" and str(attrs.get("Type", "")).endswith(_DRAWING_REL_SUFFIX)                 and attrs.get("TargetMode") != "External":
+            self.drawing_targets.append(str(attrs.get("Target", "")))
 
     def _entity(self, *_args) -> None:
         raise UploadError("Excelファイルとして読み込めません（不正なファイルの可能性があります）")
@@ -224,6 +242,8 @@ def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int) ->
 
     merged = 0
     cells = 0
+    anchors: dict[str, int] = {}       # 部品 → 図形の数
+    references: dict[str, int] = {}    # 描画部品 → 参照される回数（シートごとに読み直されるため）
     for part in parts:
         counter = _PartCounter(merged, cells, max_cells)
         with zf.open(part) as f:
@@ -236,6 +256,32 @@ def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int) ->
             except expat.ExpatError:
                 pass
         merged, cells = counter.merged, counter.cells
+        anchors[part] = counter.anchors
+        for target in counter.drawing_targets:
+            drawing = _resolve_rel_target(part, target)
+            references[drawing] = references.get(drawing, 0) + 1
+    _check_drawings(zf, anchors, references)
+
+
+def _resolve_rel_target(rels_part: str, target: str) -> str:
+    """.rels の Target を zip 内のパスにする（xl/worksheets/_rels/sheet1.xml.rels の ../drawings/d.xml → xl/drawings/d.xml）。"""
+    if target.startswith("/"):
+        return target.lstrip("/")
+    folder = posixpath.dirname(posixpath.dirname(rels_part))   # _rels の1つ上＝参照元の部品があるフォルダ
+    return posixpath.normpath(posixpath.join(folder, target))
+
+
+def _check_drawings(zf: zipfile.ZipFile, anchors: dict[str, int], references: dict[str, int]) -> None:
+    """描画部品を読み直す回数（参照するシートの数）を掛けて、図形の数と大きさの合計が上限を超えたら UploadError。"""
+    total_anchors = 0
+    total_bytes = 0
+    for drawing, count in references.items():
+        if drawing not in anchors:
+            continue   # 存在しない部品は openpyxl も読まない
+        total_anchors += anchors[drawing] * count
+        total_bytes += zf.getinfo(drawing).file_size * count
+        if total_anchors > MAX_DRAWING_ANCHORS or total_bytes > MAX_DRAWING_BYTES:
+            raise UploadError(_DRAWING_ERROR)
 
 
 def _check_zip_limits(infos: list[zipfile.ZipInfo]) -> None:

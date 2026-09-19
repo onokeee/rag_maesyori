@@ -9,9 +9,9 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
-from excel.extractor import scan_below, scan_right
-from excel.tables import (SAME_COLUMNS_RATIO, Table, detect_tables, legend_text, seq_header, table_header_keys,
-                          table_text_lines, table_title)
+from excel.extractor import label_hits, scan_below, scan_right
+from excel.tables import (SAME_COLUMNS_RATIO, Table, detect_tables, legend_text, section_of, seq_header,
+                          table_header_keys, table_text_lines, table_title)
 from excel.text import (MAX_LABEL_LENGTH, cell_text, normalize_label, normalize_sheet_name, split_code_name,
                         split_label_unit, to_date, value_unit)
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
@@ -106,15 +106,57 @@ def suggest_rows(infos: list[WorkbookInfo]) -> tuple[list[dict], list[dict]]:
             "table_columns": "\n".join(sug.column_labels),
             "examples": list(dict.fromkeys(sug.examples))[:3],
             "seen": f"{len(sug.samples)}/{n}",
+            "section": "",
         })
+    _learn_sections(infos, selected, rows)
     rows.sort(key=lambda r: not r["use"])
     return sheet_rows, rows
+
+
+def _learn_sections(infos: list[WorkbookInfo], selected: set[str], rows: list[dict]) -> None:
+    """発行側と回答側で同じ意味の欄が並ぶ帳票で、項目を読む区画（「▼ 回答欄」など）を見本から決める。
+
+    項目の見出しに当たる欄（値のあるもの）が1つの見本の中で2つ以上の区画にあり、どの見本にも共通してある区画が
+    名前のある区画1つだけのとき、その区画を項目の区画にする。例: 「処置内容（発行側）」と「暫定対策（処置）（回答欄）」が
+    両方ある版と、「応急処置（回答欄）」だけの版を見本にすると、処置の項目は「回答欄」の中で探す。
+    どの見本にも共通する区画が2つ以上ある（区画の外にも共通してある）ときは決めない（今までどおり上にある欄を読む）。
+    """
+    used = [r for r in rows if r["use"] and r["data_type"] != "table"]
+    if not used:
+        return
+    stop_labels = DICTIONARY_NORMS.union(*(_row_field(r).label_norms() for r in used))
+    for row in used:
+        fd = _row_field(row)
+        per_sample: list[set[str]] = []
+        ambiguous = False
+        for info in infos:
+            keys: set[str] = set()
+            for name, grid in info.grids.items():
+                if not any(sel in normalize_sheet_name(name) for sel in selected):
+                    continue
+                keys |= {section_of(grid, cell) for cell in label_hits(grid, fd, stop_labels)}
+            if keys:
+                per_sample.append(keys)
+                ambiguous = ambiguous or len(keys) > 1
+        if not ambiguous:
+            continue
+        common = set.intersection(*per_sample)
+        if len(common) == 1 and "" not in common:
+            row["section"] = common.pop()
+
+
+def _row_field(row: dict) -> FieldDef:
+    return FieldDef(row["field_name"], row["display_name"], row["candidates"].splitlines(),
+                    data_type=row["data_type"])
 
 
 def suggest_title_fields(field_rows: list[dict]) -> list[str]:
     """タイトル項目の候補。使う項目のうち 報告番号→設備番号→設備名→発生日 の順で並べる。"""
     used = {r["field_name"] for r in field_rows if r.get("use")}
     return [key for key in DEFAULT_TITLE_KEYS if key in used]
+
+
+_AUTO_FIELD_NAME = re.compile(r"^field_\d+$")
 
 
 def merge_with_existing(pattern: PatternDef, sheet_rows: list[dict], field_rows: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -128,8 +170,12 @@ def merge_with_existing(pattern: PatternDef, sheet_rows: list[dict], field_rows:
     norms_by_row = [FieldDef("", "", r["candidates"].splitlines()).label_norms() for r in existing_fields]
     for row in field_rows:
         norms = FieldDef("", "", row["candidates"].splitlines()).label_norms()
+        # 名前で合わせるのは辞書の項目名だけ。field_1 などの自動の名前はサンプルの順で振るので、
+        # 登録済みの同じ名前の項目とは無関係（ラベルが重なるときだけ同じ項目とみなす）
+        by_name = not _AUTO_FIELD_NAME.match(row["field_name"])
         target = next(
-            (er for er, en in zip(existing_fields, norms_by_row) if er["field_name"] == row["field_name"] or en & norms),
+            (er for er, en in zip(existing_fields, norms_by_row)
+             if (by_name and er["field_name"] == row["field_name"]) or en & norms),
             None,
         )
         if target:
@@ -137,6 +183,7 @@ def merge_with_existing(pattern: PatternDef, sheet_rows: list[dict], field_rows:
             target["candidates"] = "\n".join(dict.fromkeys(l for l in labels if l.strip()))
             target["examples"], target["seen"] = row["examples"], row["seen"]
             target["unit"] = target.get("unit") or row.get("unit", "")
+            target["section"] = target.get("section") or row.get("section", "")
             if target.get("data_type") == "table" and row.get("table_columns"):
                 columns = (target.get("table_columns") or "").splitlines() + row["table_columns"].splitlines()
                 target["table_columns"] = "\n".join(dict.fromkeys(c for c in columns if c.strip()))

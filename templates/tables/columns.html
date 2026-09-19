@@ -17,6 +17,7 @@
   {% if changed.missing %}見つからない列: {{ changed.missing | join('、') }}。{% endif %}
   {% if changed.added %}新しい見出し: {{ changed.added | join('、') }}。{% endif %}
   対応づけを確かめてから保存してください。
+  {% if absent %}今回のファイルにない列（設定には残します）: {{ absent | join('、') }}。{% endif %}
 </div>
 {% endif %}
 

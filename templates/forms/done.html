@@ -33,7 +33,7 @@
            data-confirm="{{ batch.zip_confirm }}" data-confirm-ok="ダウンロードして消す">まとめてMarkdownをダウンロード（zip）</a>
       {% else %}
         {% if batch.next %}
-          <a class="btn primary" href="{{ url_for('forms.type_select', doc_id=batch.next.id) }}">次の帳票へ（残り{{ batch.total - batch.confirmed }}件）</a>
+          <a class="btn primary" href="{{ batch.next.href }}">次の帳票へ（残り{{ batch.total - batch.confirmed }}件）</a>
         {% endif %}
         {% if batch.confirmed %}
           <a class="btn" href="{{ url_for('forms.download_batch', batch_id=batch.id, confirmed_only=1) }}"

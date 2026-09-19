@@ -211,10 +211,15 @@ def cell_norm(value) -> str:
     return text
 
 
-def expected_rows(value) -> list[list[str]]:
-    """正解の行（セル値の正規化リスト）。文字列のリストは1列の表とみなす。"""
+def expected_rows(value) -> list[list[tuple[str, ...]]]:
+    """正解の行。1セル = 照合してよい値の組（正規化済み）。文字列のリストは1列の表とみなす。
+
+    正解に *_norm（正規化した値。例: 日時「5/23 12:07」→「2025-05-23 12:07」）があればそれも受け付ける
+    （アプリは日時を ISO で書くので、表示どおりの値だけでは照合できない）。
+    真偽値のセル（チェック欄の checked: true/false）は、帳票の書き方の ☑ / □ とみなす。
+    """
     if not isinstance(value, list):
-        return [] if is_empty_value(value) else [[norm_text(value)]]
+        return [] if is_empty_value(value) else [[(norm_text(value),)]]
     rows = []
     for item in value:
         if isinstance(item, dict):
@@ -222,11 +227,17 @@ def expected_rows(value) -> list[list[str]]:
             for k, v in item.items():
                 if k.lower() in _ROW_SKIP_KEYS or k.endswith(("_norm", "_as_written")):
                     continue
-                v = item.get(f"{k}_as_written", v)  # 帳票に書かれたままの値（「〃」など）がある列はそちらで照合
+                # 帳票に書かれたままの値（「〃」）は照合に使わない。アプリは「〃」を上の行の値にして書く
+                if isinstance(v, bool):
+                    v = "☑" if v else "□"
                 if not is_empty_value(v):
-                    cells.append(cell_norm(v))
+                    alts = [cell_norm(v)]
+                    normalized = item.get(f"{k}_norm")
+                    if not isinstance(normalized, bool) and not is_empty_value(normalized):
+                        alts.append(cell_norm(normalized))
+                    cells.append(tuple(dict.fromkeys(alts)))
         else:
-            cells = [] if is_empty_value(item) else [cell_norm(item)]
+            cells = [] if is_empty_value(item) else [(cell_norm(item),)]
         if cells:
             rows.append(cells)
     return rows
@@ -238,9 +249,9 @@ def extracted_rows(value) -> list[list[str]]:
     return []
 
 
-def _row_matches(exp: list[str], got: list[str]) -> bool:
+def _row_matches(exp: list[tuple[str, ...]], got: list[str]) -> bool:
     joined = "".join(got)
-    return all((c in got) if len(c) < 3 else (c in joined) for c in exp)
+    return all(any((c in got) if len(c) < 3 else (c in joined) for c in alts) for alts in exp)
 
 
 def compare_table(extracted, expected) -> dict:

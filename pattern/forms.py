@@ -23,6 +23,7 @@ def pattern_to_rows(pattern: PatternDef) -> tuple[list[dict], list[dict]]:
             "unit": f.unit,
             "rag_output": f.rag_output,
             "table_columns": "\n".join(f.table_columns),
+            "section": f.section,
         }
         for f in pattern.fields
     ]
@@ -87,6 +88,7 @@ def parse_pattern_form(form) -> tuple[dict, list[dict], list[dict], list[str]]:
             "unit": form.get(p + "unit", "").strip(),
             "rag_output": form.get(p + "rag_output", "show"),
             "table_columns": "\n".join(_split_candidates(form.get(p + "table_columns", ""))),
+            "section": _section_value(form.get(p + "section", "")),
         }
         if not row["display_name"] and not row["candidates"]:
             continue
@@ -129,6 +131,7 @@ def rows_to_pattern(pattern_id: int, meta: dict, sheet_rows: list[dict], field_r
             unit=r.get("unit", "") or "",
             rag_output=r.get("rag_output", "show") if r.get("rag_output") in RAG_OUTPUTS else "show",
             table_columns=(r.get("table_columns") or "").splitlines() if r["data_type"] == "table" else [],
+            section=_section_value(r.get("section")),
         )
         for r in field_rows
         if r["use"]
@@ -165,6 +168,13 @@ def _row_indices(form, prefix: str) -> list[int]:
         if len(parts) == 3 and parts[0] == prefix and parts[1].isdigit():
             indices.add(int(parts[1]))
     return sorted(indices)
+
+
+def _section_value(text) -> str:
+    """探す区画（「回答欄」「▼ 回答欄」のどちらで入力しても、見出しと同じ比較用の名前にする）。"""
+    from excel.tables import section_name
+
+    return section_name(text) if str(text or "").strip() else ""
 
 
 def _split_candidates(text: str) -> list[str]:

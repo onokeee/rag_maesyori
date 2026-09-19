@@ -240,6 +240,14 @@ def spec_from_dict(d: dict) -> TableSpec:
     spec.markdown = markdown
     log = data.get("log_stage")
     spec.log_stage = LogStageSpec(**_pick(LogStageSpec, log)) if isinstance(log, dict) and log.get("column") else None
+    if spec.log_stage is not None:
+        st = spec.log_stage
+        # 手で書いた JSON の「"mask": "email"」「"phone,email"」も規則の並びとして読む（1文字ずつにしない）
+        if isinstance(st.mask, str):
+            st.mask = [m for m in re.split(r"[,、，\s]+", st.mask) if m]
+        st.mask = [str(m) for m in _as_list(st.mask)]
+        for name in ("context_columns", "groups", "entry_types"):
+            setattr(st, name, [str(v) for v in _as_list(getattr(st, name))])
     spec.custom_stages = [CustomStageSpec(**_pick(CustomStageSpec, c)) for c in _as_list(data.get("custom_stages"))
                           if isinstance(c, dict)]
     spec.na_tokens = [str(t) for t in _as_list(spec.na_tokens)]
@@ -346,6 +354,13 @@ def validate_spec(spec: TableSpec) -> list[str]:
         for key in spec.log_stage.context_columns:
             if key not in keys:
                 errors.append(f"AI整形に添える列「{key}」がありません")
+        errors.extend(_log_stage_errors(spec.log_stage))
+    try:
+        tolerance = float((spec.checks or {}).get("reconcile_tolerance") or 0)
+        if not 0 <= tolerance < float("inf"):
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("突き合わせの許容差（checks.reconcile_tolerance）は0以上の数値で指定してください")
     stage_ids: set[str] = set()
     for stage in spec.custom_stages:
         if not _KEY_RE.match(stage.id or "") or stage.id in stage_ids:
@@ -364,6 +379,64 @@ def validate_spec(spec: TableSpec) -> list[str]:
             errors.append("型エラーの割合の上限は 0〜1 で、警告 ≦ 確定を止める にしてください")
     except (TypeError, ValueError):
         errors.append("型エラーの割合の上限は数値で指定してください")
+    return errors
+
+
+# 区切りの正規表現（JSON で取り込んだ設定だけが持つ）の上限。画面からは設定しない
+_MAX_SPLIT_PATTERNS = 20
+_MAX_PATTERN_CHARS = 200
+# 量指定子を含むグループにさらに量指定子が付く形（(.+)+ など）。極端に遅くなる正規表現なので受け付けない
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)[+*{]")
+
+
+def _log_stage_errors(stage: LogStageSpec) -> list[str]:
+    """AI整形の設定（JSON で取り込んだときだけ画面に出ない項目）の問題点。"""
+    from logproc.mask import normalize_rules
+
+    errors: list[str] = []
+    bad = [m for m in stage.mask if not normalize_rules([m])]
+    if bad:
+        errors.append(f"AI整形の伏せ字の規則「{'、'.join(bad)}」は使えません（phone / email / person / amount か"
+                      "電話番号 / メール / 人名 / 金額）")
+    if not isinstance(stage.people, list) or not all(
+            isinstance(p, dict) and isinstance(p.get("name"), str) and p["name"].strip()
+            and isinstance(p.get("aliases", []), list) for p in stage.people):
+        errors.append("AI整形の人名一覧（people）は、name（名前）を持つ項目の並びで指定してください")
+    for name, label in (("glossary", "用語集"), ("splitter", "区切り"), ("limits", "上限"), ("run_if", "実行条件")):
+        if not isinstance(getattr(stage, name), dict):
+            errors.append(f"AI整形の{label}（{name}）の書き方が正しくありません")
+    try:
+        n = stage.max_timeline_entries
+        if isinstance(n, bool) or int(n) != n or not 1 <= int(n) <= 1000:
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("時系列の最大件数（max_timeline_entries）は1〜1000の整数で指定してください")
+    splitter = stage.splitter if isinstance(stage.splitter, dict) else {}
+    for key in ("extra_anchors", "not_date_patterns"):
+        patterns = splitter.get(key)
+        if patterns is None:
+            continue
+        if not isinstance(patterns, list) or len(patterns) > _MAX_SPLIT_PATTERNS:
+            errors.append(f"AI整形の区切りの正規表現（{key}）は{_MAX_SPLIT_PATTERNS}個までの並びで指定してください")
+            continue
+        for pat in patterns:
+            text = str(pat)[:40]
+            if not isinstance(pat, str) or len(pat) > _MAX_PATTERN_CHARS:
+                errors.append(f"AI整形の区切りの正規表現「{text}」は{_MAX_PATTERN_CHARS}文字以内の文字列にしてください")
+                continue
+            try:
+                re.compile(pat)
+            except re.error:
+                errors.append(f"AI整形の区切りの正規表現「{text}」が正しくありません")
+                continue
+            if _NESTED_QUANTIFIER_RE.search(pat):
+                errors.append(f"AI整形の区切りの正規表現「{text}」は処理が極端に遅くなる形（(…+)+ など）です")
+    for key in ("sentence_split_min_chars", "order_tolerance_days"):
+        if splitter.get(key) is not None:
+            try:
+                int(splitter[key])
+            except (TypeError, ValueError):
+                errors.append(f"AI整形の区切りの {key} は整数で指定してください")
     return errors
 
 
@@ -433,8 +506,7 @@ def spec_from_suggestions(name: str, layout, suggestions, options: dict | None =
     options: description, name_patterns, file_types, group_by, fiscal_year_start_month, max_records_per_file
     """
     options = dict(options or {})
-    spec = TableSpec(name=name)
-    spec.markdown["file_prefix"] = name
+    spec = TableSpec(name=name)  # ファイル名の先頭は空（＝設定名。TableSpec.file_prefix）
     spec.description = str(options.get("description") or "")
     if options.get("name_patterns"):
         spec.name_patterns = [str(p) for p in options["name_patterns"]]

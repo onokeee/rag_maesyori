@@ -94,6 +94,11 @@ def sniff_csv(path) -> CsvSniff:
     header_row = _guess_header_record(records)
     trailer_rows = _count_trailer_rows(path, encoding, delimiter, _modal_width(records))
     confidence = round(ratio * (1.0 if error_line is None else 0.6), 3)
+    max_columns = max((_width(r) for r in records), default=0)
+    if not records and truncated:
+        # 先頭のレコードが読み取り範囲より長い（何十万列もの見出し行など）。区切り文字の数で列数の見当をつける
+        first = text.split("\n", 1)[0]
+        max_columns = max(first.count(d) for d in (delimiter, ",", "\t", ";", "|")) + 1
     return CsvSniff(
         encoding=encoding,
         bom=bom,
@@ -104,7 +109,7 @@ def sniff_csv(path) -> CsvSniff:
         confidence=confidence,
         warnings=warnings,
         decode_error_line=error_line,
-        max_columns=max((_width(r) for r in records), default=0),
+        max_columns=max_columns,
     )
 
 
@@ -398,6 +403,10 @@ class CsvSource:
                     elif self.long_record_row is None and reader.line_num - line_before > MAX_RECORD_LINES:
                         self.long_record_row = index
                     line_before = reader.line_num
+                    if len(record) > MAX_COLUMNS and _width(record) > MAX_COLUMNS:
+                        # 先読みで分からなかった列数の上限もここで止める（アップロード時に全行を読むので、そこで断る）
+                        raise UploadError(f"{index}行目の列数が上限（{MAX_COLUMNS:,}列）を超えています"
+                                          f"（{_width(record):,}列）。不要な列を削除して保存し直してください")
                     if index < start:
                         continue
                     if limit is not None and emitted >= limit:

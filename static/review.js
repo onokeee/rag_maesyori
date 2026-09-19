@@ -238,6 +238,28 @@
     if (pre && typeof s.markdown === "string") pre.textContent = s.markdown;
     const name = form.querySelector("[data-md-name]");
     if (name && s.file_name) name.textContent = s.file_name;
+    if (s.batch) applyBatch(s.batch);
+  }
+
+  // まとめ取り込みの欄: 途中保存で「修正中」になった帳票を、zip の確認文と修正中の一覧に出す
+  function applyBatch(b) {
+    document.querySelectorAll("[data-batch-zip]").forEach((a) => { a.dataset.confirm = b.zip_confirm; });
+    const box = document.querySelector("[data-batch-modified]");
+    if (!box) return;
+    const list = b.modified || [];
+    box.hidden = !list.length;
+    const count = box.querySelector("[data-batch-modified-count]");
+    if (count) count.textContent = list.length;
+    const span = box.querySelector("[data-batch-modified-list]");
+    if (!span) return;
+    span.textContent = "";
+    list.forEach((d, i) => {
+      if (i) span.append("、");
+      const a = document.createElement("a");
+      a.href = d.href;
+      a.textContent = d.name;
+      span.append(a);
+    });
   }
 
   // 途中保存（204）→ プレビュー更新

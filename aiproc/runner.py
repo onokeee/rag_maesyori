@@ -4,9 +4,12 @@
   ルール前処理（マスク→分割）→ 振り分け（対象外 / ルールのみ / AI）→ messages 組み立て
   → キャッシュ照会 → LLM（1セル1回）→ 即時キャッシュ保存 → 照合 →（1回だけ再依頼）→ ai_items に保存
 並列: core.jobs のワーカースレッド内で ThreadPoolExecutor を使う。一時停止中は新しい呼び出しを出さない
-（送信中の呼び出しは応答を待って保存する）。429 などの待機は Event.wait なので止めるとすぐ抜ける。
+（送信中の呼び出しは STOP_GRACE 秒だけ応答を待ち、返らなければ見捨てて再開時に送り直す）。
+429 などの待機は Event.wait なので止めるとすぐ抜ける。
 エラー: 401/403・モデルなし・接続拒否はジョブを止める。429/5xx/タイムアウトは待って再試行。
         壊れたJSON・長さ超過（再依頼しても直らない）はその行だけエラーにして続ける。
+        1行（1回目＋再依頼、再試行と待機を含む）にかける時間は row_deadline_seconds() まで。
+        超えたらその行をエラーにして次へ進む（応答しない行1つでジョブ全体が何十分も止まらない）。
 """
 from __future__ import annotations
 
@@ -36,6 +39,8 @@ from services import llm
 LOG_STAGE_ID = "log"
 MAX_RETRIES = 5          # 429/5xx/タイムアウトの再試行回数（1呼び出しあたり）
 MAX_WAIT = 120.0         # 1回の待機の上限（秒）
+ROW_DEADLINE_FACTOR = 2.0  # 1行にかける時間の上限＝1回のタイムアウト（ローカル300秒・クラウド120秒）×この倍率
+STOP_GRACE = 2.0         # 一時停止・中止のとき、送信中の呼び出しの応答を待つ秒数（過ぎたら見捨てる）
 DEFAULT_CONCURRENCY = {"local": 1, "cloud": 4}
 SCOPES = ("pending", "all", "errors", "flagged", "changed")
 SCOPE_LABELS = {"pending": "未処理のみ", "all": "全件", "errors": "エラーだけ", "flagged": "要確認だけ",
@@ -422,20 +427,97 @@ class Outcome:
     key: str = ""
 
 
+def row_deadline_seconds(settings: dict) -> float:
+    """1行（1回目＋再依頼。再試行と待機を含む）にかける時間の上限（秒）。"""
+    return float(settings.get("timeout") or llm.CLOUD_TIMEOUT) * ROW_DEADLINE_FACTOR
+
+
+def _duration_text(sec: float) -> str:
+    return f"{int(round(sec))}秒" if sec < 120 else f"{int(round(sec / 60))}分"
+
+
+def _deadline_error(settings: dict, last: llm.LLMCallError | None = None) -> llm.LLMCallError:
+    """行の時間切れ（その行だけエラーにして次へ進む）。last は最後に起きた再試行できるエラー。"""
+    limit = _duration_text(row_deadline_seconds(settings))
+    reason = str(last) if last is not None else "AIの応答が時間内に返りませんでした。"
+    return llm.LLMCallError(
+        "row", f"{reason.rstrip('。')}。再試行を含めて{limit}以内に使える応答が得られなかったため、この行を打ち切りました。"
+               "「エラーだけ再実行」でやり直せます。", getattr(last, "status", None), None, str(settings.get("model") or ""))
+
+
+def _run_watched(fn, on_tick, tick: float = 0.1):
+    """fn を別スレッドで動かし、終わるまで tick 秒ごとに on_tick() を呼ぶ（例外を投げれば待つのをやめる）。
+
+    HTTP の呼び出しは途中で止められないので、一時停止・中止・時間切れのときは応答を待たずに見捨てる
+    （呼び出しは接続のタイムアウトで終わり、結果は捨てる。キャッシュにも書かない）。
+    """
+    box: dict = {}
+    finished = threading.Event()
+
+    def run():
+        try:
+            box["value"] = fn()
+        except BaseException as e:  # noqa: BLE001 - 呼び出し元のスレッドで投げ直す
+            box["error"] = e
+        finally:
+            finished.set()
+
+    threading.Thread(target=run, name="ai-call", daemon=True).start()
+    while not finished.wait(tick):
+        on_tick()
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _chat_watched(settings: dict, messages, response_format, max_tokens, stop_event: threading.Event | None,
+                  deadline: float | None):
+    """1回の呼び出し。止められたら STOP_GRACE 秒待って _Stopped、行の時間切れならその行のエラー。"""
+    base = float(settings.get("timeout") or llm.CLOUD_TIMEOUT)
+    timeout = None
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _deadline_error(settings)
+        timeout = min(base, max(remaining, 0.05))   # 接続も行の残り時間で打ち切る
+    stop_since: list[float] = []
+
+    def on_tick():
+        now = time.monotonic()
+        if stop_event is not None and stop_event.is_set():
+            if not stop_since:
+                stop_since.append(now)
+            elif now - stop_since[0] >= STOP_GRACE:
+                raise _Stopped()
+        if deadline is not None and now >= deadline + 1.0:   # 接続のタイムアウトが効かなかったときの保険
+            raise _deadline_error(settings)
+
+    return _run_watched(lambda: llm.chat_raw(settings, messages, response_format=response_format,
+                                             max_tokens=max_tokens, timeout=timeout), on_tick)
+
+
 def call_with_retry(settings: dict, messages, response_format, max_tokens, stop_event: threading.Event | None = None,
-                    max_retries: int = MAX_RETRIES, max_wait: float = MAX_WAIT):
-    """429/5xx/タイムアウトは待って再試行（Retry-After に従う）。待機中に止められたら _Stopped。"""
+                    max_retries: int = MAX_RETRIES, max_wait: float = MAX_WAIT, deadline: float | None = None):
+    """429/5xx/タイムアウトは待って再試行（Retry-After に従う）。待機中に止められたら _Stopped。
+
+    deadline（time.monotonic() の値）を渡すと、再試行と待機を含めてその時刻を過ぎたらその行のエラー（kind=row）。
+    """
     attempt = 0
     stop_event = stop_event or threading.Event()
     while True:
         try:
-            return llm.chat_raw(settings, messages, response_format=response_format, max_tokens=max_tokens)
+            return _chat_watched(settings, messages, response_format, max_tokens, stop_event, deadline)
         except llm.LLMCallError as e:
+            if e.kind == "retry" and deadline is not None and time.monotonic() >= deadline:
+                raise _deadline_error(settings, e) from e
             if e.kind != "retry" or attempt >= max_retries:
                 raise
             attempt += 1
             sec = e.retry_after if e.retry_after is not None else min(2.0 ** attempt, 60.0)
-            if stop_event.wait(min(max(sec, 0.0), max_wait)):
+            sec = min(max(sec, 0.0), max_wait)
+            if deadline is not None and time.monotonic() + sec >= deadline:
+                raise _deadline_error(settings, e) from e   # 待っても時間内に送り直せない
+            if stop_event.wait(sec):
                 raise _Stopped()
 
 
@@ -463,7 +545,7 @@ def _evaluate(work: StageWork, text: str, finish_reason: str | None):
 
 
 def _one_call(work: StageWork, messages, key: str, settings: dict, mode: str, stop_event, out: Outcome,
-              max_tokens, use_cache: bool = True) -> tuple[str, str | None]:
+              max_tokens, use_cache: bool = True, deadline: float | None = None) -> tuple[str, str | None]:
     """キャッシュを見て、無ければ呼んで即時保存する。(text, finish_reason) を返す。"""
     hit = cache.get(key) if use_cache else None
     if hit is not None:
@@ -471,7 +553,7 @@ def _one_call(work: StageWork, messages, key: str, settings: dict, mode: str, st
         out.tokens_out += hit.get("tokens_out") or 0
         return hit.get("raw_text") or "", hit.get("finish_reason")
     rf = llm.response_format_for(mode, work.schema, "log_keep" if work.kind == "log" else "custom")
-    res = call_with_retry(settings, messages, rf, max_tokens, stop_event)
+    res = call_with_retry(settings, messages, rf, max_tokens, stop_event, deadline=deadline)
     out.calls += 1
     out.tokens_in += res.tokens_in or 0
     out.tokens_out += res.tokens_out or 0
@@ -517,9 +599,11 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
                  use_cache: bool = True, repair: bool = True) -> Outcome:
     """1行×段を処理する（キャッシュ→呼び出し→照合→1回だけ再依頼）。app_context 内で呼ぶ。"""
     out = Outcome(work, key=work.key)
+    # 1回目と再依頼（再試行・待機を含む）を合わせた時間の上限。過ぎたらこの行だけエラーにして次へ
+    deadline = time.monotonic() + row_deadline_seconds(settings)
     try:
         text, finish = _one_call(work, work.messages, work.key, settings, mode, stop_event, out, work.max_tokens,
-                                 use_cache)
+                                 use_cache, deadline)
         out.attempts = 1
         out.raw_text = text
         status, result, checks, problems, _ = _evaluate(work, text, finish)
@@ -529,15 +613,28 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
                 raise _Stopped()
             r_messages, r_key = _repair_request(work, text, problems, settings, mode)
             r_tokens = int(work.max_tokens * 1.5) if (finish == "length" and work.max_tokens) else work.max_tokens
-            r_text, r_finish = _one_call(work, r_messages, r_key, settings, mode, stop_event, out, r_tokens, use_cache)
-            out.attempts = 2
-            r_status, r_result, r_checks, r_problems, _ = _evaluate(work, r_text, r_finish)
-            # 再依頼で壊れた（JSON が読めない）ときは最初の結果を残す
-            if not (r_status == "error" and status != "error"):
-                status, result, checks, problems, text, out.key = r_status, r_result, r_checks, r_problems, r_text, r_key
-                out.raw_text = r_text
-            if checks is not None:
-                checks["repaired"] = True
+            try:
+                r_text, r_finish = _one_call(work, r_messages, r_key, settings, mode, stop_event, out, r_tokens,
+                                             use_cache, deadline)
+            except llm.LLMCallError as e:
+                # 再依頼だけが失敗した（文脈長超過の400・行の時間切れなど）。1回目の結果が使えるなら残す。
+                # キー拒否・接続不可などの致命的なエラーはこれまでどおりジョブを止める
+                if e.kind == "fatal" or status == "error":
+                    raise
+                out.attempts = 2
+                if checks is not None:
+                    checks["repaired"] = False
+                    checks["repair_error"] = str(e)
+            else:
+                out.attempts = 2
+                r_status, r_result, r_checks, r_problems, _ = _evaluate(work, r_text, r_finish)
+                # 再依頼で壊れた（JSON が読めない）ときは最初の結果を残す
+                if not (r_status == "error" and status != "error"):
+                    status, result, checks, problems, text, out.key = (r_status, r_result, r_checks, r_problems,
+                                                                       r_text, r_key)
+                    out.raw_text = r_text
+                if checks is not None:
+                    checks["repaired"] = True
         out.status, out.result, out.checks = status, result, checks
         if status == "error":
             msgs = [i.get("message") for i in (checks or {}).get("issues", []) if i.get("level") == "fatal"]
@@ -705,9 +802,23 @@ def _import_gone(conn, import_id: int) -> bool:
 
 
 def _detect_mode(ctx, settings: dict, stop_event: threading.Event) -> str:
+    """構造化出力の方式を判定する。判定の呼び出し中も一時停止・中止を受け付け、1行と同じ時間の上限で打ち切る。"""
+    limit = row_deadline_seconds(settings)
+    give_up = time.monotonic() + limit
+
+    def on_tick():
+        nonlocal give_up
+        if ctx.should_stop():
+            paused_at = time.monotonic()
+            ctx.check_cancel()       # 一時停止なら再開まで待つ（判定は裏で続く）。中止なら JobCancelled
+            give_up += time.monotonic() - paused_at   # 止めていた間は数えない
+        if time.monotonic() >= give_up:
+            raise AIJobError(f"AIの出力方式を判定できませんでした（{_duration_text(limit)}以内に応答が返りませんでした）。"
+                             "AIの接続先が応答しているか確認してください。")
+
     for attempt in range(MAX_RETRIES + 1):
         try:
-            return llm.detect_structured_mode(settings)
+            return _run_watched(lambda: llm.detect_structured_mode(settings), on_tick)
         except llm.LLMCallError as e:
             if e.kind == "fatal":
                 raise AIJobError(f"AI整形を始められません: {e}") from e
@@ -716,8 +827,7 @@ def _detect_mode(ctx, settings: dict, stop_event: threading.Event) -> str:
             sec = e.retry_after if e.retry_after is not None else min(2.0 ** (attempt + 1), 60.0)
             deadline = time.monotonic() + min(sec, MAX_WAIT)
             while time.monotonic() < deadline:
-                if ctx.should_stop():
-                    ctx.check_cancel()
+                on_tick()
                 time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
     raise AIJobError("AIの出力方式を判定できませんでした。")
 
@@ -782,6 +892,7 @@ def trial_row(import_id: int, row_key: str, stage_ids=None, settings: dict | Non
             out = execute_work(w, settings, mode, None, use_cache=use_cache)
             if out.fatal is not None:
                 raise out.fatal
+            _ensure_trial_import(import_id, [w.key, out.key])
             entry.update(status=out.status, result=out.result, checks=out.checks, raw_text=out.raw_text,
                          cached=out.cached, calls=out.calls, tokens_in=out.tokens_in, tokens_out=out.tokens_out,
                          latency_ms=out.latency_ms, error=out.error, cache_key=out.key, headers=out.headers)
@@ -792,6 +903,7 @@ def trial_row(import_id: int, row_key: str, stage_ids=None, settings: dict | Non
         else:
             result = custom.fallback_result(w.stage, w.reason).to_dict() if w.kind == "custom" else None
             entry["result"] = result
+            _ensure_trial_import(import_id)
             items.upsert_item(template_id, w.stage_id, w.row_key, status=w.route,
                               template_version_id=data.template_version_id, **w.hashes(), result=result,
                               checks={"reason": w.reason}, import_id=import_id)
@@ -803,6 +915,25 @@ def trial_row(import_id: int, row_key: str, stage_ids=None, settings: dict | Non
             entry["segments"] = [{"id": s.id, "start": s.start, "end": s.end, "body": s.body} for s in w.parse.segments]
         out_stages.append(entry)
     return {"row_key": row_key, "model": settings.get("model"), "structured_mode": mode, "stages": out_stages}
+
+
+def _ensure_trial_import(import_id: int, keys=()) -> None:
+    """試し実行の結果を書く前に、取り込みがまだあるか確かめる（design.md 3.3）。
+
+    試し実行はジョブではないので、AIの応答を待っている間に別のタブからダウンロード・削除されることがある。
+    消えていたら結果を書かず、この試し実行で保存した生の応答も（どの結果からも使われていなければ）消す。
+    """
+    conn = database.connect()
+    try:
+        if not _import_gone(conn, import_id):
+            return
+        for key in {k for k in keys if k}:
+            conn.execute("DELETE FROM llm_calls WHERE cache_key = ? AND NOT EXISTS "
+                         "(SELECT 1 FROM ai_items WHERE ai_items.cache_key = llm_calls.cache_key)", (key,))
+        conn.commit()
+    finally:
+        conn.close()
+    raise AIJobError("この取り込みは削除されました。")
 
 
 def enumerate_stages(spec) -> list[tuple[str, str, object]]:

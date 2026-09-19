@@ -229,6 +229,10 @@ def delete_sample(pattern_id: int, sample_id: int):
 
 # ---- 読み取りテスト ------------------------------------------------------------------
 
+# excel/extractor.number_unit の単位不明の警告の書き出し
+_NO_UNIT_WARNING = "単位が書かれていません"
+TEST_NO_UNIT_WARNING = "単位が決まっていません。［項目を直す］でこの項目の単位（分・時間など）を入れてください"
+
 @bp.get("/<int:pattern_id>/test")
 def test(pattern_id: int):
     """登録した見本ファイル全件で読み取り、項目ごとの値と Markdown を見せる。"""
@@ -241,6 +245,10 @@ def test(pattern_id: int):
         extraction = extract_document(info, pattern, sheets)
         doc = {"id": 0, "file_name": sample["file_name"], "file_hash": sample["file_hash"]}
         fields = {f["field_name"]: f for f in extraction["fields"]}
+        for f in fields.values():
+            if f["data_type"] == "number" and str(f.get("warning") or "").startswith(_NO_UNIT_WARNING):
+                # 確認画面向けの「値に単位を付けて入力」はこの画面ではできないので、種類での直し方にする
+                f["warning"] = TEST_NO_UNIT_WARNING
         results.append({
             "sample": sample,
             "match": match,

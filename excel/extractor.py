@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import asdict, dataclass, field, replace
+from datetime import time
 
 from excel.tables import (MIN_COLUMNS, SAME_COLUMNS_RATIO, Table, find_table, find_table_by_columns, is_table_value,
-                          list_header_keys, merge_table_values, parse_table_text, section_heading, seq_header,
-                          stacked_tables, table_header_keys)
+                          list_header_keys, merge_table_values, parse_table_text, section_heading, section_of,
+                          seq_header, stacked_tables, table_header_keys)
 from excel.text import (EXCEL_ERROR_WARNING, MAX_LABEL_LENGTH, excel_error, numeric_unit, pick_checked, split_code_name, split_combined_value,
                         is_plain_number, to_date, to_number, value_unit, written_unit)
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
@@ -24,6 +26,9 @@ MAX_TEXT_ROWS = 30
 # 先頭に無くても注記なので途中でも見るが、長い本文の中の「様式」で値を打ち切らないよう短い1行のセルだけ。
 _FORM_NUMBER_RE = re.compile(r"様式\s*[:：]?\s*[A-Za-z0-9]")
 MAX_FORM_NUMBER_CHARS = 60
+# 日付だけの値（時刻をつなぐ対象）と、時刻だけのセル（「12:07」「12:07:30」「9時5分」「9時」）
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_CLOCK_ONLY_RE = re.compile(r"^\s*(\d{1,2})\s*(?::\s*(\d{2})(?::\d{2})?|時(?:\s*(\d{1,2})\s*分)?)\s*$")
 
 
 @dataclass
@@ -114,12 +119,14 @@ def apply_manual_values(extraction: dict, form) -> None:
                 text = f"{text}{current}"
             value, warning = to_number(text, text, spec)
             unit, warning = number_unit(value, text, spec, f["field_name"], f["display_name"], warning)
-            if value != f["value"] or unit != (f.get("unit") or ""):
+            # 値と単位が同じでも、入力に警告（「1.5～3時間」の範囲など）が出たとき・前の警告が消えるときは直したものとする
+            if value != f["value"] or unit != (f.get("unit") or "") or warning or f.get("warning"):
                 f["value"], f["unit"], f["warning"], f["edited"], f["ai_filled"] = value, unit, warning, True, False
             continue
         else:
             value, warning = (text or None), None
-        if value != f["value"]:
+        # 日付も同じ: 「2026-09-14 24:30」は日付だけ同じでも時刻が不正なので、警告を残して手で修正にする
+        if value != f["value"] or (f["data_type"] == "date" and value is not None and (warning or f.get("warning"))):
             f["value"], f["warning"], f["edited"], f["ai_filled"] = value, warning, True, False
     refresh_summary(extraction)
 
@@ -139,6 +146,7 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
             continue
         if not result.label_found:
             result.label_found, result.sheet, result.label_cell = True, name, label.coord
+            empty_label = (name, label)
         if not values:
             continue
         result.sheet, result.label_cell = name, label.coord
@@ -149,6 +157,8 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
             result.warning = f"{EXCEL_ERROR_WARNING}（{error}）です。元のファイルで数式を確かめて、値を入力してください"
             return result
         result.value, result.warning = _convert(fd.data_type, values, inline_value, info.date1904, fd.unit)
+        if fd.data_type == "date" and inline_value is None and len(values) == 1:
+            _join_clock_beside(grid, values[0], stop_labels, result)
         if fd.data_type == "number":
             text = inline_value if inline_value is not None else values[0].text
             if inline_value is None and values[0].fmt_unit and not written_unit(text):
@@ -158,9 +168,55 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
         return result
     if not result.label_found:
         result.warning = "ラベルが見つかりません"
+    elif _uncached_beside(info, *empty_label):
+        result.warning = UNCACHED_FORMULA_WARNING
     else:
         result.warning = "ラベルはありますが値が空です"
     return result
+
+
+UNCACHED_FORMULA_WARNING = "数式の計算結果が保存されていません。Excelで開いて保存し直すか、値を入力してください"
+
+
+def _uncached_beside(info: WorkbookInfo, sheet: str, label: Cell) -> bool:
+    """ラベルのすぐ右かすぐ下のセルが、計算結果の保存されていない数式か（空に見えるが値が無いのではない）。"""
+    cells = getattr(info, "uncached_formulas", {}).get(sheet)
+    return bool(cells) and ((label.row, label.max_col + 1) in cells or (label.max_row + 1, label.col) in cells)
+
+
+def _join_clock_beside(grid: SheetGrid, cell: Cell, stop_labels: set[str], result: FieldResult) -> None:
+    """日付のセルのすぐ右のセルに時刻だけが書かれた様式（「2023-05-23｜12:07」）は、時刻を日付につなぐ。
+
+    つなぐのは紛れの無いときだけ: 日付だけ読めた（警告なし）、すぐ右（すき間なし・同じ高さ）のセルが時刻だけ、
+    その右が空か見出し欄（範囲「9:00｜～｜17:00」や「9:00｜17:00」はつながない）。
+    """
+    if not isinstance(result.value, str) or result.warning or not _DATE_ONLY_RE.match(result.value):
+        return
+    beside = grid.cells.get((cell.row, cell.max_col + 1))
+    if beside is None or beside.max_row != cell.max_row:
+        return
+    clock = _clock_only(beside)
+    if clock is None:
+        return
+    after = scan_right(grid, beside, set())  # その右で最初に値のあるセル
+    if after and not (is_stop_cell(after[0], beside, stop_labels) or (after[0].filled and isinstance(after[0].value, str)
+                                                                    and len(after[0].norm) <= MAX_LABEL_LENGTH)):
+        return
+    result.value = f"{result.value} {clock}"
+    result.value_cell = f"{cell.coord.split(':')[0]}:{beside.coord.split(':')[-1]}"
+
+
+def _clock_only(cell: Cell) -> str | None:
+    """時刻だけのセル（時刻の値、「12:07」「9時5分」）なら「HH:MM」。違えば None。"""
+    if isinstance(cell.value, time):
+        return f"{cell.value.hour:02d}:{cell.value.minute:02d}"
+    if not isinstance(cell.value, str):
+        return None
+    m = _CLOCK_ONLY_RE.match(unicodedata.normalize("NFKC", cell.value))
+    if not m:
+        return None
+    hour, minute = int(m[1]), int(m[2] if m[2] is not None else (m[3] or 0))
+    return f"{hour:02d}:{minute:02d}" if hour < 24 and minute < 60 else None
 
 
 def number_unit(value, text: str, spec_unit: str, field_name: str, display_name: str,
@@ -280,29 +336,10 @@ def locate_value(grid: SheetGrid, fd: FieldDef, stop_labels: set[str]) -> tuple[
         anchor, table = locate_table(grid, fd, stop_labels)
         found = anchor is not None and table is not None and table.to_value() is not None
         return anchor, ([anchor] if found else []), None
-    norms = grid.resolve_labels(fd.label_norms())
-    first_label = None
     headers = table_header_keys(grid)
-    lists = list_header_keys(grid)
-    # 候補どおりのラベル → 表記だけ違うラベル（「発生原因（なぜ起きたか）」「応急処置内容」）の順に探す。
-    # それぞれ、すぐ隣に値があるラベルを先に見る（押印欄の縦書き「発信部署」の2行下の日付を、「発信部署」の値にしない）
-    label_sets = [norms, grid.label_variants(fd.label_norms()) - norms]
-    if fd.field_name in COMBINED_EQUIPMENT_PARTS:
-        # 設備番号・設備名: 最後に「対象設備：CMP-108　STI-CMP 8号機」のような番号と名前をまとめた欄も見る
-        label_sets.append(COMBINED_EQUIPMENT_NORMS - norms - label_sets[1])
-    attempts: list[tuple[set[str], list[Cell]]] = []
-    in_headers: list[tuple[set[str], list[Cell]]] = []
-    for n, label_set in enumerate(label_sets):
-        # 行を足せる明細表の列見出し（「設備No｜設備名」の下に何行も並ぶ表）は、1つの値のラベルにしない。
-        # 表記違いのラベルでは、区切りの見出し（「■ 承認欄」）も使わない
-        # 明細表の連番の列見出し（No）も使わない（報告書の「No.」欄と取り違えない）
-        cells = [c for c in grid.find_labels(label_set)
-                 if (c.row, c.col) not in lists and not (n and section_heading(c))
-                 and not ((c.row, c.col) in headers and seq_header(c))] if label_set else []
-        attempts.append((label_set, [c for c in cells if (c.row, c.col) not in headers]))
-        in_headers.append((label_set, [c for c in cells if (c.row, c.col) in headers]))
-    # 明細表の列見出しにあるラベルは、表の外のラベル（表記違い・まとめ欄を含む）をすべて見た後に使う
-    for label_set, cells in attempts + in_headers:
+    first_label = None
+    for label_set, cells in _ordered_label_sets(_limit_to_section(grid, fd, _label_sets(grid, fd)), headers):
+        # それぞれの組で、すぐ隣に値があるラベルを先に見る（押印欄の縦書き「発信部署」の2行下の日付を、「発信部署」の値にしない）
         for allow_gap in (False, True):
             for cell in cells:
                 first_label = first_label or cell
@@ -310,6 +347,66 @@ def locate_value(grid: SheetGrid, fd: FieldDef, stop_labels: set[str]) -> tuple[
                 if found is not None:
                     return found
     return first_label, [], None
+
+
+def label_hits(grid: SheetGrid, fd: FieldDef, stop_labels: set[str]) -> list[Cell]:
+    """項目の見出しに当たるセルのうち、値が読めるものすべて（locate_value が見る順。区画では絞らない）。
+
+    見本から帳票の種類を作るときに、同じ意味の欄がシートの複数の区画にあるか（発行側と回答側）を調べるのに使う。
+    """
+    headers = table_header_keys(grid)
+    hits: list[Cell] = []
+    for label_set, cells in _ordered_label_sets(_label_sets(grid, fd), headers):
+        for cell in cells:
+            if cell not in hits and any(_value_at(grid, fd, cell, label_set, stop_labels, headers, gap) is not None
+                                        for gap in (False, True)):
+                hits.append(cell)
+    return hits
+
+
+def _label_sets(grid: SheetGrid, fd: FieldDef) -> list[tuple[set[str], list[Cell]]]:
+    """探すラベルの組と、それぞれに当たるセル。
+
+    候補どおりのラベル → 表記だけ違うラベル（「発生原因（なぜ起きたか）」「応急処置内容」）の順。
+    """
+    norms = grid.resolve_labels(fd.label_norms())
+    headers = table_header_keys(grid)
+    lists = list_header_keys(grid)
+    label_sets = [norms, grid.label_variants(fd.label_norms()) - norms]
+    if fd.field_name in COMBINED_EQUIPMENT_PARTS:
+        # 設備番号・設備名: 最後に「対象設備：CMP-108　STI-CMP 8号機」のような番号と名前をまとめた欄も見る
+        label_sets.append(COMBINED_EQUIPMENT_NORMS - norms - label_sets[1])
+    found_sets: list[tuple[set[str], list[Cell]]] = []
+    for n, label_set in enumerate(label_sets):
+        # 行を足せる明細表の列見出し（「設備No｜設備名」の下に何行も並ぶ表）は、1つの値のラベルにしない。
+        # 表記違いのラベルでは、区切りの見出し（「■ 承認欄」）も使わない
+        # 明細表の連番の列見出し（No）も使わない（報告書の「No.」欄と取り違えない）
+        cells = [c for c in grid.find_labels(label_set)
+                 if (c.row, c.col) not in lists and not (n and section_heading(c))
+                 and not ((c.row, c.col) in headers and seq_header(c))] if label_set else []
+        found_sets.append((label_set, cells))
+    return found_sets
+
+
+def _ordered_label_sets(found_sets: list[tuple[set[str], list[Cell]]],
+                        headers: set[tuple[int, int]]) -> list[tuple[set[str], list[Cell]]]:
+    """見る順に並べる。明細表の列見出しにあるラベルは、表の外のラベル（表記違い・まとめ欄を含む）をすべて見た後に使う。"""
+    attempts = [(s, [c for c in cells if (c.row, c.col) not in headers]) for s, cells in found_sets]
+    in_headers = [(s, [c for c in cells if (c.row, c.col) in headers]) for s, cells in found_sets]
+    return attempts + in_headers
+
+
+def _limit_to_section(grid: SheetGrid, fd: FieldDef,
+                      found_sets: list[tuple[set[str], list[Cell]]]) -> list[tuple[set[str], list[Cell]]]:
+    """項目に区画（fd.section。例: 回答欄）が決めてあり、その区画の中に探す見出しがあれば、区画の中の見出しだけにする。
+
+    回答欄の見出しの値が空（未回答）でも、発行側の同じ意味の欄の値は読まない（どちら側の欄かは帳票の種類で決める）。
+    区画の無い版・区画の中に見出しが無い版は、今までどおりシート全体の見出しを使う。
+    """
+    if not fd.section:
+        return found_sets
+    inside = [(s, [c for c in cells if section_of(grid, c) == fd.section]) for s, cells in found_sets]
+    return inside if any(cells for _, cells in inside) else found_sets
 
 
 def _value_at(grid: SheetGrid, fd: FieldDef, cell: Cell, norms: set[str], stop_labels: set[str],
@@ -388,13 +485,29 @@ def scan_below(grid: SheetGrid, label: Cell, stop_labels: set[str], multi: bool,
                 break
             skipped_empty = True
         else:
-            if is_stop_cell(cell, label, stop_labels):
+            if is_stop_cell(cell, label, stop_labels) or _value_of_left_label(grid, cell, label, stop_labels):
                 break
             values.append(cell)
             if not multi:
                 break
         row = bottom + 1
     return values
+
+
+def _value_of_left_label(grid: SheetGrid, cell: Cell, label: Cell, stop_labels: set[str]) -> bool:
+    """ラベルの下で見つけたセルが、ラベルより左から結合された別のラベルの値の欄か。
+
+    「クローズ判定」（空欄）の下に、左の「品証コメント」の値の欄（横長の結合セル）が来る帳票で、
+    品証コメントをクローズ判定の値にしない。
+    """
+    if cell.col >= label.col:
+        return False
+    left = grid.cell_at(cell.row, cell.col - 1) if cell.col > 1 else None
+    if left is None or left.max_col != cell.col - 1:
+        return False
+    # 見出し欄 = 項目のラベル、または塗りつぶしのある短い文字列（見本で使わなかった欄の見出しも含む）
+    return is_stop_cell(left, None, stop_labels) or (
+        left.filled and isinstance(left.value, str) and len(left.norm) <= MAX_LABEL_LENGTH)
 
 
 def is_form_number_note(text) -> bool:

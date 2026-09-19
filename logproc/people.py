@@ -78,6 +78,12 @@ class PeopleIndex:
         # 本文先頭で区切りなしに照合する表記（長い順）
         forms = {unicodedata.normalize("NFKC", f) for f in list(self._exact_forms()) + self.groups}
         self._forms = sorted((f for f in forms if len(f) >= 2), key=len, reverse=True)
+        # known_at 用に先頭の文字で引けるようにする（各リストの中は長い順のまま）
+        self._forms_by_head: dict[str, list[str]] = {}
+        for f in self._forms:
+            self._forms_by_head.setdefault(f[0], []).append(f)
+        # 部署名の照合用（長い順・NFKC）。セグメントごとに並べ直さない
+        self._group_forms = [unicodedata.normalize("NFKC", g) for g in sorted(self.groups, key=len, reverse=True)]
 
     def _add(self, p: Person) -> None:
         self.persons.append(p)
@@ -106,8 +112,7 @@ class PeopleIndex:
 
     def group_at(self, sh: str, p: int, end: int) -> str | None:
         """p から始まる部署名（後ろが空白・「:」・行末のもの）。"""
-        for g in sorted(self.groups, key=len, reverse=True):
-            gn = unicodedata.normalize("NFKC", g)
+        for gn in self._group_forms:
             q = p + len(gn)
             if q <= end and sh.startswith(gn, p) and (q == end or sh[q] in " \t:"):
                 return gn
@@ -115,7 +120,9 @@ class PeopleIndex:
 
     def known_at(self, sh: str, p: int, end: int) -> str | None:
         """p から区切りなしで始まる登録済みの名前（「4/3佐藤エンコーダ…」用）。"""
-        for f in self._forms:
+        if p >= end:
+            return None
+        for f in self._forms_by_head.get(sh[p], ()):
             if p + len(f) <= end and sh.startswith(f, p) and not self.is_group(f):
                 return f
         return None

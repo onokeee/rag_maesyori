@@ -172,6 +172,19 @@ def test_save_pattern_new_fields_and_version_no(core_app):
         assert loaded.version_no == 3 and loaded.title_fields == [] and loaded.fields[0].rag_output == "show"
 
 
+def test_field_section_survives_save_and_load(core_app):
+    """探す区画は extraction_rule に入れて保存する。保存し直すと消える、では画面で決めた区画が効かない。"""
+    with core_app.app_context():
+        pid = db.create_pattern("不具合連絡票")
+        fields = [FieldDef("repair", "処置", ["暫定対策"], data_type="text", section="回答"), FieldDef("no", "No.", ["No."])]
+        db.save_pattern(PatternDef(name="不具合連絡票", id=pid, fields=fields), "active")
+        loaded = db.load_pattern(pid)
+        assert [f.section for f in loaded.fields] == ["回答", ""]
+        rules = [json.loads(r["extraction_rule"]) for r in db.get_db().execute(
+            "SELECT extraction_rule FROM pattern_fields WHERE pattern_id = ? ORDER BY sort_order", (pid,))]
+        assert rules[0]["section"] == "回答" and "section" not in rules[1]
+
+
 def test_foreign_keys_cascade_with_background_connection(core_app):
     with core_app.app_context():
         conn = db.connect()

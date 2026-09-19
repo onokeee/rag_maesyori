@@ -151,6 +151,8 @@ def _apply_values(extraction: dict, values: dict, confirmed: dict | None = None)
 
 # 手で直すと変わる項目のキー。これ以外（表示名・Markdownへの出し方など、帳票の種類の設定）が違う項目は戻さない
 _EDIT_KEYS = {"value", "unit", "warning", "edited", "ai_filled"}
+# 値のありか。「AIで空欄を探す」が値と一緒に書き込むので、値が確定済みと同じに戻ったときは比べない
+_LOCATION_KEYS = {"sheet", "value_cell"}
 
 
 def _restore_confirmed_fields(extraction: dict, confirmed: dict | None) -> None:
@@ -167,8 +169,8 @@ def _restore_confirmed_fields(extraction: dict, confirmed: dict | None) -> None:
             f.get("data_type") == "table" and is_blank_value(old.get("value")) and is_blank_value(f.get("value"))))
         if (old is not None and old != f and same_value
                 and (old.get("unit") or "") == (f.get("unit") or "")
-                and {k: v for k, v in old.items() if k not in _EDIT_KEYS}
-                == {k: v for k, v in f.items() if k not in _EDIT_KEYS}):
+                and {k: v for k, v in old.items() if k not in _EDIT_KEYS | _LOCATION_KEYS}
+                == {k: v for k, v in f.items() if k not in _EDIT_KEYS | _LOCATION_KEYS}):
             extraction["fields"][i] = json.loads(json.dumps(old))
     refresh_summary(extraction)
 
@@ -566,6 +568,13 @@ def _is_stale(doc: dict) -> bool:
 _DRAFT_TOKENS: dict[int, tuple[str, str]] = {}
 
 
+@purge.on_documents_purged
+def _forget_draft_tokens(doc_ids) -> None:
+    """消した帳票の目印は捨てる（ダウンロード・削除のあと、消した帳票の id をメモリにも残さない）。"""
+    for doc_id in doc_ids:
+        _DRAFT_TOKENS.pop(int(doc_id), None)
+
+
 def _page_token() -> str:
     payload = request.get_json(force=True, silent=True)
     token = payload.get("page_token") if isinstance(payload, dict) else None
@@ -618,7 +627,16 @@ def preview(doc_id: int):
     if _is_stale(doc):
         return jsonify(error=STALE_MESSAGE), 409
     _apply_values(extraction, _json_values(), _data(doc, "confirmed_json"))
-    return jsonify(_summary(doc, extraction))
+    summary = _summary(doc, extraction)
+    batch = _batch_info(doc)
+    if batch:
+        # 途中保存で「修正中」になると、まとまりの zip の確認文と修正中の一覧が変わる（画面のまとまりの欄を書き替える）
+        summary["batch"] = {
+            "zip_confirm": batch["zip_confirm"],
+            "modified": [{"name": d.get("title") or d["file_name"], "href": url_for(".review", doc_id=d["id"])}
+                         for d in batch["modified"]],
+        }
+    return jsonify(summary)
 
 
 @bp.post("/<int:doc_id>/ai-fill")
@@ -792,7 +810,8 @@ def download_batch(batch_id: str):
     if pending and not confirmed_only:
         flash(f"まだ確定していない帳票が{len(pending)}件あります。すべて確定するか、"
               f"確定済みの{len(confirmed_ids)}件だけをダウンロードしてください", "error")
-        return redirect(url_for(".type_select", doc_id=pending[0]["id"]))
+        # 確認中の帳票は確認画面へ（種類の画面の「読み取り直す」で手の修正を失わないように）
+        return redirect(form_link(pending[0]))
     if not confirmed_ids:
         flash("確定済みの帳票がありません", "error")
         return redirect(url_for("home.index"))

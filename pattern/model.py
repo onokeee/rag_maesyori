@@ -55,6 +55,10 @@ class FieldDef:
     rag_output: str = "show"
     # 明細表: 見本で見た列見出し。見出し（アンカー）の書き方が違う帳票でも、列見出しの並びが似た表を探すのに使う
     table_columns: list[str] = field(default_factory=list)
+    # 探す区画（区切りの見出しの名前。excel.tables.section_key の形。例: 「回答」）。空ならシート全体。
+    # 発行側と回答側で同じ意味の欄が並ぶ帳票で、どちら側の欄を読むかを決める。シートにその区画があり、
+    # その中に探す見出しがあるときだけ区画の中で探す（区画の無い版・区画の中に見出しの無い版は全体で探す）
+    section: str = ""
 
     def search_labels(self) -> list[str]:
         labels = [c.strip() for c in self.candidates if c.strip()] or [self.display_name]

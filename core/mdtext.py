@@ -104,7 +104,7 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
-    ascii_count = sum(1 for ch in text if ord(ch) < 128)
+    ascii_count = len(text.encode("ascii", "ignore"))  # ASCII の文字数（1文字ずつ数えるより速い）
     return -(-(11 * (len(text) - ascii_count) + 5 * ascii_count) // 10)  # 整数だけで ceil する（浮動小数の誤差を避ける）
 
 

@@ -206,6 +206,22 @@ def test_a_beacon_is_refused_after_another_page_saved(app, client):
                        json={"values": {"equipment_name": "A2"}, "version": old, "page_token": "page-a"}).status_code == 409
 
 
+def test_draft_page_marks_are_forgotten_when_the_form_is_purged(app, client):
+    """消した帳票の途中保存の目印（id）をメモリに残さない（design.md 3.3 データを残さない）。"""
+    import re
+
+    from views import forms
+
+    doc_id = _working_doc(app)
+    page = client.get(f"/forms/{doc_id}/review").get_data(as_text=True)
+    old = re.search(r'data-version="([0-9a-f]+)"', page).group(1)
+    assert client.post(f"/forms/{doc_id}/draft",
+                       json={"values": {"equipment_name": "A"}, "version": old, "page_token": "page-1"}).status_code == 204
+    assert doc_id in forms._DRAFT_TOKENS
+    assert client.post(f"/forms/{doc_id}/delete").status_code == 302
+    assert doc_id not in forms._DRAFT_TOKENS
+
+
 # ---- ux3-4: 帳票の種類を削除したあとの作業中の帳票 -----------------------------------------------------
 
 def test_working_form_keeps_its_read_type_name_and_delete_confirm_counts_it(app, client):

@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS pattern_fields (
     candidates TEXT NOT NULL DEFAULT '[]',         -- JSON配列
     required INTEGER NOT NULL DEFAULT 0,
     data_type TEXT NOT NULL DEFAULT 'string',
-    extraction_rule TEXT NOT NULL DEFAULT '{}'     -- JSON {"direction": "auto"}
+    extraction_rule TEXT NOT NULL DEFAULT '{}'     -- JSON {"direction", "columns", "section"}
 );
 
 CREATE TABLE IF NOT EXISTS pattern_samples (
@@ -452,7 +452,10 @@ def _field_def(row: dict) -> FieldDef:
     # unit / rag_output は WP-forms が FieldDef に追加する。未追加でも属性として持たせる
     fd.unit = row.get("unit") or ""
     fd.rag_output = row.get("rag_output") or "show"
-    fd.table_columns = list(json.loads(row["extraction_rule"]).get("columns") or [])
+    rule = json.loads(row["extraction_rule"])
+    fd.table_columns = list(rule.get("columns") or [])
+    # 探す区画（発行側・回答側など、同じラベルが並ぶ帳票でどちらを読むか）
+    fd.section = rule.get("section") or ""
     return fd
 
 
@@ -462,6 +465,9 @@ def _extraction_rule(f: FieldDef) -> dict:
     columns = getattr(f, "table_columns", None)
     if f.data_type == "table" and columns:
         rule["columns"] = list(columns)
+    section = getattr(f, "section", "") or ""
+    if section:
+        rule["section"] = section
     return rule
 
 

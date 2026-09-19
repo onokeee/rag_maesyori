@@ -22,6 +22,7 @@
     <select name="fields-{{ i }}-direction" class="input" title="見出しから見た値の位置" aria-label="値の位置">
       {% for key, label in directions.items() %}<option value="{{ key }}" {{ 'selected' if r.direction == key }}>{{ label }}</option>{% endfor %}
     </select>
+    <input name="fields-{{ i }}-section" value="{{ r.section or '' }}" class="input small" placeholder="探す区画（例: 回答欄）" aria-label="探す区画" title="「▼ 回答欄」のような区切りの見出しの名前。入れると、その見出しの下にこの項目の見出しがある帳票では、その中だけを探します（発行側と回答側に同じ意味の欄がある帳票用）。空ならシート全体を探します">
   </td>
   <td><input name="fields-{{ i }}-unit" value="{{ r.unit or '' }}" class="input small" placeholder="時間" aria-label="単位" size="6"></td>
   <td class="center"><input type="checkbox" name="fields-{{ i }}-required" aria-label="必須" {{ 'checked' if r.required }}></td>
@@ -105,6 +106,7 @@
     「タイトルの順」に 1, 2, 3… を入れた項目の値を、Markdown の見出しとファイル名に使います（空なら 報告番号→設備番号→設備名→発生日 の順）。
     型が「明細表」の項目は、探す見出し（「■ 交換部品」など）の下か右にある列見出しの行から、1行＝1明細で読み取ります。
     その下の欄の列見出しは、見出しの書き方が違う帳票で、列見出しが似た表を探すのに使います。
+    「探す区画」に「回答欄」のような区切りの見出しの名前を入れた項目は、その見出しの下（または右）の欄だけから読み取ります（発行側の「処置内容」と回答欄の「暫定対策」のように同じ意味の欄が2か所にある帳票用。未回答なら空になります）。
     型が「数値」の項目の「単位」（分・時間・円など）は Markdown の値に付きます。帳票に単位が書かれていない項目は、ここで単位を決めてください
     （決まっていないと、読み取り結果の確認・修正の画面で「単位が書かれていません」と出ます。単位を勝手に補うことはしません）。</p>
   <div class="table-wrap">
@@ -120,7 +122,7 @@
     </tbody>
   </table>
   </div>
-  <template id="field-row-template">{{ field_row('__INDEX__', {'use': True, 'data_type': 'string', 'direction': 'auto', 'display_name': '', 'field_name': '', 'candidates': '', 'unit': '', 'rag_output': 'show', 'table_columns': ''}) }}</template>
+  <template id="field-row-template">{{ field_row('__INDEX__', {'use': True, 'data_type': 'string', 'direction': 'auto', 'display_name': '', 'field_name': '', 'candidates': '', 'unit': '', 'rag_output': 'show', 'table_columns': '', 'section': ''}) }}</template>
   <button type="button" class="btn small" data-add-row="field">項目を追加</button>
 {% endcall %}
 

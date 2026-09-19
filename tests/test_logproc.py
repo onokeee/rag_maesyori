@@ -559,3 +559,45 @@ def test_glossary_longest_first_and_idempotent():
 
 def test_glossary_skips_mask_tokens():
     assert apply_glossary("［電話番号］へTEL済", {"電話": "でんわ", "TEL済": "電話連絡済み"}) == "［電話番号］へ電話連絡済み"
+
+
+# ---- 速さのための控え（結果は変えない） ----
+
+def test_shadow_matches_per_character_nfkc():
+    """shadow は表と控えを使うが、1文字ずつ NFKC をかけた写し（長さを保つ・丸数字は残す）と同じ。"""
+    import unicodedata
+
+    def reference(text):
+        out = []
+        for ch in text:
+            code = ord(ch)
+            if code < 0x80 or 0x2460 <= code <= 0x24FF or 0x2776 <= code <= 0x2793:
+                out.append(ch)
+                continue
+            n = unicodedata.normalize("NFKC", ch)
+            out.append(n if len(n) == 1 else ch)
+        return "".join(out)
+
+    sample = "ＡＢＣ１２３　ｶﾀｶﾅ①②❶ ㍻ ﬁ ㌔ Ⅻ ¥１,０００ ＠ｘ．ｊｐ 全角／半角→ “引用” \t\n漢字"
+    everything = "".join(chr(c) for c in range(0x80, 0x10000) if not 0xD800 <= c <= 0xDFFF)
+    for text in (sample, everything, "", "ascii only 123"):
+        assert shadow(text) == reference(text) and len(shadow(text)) == len(text)
+        assert shadow(text) == reference(text)          # 2回目（控えから）も同じ
+
+
+def test_parse_head_memo_does_not_leak_between_cells(people):
+    """同じ位置・同じ長さの別のセルを続けて分けても、前のセルの読み取り結果を使わない。"""
+    a = parse_log("4/1 田中：ライン停止\n4/2 佐藤：復旧確認", date(2024, 4, 1), people)
+    b = parse_log("【現象】ラインの停止\n【原因】センサー汚れ", date(2024, 4, 1), people)
+    c = parse_log("4/1 田中：ライン停止\n4/2 佐藤：復旧確認", date(2024, 4, 1), people)
+    assert a.kind == "log" and b.kind == "header_cell"
+    assert [s.when.date for s in a.segments] == ["2024-04-01", "2024-04-02"] and repr(a) == repr(c)
+
+
+def test_extractors_are_unchanged_by_the_cached_spans():
+    text = "RB-ENC-05M ×1 手配、納期1週間。ALM-2031 表示、5mm ずれ、N2パージ"
+    ids = extract_identifiers(text)
+    ids.append("書き換え")                               # 戻り値を変えても控えは変わらない
+    assert extract_identifiers(text) == ["RB-ENC-05M", "ALM-2031"]
+    assert "×1" in extract_quantities(text) and "5mm" in extract_quantities(text)
+    assert extract_plans(text) == ["納期1週間"] and extract_plans("") == [] and extract_plans(None) == []

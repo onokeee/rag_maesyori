@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -61,7 +62,27 @@ def _skip_ws(sh: str, p: int, end: int) -> int:
     return p
 
 
+_HEAD_MEMO = threading.local()
+
+
 def _parse_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_date_res) -> _Head:
+    """セグメント先頭の目印・日時を読む。
+
+    1つのセルの処理（parse_log）の中で、同じ行を見出し型の判定・区切りの判定・分割後の先頭の読み取りで
+    何度も読むので、同じセル（同じ clean・sh・not_date_res の組）の間だけ結果を覚える。戻り値は変更しないこと。
+    """
+    memo = getattr(_HEAD_MEMO, "value", None)
+    if memo is None or memo[0] is not clean or memo[1] is not sh or memo[2] is not not_date_res:
+        memo = (clean, sh, not_date_res, {})
+        _HEAD_MEMO.value = memo
+    k = (start, end, line_start)
+    head = memo[3].get(k)
+    if head is None:
+        head = memo[3][k] = _read_head(clean, sh, start, end, line_start, not_date_res)
+    return head
+
+
+def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_date_res) -> _Head:
     p = _skip_ws(sh, start, end)
     head = _Head(pos=p)
     if p < end and (sh[p] in _BULLETS or (sh[p] == "-" and p + 1 < end and sh[p + 1] in " \t")):
@@ -131,6 +152,18 @@ def _detect_header_cell(clean: str, sh: str, lines, not_date_res) -> bool:
     return labels >= 2 and dated == 0
 
 
+def _compile_all(patterns) -> list[re.Pattern]:
+    """設定の正規表現をまとめてコンパイルする。検証より前に保存された設定で書けない形があっても、
+    処理全体を止めずにその形だけ使わない。"""
+    out = []
+    for x in patterns or ():
+        try:
+            out.append(re.compile(x))
+        except (re.error, TypeError, RecursionError):
+            continue
+    return out
+
+
 def _lines(text: str) -> list[tuple[int, int]]:
     out, pos = [], 0
     for part in text.split("\n"):
@@ -140,7 +173,7 @@ def _lines(text: str) -> list[tuple[int, int]]:
 
 
 def _split_pieces(clean: str, sh: str, options: SplitOptions, not_date_res, header_mode: bool) -> list[_Piece]:
-    extra_res = [re.compile(x) for x in options.extra_anchors]
+    extra_res = _compile_all(options.extra_anchors)
     pieces: list[_Piece] = []
     cur: _Piece | None = None
     in_email = False
@@ -191,6 +224,11 @@ def _split_pieces(clean: str, sh: str, options: SplitOptions, not_date_res, head
 
 def _split_inline(clean: str, sh: str, pc: _Piece, not_date_res) -> list[_Piece]:
     """「／」「→」直後の日付、全角空白の後の「10:15：」で分ける。"""
+    # 区切りの候補（直前が「/」「→」か全角空白）がなければ1文字ずつ調べない
+    last = pc.end - 1
+    if ("/" not in sh[pc.start:last] and "→" not in sh[pc.start:last]
+            and "　" not in clean[pc.start:last]):
+        return [pc]
     cuts = []
     for i in range(pc.start + 1, pc.end):
         ch, prev = sh[i], sh[i - 1]
@@ -262,7 +300,7 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
     if is_empty_log(clean):
         return LogParse([], "unknown", "empty", [], clean)
     sh = shadow(clean)
-    not_date_res = [re.compile(x) for x in options.not_date_patterns]
+    not_date_res = _compile_all(options.not_date_patterns)
     header_mode = options.header_cells != "off" and _detect_header_cell(clean, sh, _lines(clean), not_date_res)
     pieces = _split_pieces(clean, sh, options, not_date_res, header_mode)
 

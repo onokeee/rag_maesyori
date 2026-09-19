@@ -130,6 +130,7 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
     width, split_warning = _table_width(by_index, rows_h, levels)
     if split_warning:
         warnings.append(split_warning)
+    header_is_data = _header_looks_like_data(by_index.get(rows_h[-1]), width)
     headers = _dedupe((headers + [""] * width)[:width])
     levels = [(lv + [""] * width)[:width] for lv in levels]
     data_start = rows_h[-1] + 1
@@ -164,6 +165,10 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
         table_kind = "form_like"
     else:
         table_kind = "unknown"
+    if header_is_data and table_kind != "crosstab":
+        # 見出し行のないCSVでは1行目の値が見出し（＝取り込み設定に残る列名）になり、その記録も md に出ない
+        warnings.append("見出し行がデータのように見えます（日付・数値や長い文章が並んでいます）。"
+                        "見出し行のない表には対応していません。1行目に列名を入れてから取り込み直してください")
     if table_kind in ("form_like", "unknown"):
         warnings.append("一覧表の形に見えません（見出しの下に同じ形の行が続いていません）")
 
@@ -493,6 +498,19 @@ def _table_width(by_index: dict[int, SourceRow], rows_h: list[int], levels: list
     return last, ""
 
 
+def _header_looks_like_data(row: SourceRow | None, width: int) -> bool:
+    """見出し行の値の半分以上が日付・数値か、40字を超える文章があるか。"""
+    if row is None:
+        return False
+    filled = [c for c in (row.cells[:width] if width else row.cells) if c.text]
+    if len(filled) < 2:
+        return False
+    if any(len(c.text) > 40 for c in filled):
+        return True
+    data_like = sum(1 for c in filled if value_kind(c.value, c.text) in ("number", "date", "datetime"))
+    return data_like * 2 >= len(filled)
+
+
 # ---- 内部: 行の分類 ----
 
 def _aggregate_label(row: SourceRow, width: int, key_cols: list[int] | None = None) -> str | None:
@@ -520,10 +538,12 @@ def _aggregate_label(row: SourceRow, width: int, key_cols: list[int] | None = No
         return None
     strings = sum(1 for c in nonempty if c.text not in NA_TOKENS and value_kind(c.value, c.text) != "number")
     for pos, label in found:
+        # 「P-004, 2026/04/04, 稼働時間累計, …」「pH計, 2026/08/01, 7.1」のように、番号・日付を持つ行の
+        # 項目名（計器名など）は合計・小計行ではない。先頭列のラベルは同じ行の右側の番号・日付も見る
+        others = filled[:pos] if pos > 0 else filled[1:]
+        if _row_has_own_key(cells, others, key_cols or [], label_col[pos]):
+            continue
         if _TOTAL_RE.match(label.replace(" ", "")) and strings <= 3:
-            if pos > 0 and _row_has_own_key(cells, filled[:pos], key_cols or [], label_col[pos]):
-                # 「P-004, 2026/04/04, 稼働時間累計, …」のように、番号・日付を持つ行の項目名は合計行ではない
-                continue
             return "total"
         if pos == 0 and strings <= 2:
             if _SUBTOTAL_RE.search(label):

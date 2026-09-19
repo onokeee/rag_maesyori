@@ -1,16 +1,20 @@
 """Excelの構造解析。結合セルを考慮した「値のあるセル」のグリッドを作る。"""
 from __future__ import annotations
 
+import io
 import warnings
+import xml.etree.ElementTree as ET
+import zipfile
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.utils.datetime import MAC_EPOCH
 
-from excel.image_detector import detect_images
+from excel.image_detector import NS, R_ID, _rels, detect_images
 from excel.text import (MAX_LABEL_LENGTH, cell_text, format_unit, label_base, label_parts, normalize_label, paren_stripped,
                         section_stripped, split_inline)
 
@@ -189,6 +193,9 @@ class WorkbookInfo:
     grids: dict[str, SheetGrid]
     images: list[dict]
     date1904: bool = False  # 1904年基準のブック（日付シリアル値の起点が違う）
+    # 計算結果が保存されていない数式のセル {シート名: {(行, 列)}}（openpyxl などで書いたブック）。
+    # data_only で読むと空になるので、「値が空」でなく「数式の結果が無い」と知らせるのに使う
+    uncached_formulas: dict[str, set[tuple[int, int]]] = field(default_factory=dict)
 
     @property
     def sheet_names(self) -> list[str]:
@@ -207,4 +214,46 @@ def load_workbook_info(path: str | Path) -> WorkbookInfo:
         date1904 = wb.epoch == MAC_EPOCH
     finally:
         wb.close()
-    return WorkbookInfo(path=Path(path), grids=grids, images=detect_images(path), date1904=date1904)
+    return WorkbookInfo(path=Path(path), grids=grids, images=detect_images(path), date1904=date1904,
+                        uncached_formulas=uncached_formula_cells(path))
+
+
+def uncached_formula_cells(path: str | Path) -> dict[str, set[tuple[int, int]]]:
+    """数式（<f>）があって計算結果（<v>）が無いセルを、シートごとに返す。読めないブックは空。"""
+    out: dict[str, set[tuple[int, int]]] = {}
+    try:
+        with zipfile.ZipFile(path) as zf:
+            names = set(zf.namelist())
+            workbook_part = next((target for rtype, target in _rels(zf, names, "").values()
+                                  if rtype.endswith("/officeDocument")), "xl/workbook.xml")
+            if workbook_part not in names:
+                return out
+            workbook_rels = _rels(zf, names, workbook_part)
+            for sheet in ET.fromstring(zf.read(workbook_part)).findall("main:sheets/main:sheet", NS):
+                part = workbook_rels.get(sheet.get(R_ID), ("", ""))[1]
+                if part not in names:
+                    continue
+                data = zf.read(part)
+                if b"<f" not in data:  # 数式の無いシート（ほとんど）は読み直さない
+                    continue
+                cells = _uncached_in_sheet(data)
+                if cells:
+                    out[sheet.get("name")] = cells
+    except (OSError, zipfile.BadZipFile, ET.ParseError, KeyError, ValueError):
+        return {}
+    return out
+
+
+def _uncached_in_sheet(xml: bytes) -> set[tuple[int, int]]:
+    cells: set[tuple[int, int]] = set()
+    main = "{" + NS["main"] + "}"
+    for _, elem in ET.iterparse(io.BytesIO(xml)):
+        if elem.tag != main + "c":
+            continue
+        formula, value = elem.find(main + "f"), elem.find(main + "v")
+        # 空文字の結果（t="str" の空の <v>）は計算済み
+        if formula is not None and (value is None or (not value.text and elem.get("t") != "str")) and elem.get("r"):
+            letters, row = coordinate_from_string(elem.get("r"))
+            cells.add((row, column_index_from_string(letters)))
+        elem.clear()
+    return cells

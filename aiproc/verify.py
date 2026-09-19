@@ -23,9 +23,14 @@ ACTION_GROUPS = [
     ["調整"], ["リセット"], ["再起動"], ["修理", "補修"], ["給油", "注油", "給脂"], ["洗浄"], ["校正"], ["溶接"],
     ["再設定"], ["研磨"],
 ]
+# 「1/2に調整」「1/4回転」（分数）と「1日1回」「1日あたり」（頻度）は日付にしない。
+# 年まである「4/1/2024」と「月」の付いた日付はいつでも日付
 _DATE_RE = re.compile(
-    r"\d{1,4}\s*[/／]\s*\d{1,2}(?:\s*[/／]\s*\d{1,4})?|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}日|\d{1,2}月"
-    r"|\d{1,2}日(?!間)|\d{1,2}\s*[:：]\s*\d{2}|\d{1,2}時(?!間)|令和|平成|昭和"
+    r"\d{1,4}\s*[/／]\s*\d{1,2}\s*[/／]\s*\d{1,4}"
+    r"|\d{1,4}\s*[/／]\s*\d{1,2}(?!\d|\s*(?:回転|開度?|程度|以下|以上|まで(?:開|閉|絞|下げ|上げ|減)"
+    r"|に(?:調整|設定|変更|絞|下げ|上げ|減|開|閉)|の(?:開度|量|流量|速度|回転|圧力)))"
+    r"|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}月\d{1,2}日|\d{1,2}月"
+    r"|\d{1,2}日(?!間|\s*\d+\s*回|あたり|当たり|おき)|\d{1,2}\s*[:：]\s*\d{2}|\d{1,2}時(?!間)|令和|平成|昭和"
     r"|翌日|翌週|翌月|翌朝|前日|昨日|本日|今日|今朝|明日|先週|来週|今週|先月|来月|今月|月末|月初|週末|年内|週明け|同日"
     r"|\d+日後|\d+日前|午前|午後"
 )
@@ -47,17 +52,27 @@ FINAL_STATE_WORDS = {
     "未着手": ["未"],
 }
 _NOT_DONE_RE = re.compile(r"未(?:完了|解決|終了|済)")          # 「未完了」を「完了」の根拠にしない
+# 「完了予定」「完了していない」「まだ終わっていない」は、まだ終わっていない（「完了」の根拠にしない）
+_NOT_YET_RE = re.compile(
+    r"(?:完了|終了|解決|クローズ|済み?)\s*(?:予定|見込み?|次第|待ち|していない|しておらず|せず|できず|できていない|しない|前)"
+    r"|まだ[^。]{0,6}?(?:完了|終了|解決|済)")
 # 「手配済」「発注済」「連絡済」は段取りが済んだだけで、不具合の対応の完了ではない
 _ARRANGED_RE = re.compile(r"(?:手配|発注|連絡|依頼|申請|問い?合わ?せ|注文|見積)\s*済み?")
 # 「済」だけが根拠のとき、「完了」と両立しない、まだ終わっていないことを示す語
 _PENDING_RE = re.compile(r"待ち|入荷待|納期")
 # 「再発なし」の根拠になる言い方（「復旧しない」のような別の否定は根拠にしない）
 _RECUR_NO_RE = re.compile(
-    r"再発\s*(?:なし|無し|無|せず|しない|していない|しておらず|ない|は?見られ(?:ない|ず))"
+    r"再発\s*[はがも]?\s*(?:なし|無し|無|せず|しない|していない|しておらず|ない|見られ(?:ない|ず))"
     r"|(?:以降|その後|以後|現在|今のところ)[^。]{0,8}?(?:異常|問題|不具合|症状|発生|再発)\s*(?:なし|無し|無|ない|せず|しない|していない)"
     r"|(?:異常|問題|不具合|症状)\s*(?:なし|無し)")
-# 再発の記録（「再発なし」「再発せず」「再発防止」は除く）
-_RECUR_YES_RE = re.compile(r"再発(?!\s*(?:なし|無し|無|せず|しない|していない|しておらず|ない|防止|対策))|再度|再び|再燃")
+# 再発の記録（「再発なし」「再発はなし」「再発は見られない」「再発防止」は除く）。
+# 「再度」「再び」は、すぐ後に起きたことを示す語があるときだけ（「再度測定し正常」は再発ではない）
+_RECUR_YES_RE = re.compile(
+    r"再発(?![はがも]?\s*(?:なし|無し|無|せず|しない|していない|しておらず|ない|見られ|防止|対策))"
+    r"|(?:再度|再び)[^。、]{0,4}?(?:発生|停止|エラー|異常|同様|同じ)|再燃")
+# 原因が分かっていないことを示す語（「確定」の原因の根拠にならない）
+UNKNOWN_WORDS = ["不明", "未特定", "調査中", "調査継続", "特定できず", "特定できない", "わからない", "分からない"]
+_CONTENT_RUN_RE = re.compile(r"[一-鿿々]{2,}|[ァ-ヶー]{2,}")
 
 
 def _final_state_words(state: str, glossary: dict) -> list[str]:
@@ -432,6 +447,28 @@ def _action_words(text: str, glossary: dict) -> list[list[str]]:
     return [g for g in groups if any(norm(x) in t for x in g)]
 
 
+def _check_content(cx: _Ctx, path: str, label: str, value: str, evidence: str, issues: list) -> None:
+    """中身の語（2字以上の漢字・カタカナの連なり）が根拠に1つも無ければ警告（根拠に無いことを作った疑い）。
+
+    言い換え（用語集の言い換えを含む）もあるので error にはしない（要確認にするだけ）。
+    """
+    runs = _CONTENT_RUN_RE.findall(nfkc(value))
+    if not runs:
+        return
+    ev = norm(evidence)
+    extra = []
+    for term, spec in (cx.glossary or {}).items():
+        to = spec.get("to", "") if isinstance(spec, dict) else str(spec)
+        if term and norm(term) in ev:
+            extra.append(norm(to))
+        if to and norm(to) in ev:
+            extra.append(norm(term))
+    ev += " " + " ".join(extra)
+    if not any(norm(r) in ev for r in runs):
+        issues.append(VerifyIssue("warning", path, f"{path}.{label}「{nfkc(value).strip()}」の語は根拠のエントリに"
+                                                   "1つも書かれていません。", "content"))
+
+
 def _finish(rep: VerifyReport, path: str, issues: list) -> bool:
     rep.issues.extend(issues)
     if any(i.level == "error" for i in issues):
@@ -458,7 +495,15 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
         if ev and isinstance(v, str):
             segs, text = ev
             _check_quote(cx, path, "q", rc.get("q"), text, issues)
+            if certainty == "確定" and (rc.get("q") is None or not str(rc.get("q")).strip()):
+                issues.append(VerifyIssue("error", path, f"{path}.certainty が「確定」のときは、q に根拠の原文の語句を"
+                                                         "引用してください。", "quote"))
             _check_text_value(cx, path, "v", v, text, issues)
+            _check_content(cx, path, "v", v, text, issues)
+            unknown_in_ev = [w for w in UNKNOWN_WORDS if w in nfkc(text)]
+            if certainty == "確定" and unknown_in_ev:
+                issues.append(VerifyIssue("error", path, f"{path}.certainty が「確定」ですが、根拠 {', '.join(rc.get('src') or [])} "
+                                                         f"には「{unknown_in_ev[0]}」と書かれています。", "speculation"))
             spec_in_ev = [w for w in SPECULATION_WORDS if w in nfkc(text)]
             if spec_in_ev:
                 if certainty == "確定":
@@ -490,6 +535,7 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
             if ev:
                 segs, text = ev
                 _check_text_value(cx, path, "v", a["v"], text, issues, check_dropped=True)
+                _check_content(cx, path, "v", a["v"], text, issues)
                 for group in _action_words(a["v"], cx.glossary):
                     if not any(norm(x) in norm(text) for x in group):
                         issues.append(VerifyIssue("warning", path, f"{path}.v の「{group[0]}」は根拠のエントリに書かれていません。",
@@ -512,6 +558,7 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
         if ev:
             segs, text = ev
             _check_text_value(cx, path, "name", p["name"], text, issues)
+            _check_content(cx, path, "name", p["name"], text, issues)
             model = p.get("model")
             if model:
                 if not _model_in(model, text) and not _model_in(model, cx.sent_text):
@@ -541,8 +588,10 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
             if v == "なし" and not _RECUR_NO_RE.search(nfkc(text)):
                 issues.append(VerifyIssue("error", path, f"{path}.v「なし」の根拠が書かれていません。", "flip_added"))
             # 「あり」は根拠に再発の記録（「再発なし」「再発せず」ではないもの）か、根拠にある回数の引用が要る
+            # 「再発はなし」「再発は見られない」など、再発しなかった書き方の部分は「あり」の根拠にしない
             count_q = str(rec.get("count_q") or "").strip()
-            if v == "あり" and not _RECUR_YES_RE.search(nfkc(text)) and not (count_q and norm(count_q) in norm(text)):
+            yes_text = _RECUR_NO_RE.sub(" ", nfkc(text))
+            if v == "あり" and not _RECUR_YES_RE.search(yes_text) and not (count_q and norm(count_q) in norm(text)):
                 issues.append(VerifyIssue("error", path, f"{path}.v「あり」の根拠（再発の記録）が書かれていません。",
                                           "flip_added"))
         if _finish(rep, path, issues):
@@ -560,6 +609,8 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
             words = _final_state_words(v, cx.glossary)
             ev_text = norm(ev[1] if v == "未着手" else _NOT_DONE_RE.sub(" ", nfkc(ev[1]))).upper()
             if v == "完了":
+                # 「完了予定」「完了していない」「手配済」は完了の根拠にしない
+                ev_text = norm(_NOT_YET_RE.sub(" ", _NOT_DONE_RE.sub(" ", nfkc(ev[1])))).upper()
                 ev_text = _ARRANGED_RE.sub(" ", ev_text)
             hits = [w for w in words if norm(w).upper() in ev_text]
             if v == "完了" and hits == ["済"] and _PENDING_RE.search(ev_text):

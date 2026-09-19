@@ -29,7 +29,14 @@ _LEGEND_PAIR = re.compile(rf"[{_JUDGE_MARKS}ー―－\-]\s*[:：=＝]")
 MAX_LEGEND_CHARS = 60
 _SEQ_HEADERS = {"no", "№", "#", "項番", "番号", "順", "順番"}
 _TOTAL_WORDS = {"合計", "小計", "総計", "計", "合計数", "総合計"}
+# 合計行の先頭（「合計」「小計」「部品費計」「工数計」「部品費合計」）。
+# 「〜計」を全部合計とみなすと「温度計」「圧力計」「設計」などの行で読み取りが止まり、Markdownでも消えるので、
+# 合計の言い方だけにする（export.formats も同じ決まりを使う）
+TOTAL_LABEL_RE = re.compile(r"^(?:合計|小計|総計|総合計|合計数|計|.{0,6}(?:合計|小計)|"
+                            r".{0,6}(?:費|工数|個数|件数|台数|本数|枚数|金額|額)計)$")
 _NONE_MARKS = {"なし", "無し", "該当なし", "特になし", "-", "ー", "―", "‐", "/", "〃"}
+# 「上の行と同じ」の記号（″ は NFKC で ′′ になる）。明細表の値では上の行の同じ列の値に置き換える
+_DITTO_MARKS = {"〃", "′′", "同上", "仝"}
 # 見出しらしい書き出し: 「■ 交換部品」「【時系列】」「▼ 回答欄」「1. 時系列」「A. 機構部」
 _HEADING_START = re.compile(r"^(?:[■□◆◇●▼▽▶►【\[]|\d{1,2}[.)、](?!\d)|[a-z][.)、](?![a-z])|d[1-8](?=\D))")
 
@@ -81,7 +88,19 @@ class Table:
         rows = [r for r in rows if any(v.strip() and _compact(v) not in _NONE_MARKS for v in r)]
         if not rows:
             return None
+        _resolve_ditto(rows)
         return {"columns": columns, "rows": rows}
+
+
+def _resolve_ditto(rows: list[list[str]]) -> None:
+    """「〃」「同上」のセルを、上の行の同じ列の値にする（縦結合のセルと同じ扱い。1行だけ読んでも意味が通るように）。
+
+    上の行の値が空か、最初の行なら書かれたままにする。
+    """
+    for above, row in zip(rows, rows[1:]):
+        for i, v in enumerate(row):
+            if _compact(v) in _DITTO_MARKS and i < len(above) and above[i].strip()                     and _compact(above[i]) not in _DITTO_MARKS:
+                row[i] = above[i]
 
 
 def find_table(grid: SheetGrid, anchor: Cell, direction: str = "auto", stop_labels: set[str] | None = None) -> Table | None:
@@ -97,15 +116,22 @@ def find_table(grid: SheetGrid, anchor: Cell, direction: str = "auto", stop_labe
         if len(header) >= MIN_COLUMNS:
             return read_table(grid, anchor, header, stop_labels, last_row=anchor.max_row)
     if direction in ("auto", "below"):
-        for row in range(anchor.max_row + 1, anchor.max_row + 3):
+        marked = bool(_HEADING_START.match(_compact(anchor.text)))
+        row, last = anchor.max_row + 1, anchor.max_row + 2
+        while row <= last:
             starts = [c for c in _cells_in_row(grid, row) if anchor.col <= c.col <= anchor.max_col]
             if starts:
                 header = header_cells(grid, row, starts[0].col)
                 if len(header) >= MIN_COLUMNS:
                     return read_table(grid, anchor, header, stop_labels)
+                if marked and last == anchor.max_row + 2 and _label_value_row(grid, row):
+                    # 「■ 水平展開」の下に「展開区分｜☑同型機…」の1行があり、その下に列見出しが来る様式
+                    last, row = last + 1, row + 1
+                    continue
                 break
             if any(c.col <= anchor.max_col and c.max_col >= anchor.col for c in _cells_in_row(grid, row)):
                 break
+            row += 1
     return None
 
 
@@ -287,6 +313,74 @@ def merge_table_values(values: list[dict | None]) -> dict | None:
     return {"columns": columns, "rows": [row + [""] * (len(columns) - len(row)) for row in rows]}
 
 
+# ---- 区切りの見出し（区画）------------------------------------------------------------------
+# 発行側と回答側で同じ意味の欄が並ぶ帳票（「処置内容」と「▼ 回答欄」の下の「暫定対策（処置）」）で、
+# 項目がどちら側の欄かを見分けるための区画。区画 = 「■」「▼」「【】」「1.」などで始まる見出しのセルから、
+# 右は同じ高さにある次の見出しの手前まで（無ければシートの右端まで）、下は次の見出しまで。
+MAX_SECTION_CHARS = 60
+_SECTION_TAIL = re.compile(r"[(（].*$")
+
+
+@dataclass
+class Section:
+    key: str        # 区画の名前（比較用。「▼ 回答欄（宛先部署にて記入…）」「【回答欄】」→「回答」）
+    cell: Cell
+    right: int      # 区画の右端の列
+
+
+def section_key(cell: Cell) -> str:
+    """区画の見出しのセルの比較用の名前（section_name）。"""
+    return section_name(cell.text)
+
+
+def section_name(text) -> str:
+    """区画の見出しの比較用の名前。印・項番・括弧書き・末尾の「欄」「内容」を除く（版ごとの書き方の違いを吸収する）。
+
+    「▼ 回答欄（宛先部署にて記入し…）」「【回答欄】」「回答欄」→「回答」。帳票の種類の画面で入力された区画もこれでそろえる。
+    """
+    from excel.text import label_base, normalize_label, section_stripped
+
+    title = _title_text(text)
+    norm = normalize_label(_SECTION_TAIL.sub("", title)) or normalize_label(title)
+    norm = section_stripped(norm) or norm
+    return label_base(norm) or norm
+
+
+def _section_start(cell: Cell) -> bool:
+    """区画の見出しか（塗りつぶし・太字で、「■」「▼」「【】」「1.」などの印で始まる1行の短い文字列）。"""
+    if not isinstance(cell.value, str) or "\n" in cell.text or cell.inline is not None:
+        return False
+    if len(cell.norm) > MAX_SECTION_CHARS or pick_checked(cell.text) is not None:
+        return False
+    return (cell.filled or cell.bold) and bool(_HEADING_START.match(_compact(cell.text)))
+
+
+def sections(grid: SheetGrid) -> list[Section]:
+    """シートの区画（見出しの上→下、左→右の順）。"""
+    cached = getattr(grid, "_sections", None)
+    if cached is not None:
+        return cached
+    heads = [c for c in grid.text_cells() if _section_start(c)]
+    out: list[Section] = []
+    for head in heads:
+        # 同じ高さ（行が重なる）で右にある次の見出しの手前までを、この区画の横幅にする
+        right_heads = [h.col for h in heads if h.col > head.max_col and h.row <= head.max_row and h.max_row >= head.row]
+        out.append(Section(section_key(head), head, min(right_heads, default=grid.max_col + 1) - 1))
+    grid._sections = out
+    return out
+
+
+def section_of(grid: SheetGrid, cell: Cell) -> str:
+    """セルが入っている区画の名前。どの区画にも入らなければ ""。区画の見出しのセル自身はその区画に入る。"""
+    best: Section | None = None
+    for sec in sections(grid):
+        head = sec.cell
+        if head.row <= cell.row and head.col <= cell.col <= sec.right:
+            if best is None or head.row > best.cell.row or (head.row == best.cell.row and head.col > best.cell.col):
+                best = sec
+    return best.key if best else ""
+
+
 def table_header_keys(grid: SheetGrid) -> set[tuple[int, int]]:
     """明細表の列見出しのセル位置。"""
     return {(c.row, c.col) for t in detect_tables(grid) for c in t.header}
@@ -354,11 +448,15 @@ def legend_text(text) -> bool:
 
 def table_title(cell: Cell) -> str:
     """アンカーの表示名。「■ 経緯（時系列）」→「経緯（時系列）」。"""
-    text = _one_line(cell.text)
+    return _title_text(cell.text)
+
+
+def _title_text(raw) -> str:
+    text = _one_line(raw)
     text = re.sub(r"^[■□◆◇●▼▽▶►・*※\s]+", "", text)
     if text.startswith(("【", "[")) and text.endswith(("】", "]")):
         text = text[1:-1]
-    return text.strip(" :：") or _one_line(cell.text)
+    return text.strip(" :：") or _one_line(raw)
 
 
 # ---- 値（{"columns": [...], "rows": [[...]]}）の扱い -----------------------------------------
@@ -435,22 +533,38 @@ def _find_anchor(grid: SheetGrid, header: list[Cell]) -> tuple[Cell | None, int 
         if left is not None and left.max_col == first.col - 1 and left.max_row > row and left.row <= row \
                 and heading_like(left):
             return left, left.max_row
-    for above in (row - 1, row - 2):
-        if above < 1:
-            break
+    above, last = row - 1, row - 2
+    skipped = False
+    while above >= max(1, last):
         # 判定記号の凡例（「◎：主要因　○：影響あり　×：否定」）は飾りなので、見出しの右にあっても数に入れない
         in_span = [c for c in _cells_in_row(grid, above)
                    if c.col <= right and c.max_col >= first.col and not legend_text(c.text)]
         if not in_span:
+            above -= 1
             continue
         cell = in_span[0]
+        marked = bool(_HEADING_START.match(_compact(cell.text)))
         # 右に値が並ぶセル（「区分｜☑同型機」）はアンカーにしない。「■」「1.」で始まる見出しは右に凡例があってもよい
-        alone = len(in_span) == 1 or bool(_HEADING_START.match(_compact(cell.text)))
-        if alone and cell.col <= first.col + 1 and heading_like(cell) \
+        alone = len(in_span) == 1 or marked
+        if alone and cell.col <= first.col + 1 and heading_like(cell) and (marked or not skipped) \
                 and len(header_cells(grid, above, cell.col)) < MIN_COLUMNS:
             return cell, None
+        if not skipped and _label_value_row(grid, above):
+            # 「■ 水平展開」と列見出しの間に「展開区分｜☑同型機…」の1行がある様式: その上の「■」「1.」の見出しを見る
+            skipped, last, above = True, last - 1, above - 1
+            continue
         break
     return None, None
+
+
+def _label_value_row(grid: SheetGrid, row: int) -> bool:
+    """「展開区分｜☑同型機　□類似設備…」のような、見出し欄1つとその値だけの1行か（表の見出しと列見出しの間に挟まる行）。"""
+    cells = _cells_in_row(grid, row)
+    if len(cells) != 2:
+        return False
+    label, value = cells
+    return (heading_like(label) and label.filled and not _HEADING_START.match(_compact(label.text))
+            and not value.filled and value.col == label.max_col + 1 and value.max_row == label.max_row)
 
 
 def _cells_in_row(grid: SheetGrid, row: int) -> list[Cell]:
@@ -498,7 +612,7 @@ def _is_stop(cell: Cell, fills: set[str], stop_labels: set[str], first_col: int)
 def _is_total(cell: Cell) -> bool:
     if not isinstance(cell.value, str):
         return False
-    return cell.norm in _TOTAL_WORDS or (cell.filled and len(cell.norm) <= 8 and cell.norm.endswith("計"))
+    return cell.norm in _TOTAL_WORDS or (cell.filled and len(cell.norm) <= 8 and bool(TOTAL_LABEL_RE.match(cell.norm)))
 
 
 def _drop_seq_cell(row: list[str]) -> list[str]:

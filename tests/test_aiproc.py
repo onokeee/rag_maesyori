@@ -910,3 +910,121 @@ def test_estimate_from_counts():
     assert slow["minutes_by_tpm"] == pytest.approx(50.0) and slow["minutes"] == pytest.approx(50.0)
     assert estimate.estimate_from_counts(10, None, default_tokens_in=500)["basis"] == "default"
     assert estimate.percentile([1, 2, 3, 4], 75) == pytest.approx(3.25)
+
+
+# ---- 応答しない行の打ち切りと、呼び出し中の一時停止・中止 ----------------------------------------
+
+def test_hung_row_is_cut_at_row_deadline_and_job_moves_on(ai_app, fake, monkeypatch):
+    """1行が応答しなくても、タイムアウト×再試行回数ぶん待たずに行の上限で打ち切ってエラーにし、他の行は進む。"""
+    from tests.fake_servers import Reply
+
+    monkeypatch.setattr(llm, "LOCAL_TIMEOUT", 0.5)       # 行の上限は 0.5×ROW_DEADLINE_FACTOR = 1秒
+    seen = threading.Event()
+
+    def responder(body, srv):
+        if "ID抜け" in "\n".join(t for _, t in segments_of(body)):
+            seen.set()
+            return Reply(content="{}", delay=3)           # 応答しない（タイムアウト）
+        return keep_scenario(body, srv)
+
+    fake.responder = responder
+    iid = _make_import(ai_app)
+    t0 = time.monotonic()
+    job = _run_job(ai_app, iid, concurrency=2, stage_ids=["log"])
+    elapsed = time.monotonic() - t0
+    assert job["status"] == "done", job["message"]
+    # 以前は 6回×0.5秒＋待機（2+4+8+16+32秒）で1分以上かかった
+    assert elapsed < 20
+    m = _item_map(ai_app)
+    assert m["R5"]["status"] == "error" and "打ち切りました" in m["R5"]["error"]
+    assert "1秒以内" in m["R5"]["error"] and "エラーだけ再実行" in m["R5"]["error"]
+    assert m["R1"]["status"] == "ok"
+    assert seen.wait(1)
+    time.sleep(3)   # 見捨てた要求のハンドラが終わるまで待つ（次のテストのサーバーに影響させない）
+
+
+def test_call_with_retry_deadline_reports_last_error(ai_app, fake):
+    """5xx が続く呼び出しは、行の上限を超える待機をせずに最後のエラーを添えて打ち切る。"""
+    from tests.fake_servers import Reply
+
+    fake.responder = lambda body, srv: Reply(status=500, body={"error": {"message": "internal"}})
+    with ai_app.app_context():
+        settings = llm.job_client_settings()
+    t0 = time.monotonic()
+    with pytest.raises(llm.LLMCallError) as e:
+        runner.call_with_retry(settings, [{"role": "user", "content": "x"}], None, None,
+                               deadline=time.monotonic() + 1.0)
+    assert time.monotonic() - t0 < 1.5
+    assert e.value.kind == "row" and e.value.status == 500
+    assert str(e.value).startswith("AIサーバーでエラーが発生しました（500）。") and "打ち切りました" in str(e.value)
+    # 上限を渡さなければ従来どおり（kind=retry のまま投げる）
+    with pytest.raises(llm.LLMCallError) as e:
+        runner.call_with_retry(settings, [{"role": "user", "content": "x"}], None, None, max_retries=0)
+    assert e.value.kind == "retry"
+
+
+def test_pause_and_cancel_are_responsive_while_a_call_is_in_flight(ai_app, fake):
+    """応答の遅い呼び出しの最中でも、一時停止・中止は数秒で効く（応答を待ち切らない）。"""
+    from tests.fake_servers import Reply
+
+    released = threading.Event()
+
+    def slow(body, srv):
+        if segments_of(body):
+            released.wait(20)                              # 行の呼び出しは返ってこない
+            return Reply(content="{}")
+        return keep_scenario(body, srv)
+
+    fake.responder = slow
+    iid = _make_import(ai_app, rows={"R1": ROWS["R1"], "R2": ROWS["R2"]})
+    try:
+        with ai_app.app_context():
+            job_id = runner.start_ai_job(iid, concurrency=1, stage_ids=["log"])
+            _wait(lambda: any(segments_of(r["body"]) for r in fake.chat_requests()))
+            t0 = time.monotonic()
+            assert jobs.request_pause(job_id)
+            _wait(lambda: jobs.get_job(job_id)["status"] == "paused", timeout=10)
+            assert time.monotonic() - t0 < runner.STOP_GRACE + 3
+            assert all(v["status"] != "error" for v in _item_map(ai_app).values())   # 見捨てた行はエラーにしない
+            assert jobs.request_resume(job_id)
+            _wait(lambda: sum(1 for r in fake.chat_requests() if segments_of(r["body"])) >= 2)   # 再開したら送り直す
+            t0 = time.monotonic()
+            assert jobs.request_cancel(job_id)
+            job = jobs.wait_job(job_id, timeout=10)
+            assert job["status"] == "cancelled" and time.monotonic() - t0 < runner.STOP_GRACE + 3
+    finally:
+        released.set()
+
+
+def test_cancel_is_responsive_while_detecting_the_output_mode(ai_app, fake):
+    """開始時の方式判定の呼び出しが返らなくても、中止はすぐ効く。"""
+    from tests.fake_servers import Reply
+
+    released = threading.Event()
+
+    def hung_probe(body, srv):
+        released.wait(20)
+        return Reply(content='{"ok": true}')
+
+    fake.responder = hung_probe
+    iid = _make_import(ai_app, rows={"R1": ROWS["R1"]})
+    try:
+        with ai_app.app_context():
+            job_id = runner.start_ai_job(iid, concurrency=1, stage_ids=["log"])
+            _wait(lambda: len(fake.chat_requests()) >= 1)
+            t0 = time.monotonic()
+            assert jobs.request_cancel(job_id)
+            job = jobs.wait_job(job_id, timeout=10)
+            assert job["status"] == "cancelled" and time.monotonic() - t0 < 3
+    finally:
+        released.set()
+
+
+def test_estimate_duration_text_says_under_a_minute():
+    """1分に満たない見積もりは「約0分」ではなく「1分未満」と出す。"""
+    assert estimate.duration_text(0) == "1分未満" and estimate.duration_text(0.04) == "1分未満"
+    assert estimate.duration_text(0.99) == "1分未満"
+    assert estimate.duration_text(1.0) == "約1分" and estimate.duration_text(3.8) == "約4分"
+    tiny = estimate.estimate_from_counts(1, [{"tokens_in": 100, "tokens_out": 50, "latency_ms": 1000}])
+    assert tiny["minutes"] == 0.0 and tiny["duration_text"] == "1分未満"
+    assert estimate.estimate_from_counts(0)["duration_text"] == "1分未満"

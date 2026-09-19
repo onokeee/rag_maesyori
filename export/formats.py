@@ -15,7 +15,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from excel.tables import is_table_value, table_row_items
+from excel.tables import TOTAL_LABEL_RE, is_table_value, table_row_items
 from excel.text import nfkc_value as _excel_nfkc_value, normalize_label as _normalize_label
 from pattern.dictionary import is_person_field, is_person_label
 from pattern.model import DEFAULT_MD_OPTIONS, DEFAULT_TITLE_KEYS
@@ -38,8 +38,8 @@ MAX_LABEL_VALUE_CHARS = 20
 AI_MARK = "（AI入力）"
 
 _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?: \d{2}:\d{2})?$")  # 時刻付き（発生日時）も
-# 明細表の合計行の先頭（「合計」「小計」「部品費計」）
-_TOTAL_LABEL = re.compile(r"^(?:合計|小計|総計|計|.{1,6}計)$")
+# 明細表の合計行の先頭（読み取り側と同じ決まり。excel.tables.TOTAL_LABEL_RE）
+_TOTAL_LABEL = TOTAL_LABEL_RE
 
 
 # ---- JSON ---------------------------------------------------------------------
@@ -60,7 +60,7 @@ def build_json(doc: dict, extraction: dict) -> dict:
             "file_name": doc["file_name"],
             "file_hash": doc["file_hash"],
             "sheets": extraction["sheets"],
-            "url": f"/forms/{doc['id']}/original",
+            # 元ファイルへのリンクは書かない（ダウンロードで帳票ごと消すため、リンク先が残らない）
         },
     }
 

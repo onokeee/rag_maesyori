@@ -26,6 +26,13 @@ def percentile(values, p: float = 75) -> float:
     return vals[lo] + (vals[hi] - vals[lo]) * (k - lo)
 
 
+def duration_text(minutes: float) -> str:
+    """見積もり時間の表示。1分に満たなければ「約0分」ではなく「1分未満」。"""
+    if minutes < 1:
+        return "1分未満"
+    return f"約{math.ceil(round(minutes, 1))}分"
+
+
 def estimate_from_counts(calls: int, trial_stats: list[dict] | None = None, *, concurrency: int = 1,
                          tpm: int | None = None, default_tokens_in: int = 0, default_tokens_out: int = 0,
                          local: bool = False) -> dict:
@@ -52,6 +59,7 @@ def estimate_from_counts(calls: int, trial_stats: list[dict] | None = None, *, c
         "tokens_in": int(round(calls * tin)),
         "tokens_out": int(round(calls * tout)),
         "minutes": round(minutes, 1),
+        "duration_text": duration_text(minutes),
         "minutes_by_concurrency": round(minutes_conc, 1),
         "minutes_by_tpm": round(minutes_tpm, 1) if minutes_tpm is not None else None,
         "per_call": {"tokens_in": round(tin), "tokens_out": round(tout), "seconds": round(sec, 2)},

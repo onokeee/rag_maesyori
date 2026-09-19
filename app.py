@@ -191,6 +191,9 @@ def _cleanup_leftovers(app: Flask) -> None:
             # もう無い取り込みの AI整形の結果と、どこからも使われない AI の応答も消す（データを残さない）。
             # ai_items が先に消えていて（取り込み設定の削除など）応答だけ残っていることもあるので、毎回見る。
             purge.sweep_orphan_ai(db)
+            # 前の版で空になった表に残っている番号の続き（何件取り込んだか）も忘れる（design.md 3.3「履歴は持たない」）
+            if purge.forget_id_counters(db):
+                db.execute("PRAGMA wal_checkpoint(TRUNCATE)")   # 置き換える前の値を app.db-wal に残さない
         if removed:
             print(f"[app] 参照されていないアップロードファイルを {removed} 件片付けました")
         if removed_dirs:
@@ -215,6 +218,15 @@ def _recover_jobs(app: Flask) -> None:
 HOST = "127.0.0.1"
 PORT = 5000
 THREADS = 8
+# waitress が応答の本文を先読みして溜める上限（既定は 16MB）。
+# 溜められる分はアプリ側では「送り終えた」ように見えるため、既定のままだと 16MB 未満の zip は
+# 途中で通信が切れても消えてしまう（core/purge.purge_after_send・design.md 3.3「欠けないダウンロード」）。
+# 小さくすると、送れた分だけ読み進めるので途中で切れたことに気づける。ループバックでは速度はほぼ変わらない
+# （30MB の本文で 16MB: 約130ms、16KB: 約100ms）。それでも最後の数十KB（この上限＋OS の送受信の溜め。
+# 2026-09-19 の測定で約48KB）は相手が受け取る前に送り終えたことになるので、それより小さい md・zip は
+# 途中で切れても消える（design.md 3.3・8.0）。
+OUTBUF_HIGH_WATERMARK = 16 * 1024
+WAITRESS_OPTIONS = {"threads": THREADS, "outbuf_high_watermark": OUTBUF_HIGH_WATERMARK}
 # エラー画面に詳細を出すか。通常は False のまま。
 DEBUG = False
 
@@ -235,4 +247,4 @@ if __name__ == "__main__":
             application.run(host=HOST, port=PORT, debug=False)
         else:
             print(f"[app] http://localhost:{PORT} で起動しました")
-            serve(application, host=HOST, port=PORT, threads=THREADS)
+            serve(application, host=HOST, port=PORT, **WAITRESS_OPTIONS)

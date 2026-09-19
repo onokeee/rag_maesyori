@@ -127,7 +127,7 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
     p = pos
     w = HeadWhen(start=pos, end=pos)
     found = False
-    if not any(r.match(view, p) for r in not_date_res):
+    if not (not_date_res and any(r.match(view, p) for r in not_date_res)):
         got = _match_date(view, p, line_start)
         if got:
             w.year, w.month, w.day, w.full, p = got

@@ -2,7 +2,7 @@
 
 aiagent_minimal_rag_tougou の llm.py / models.py と同じ仕様:
   - 接続先とAPIキーは env（OPENAI_BASE_URL / OPENAI_API_KEY）が既定。
-    画面（AI設定）で保存した data/model_settings.yaml の値があればそちらを優先する。
+    画面（AI接続）で保存した data/model_settings.yaml の値があればそちらを優先する。
   - URL はフルパス2本（…/chat/completions と …/models）で持つ。
   - 選べるモデルは「画面で登録した候補 → env の OPENAI_MODELS」の順。既定モデルは必ず候補に入る。
   - モデルが受け付けない引数（temperature / max_tokens / reasoning_effort）はエラー文を見て直して投げ直す。
@@ -111,7 +111,7 @@ def choose_model(model: str) -> str:
     if not model:
         raise ValueError("モデル名が空です。")
     if model not in available():
-        raise ValueError(f"{model} は選べません。AI設定で候補に追加してください。")
+        raise ValueError(f"{model} は選べません。「AI接続」で候補に追加してください。")
     set_pref("model", model)
     return model
 
@@ -200,7 +200,7 @@ def admin_status() -> dict:
 
 
 def save_admin(data: dict) -> dict:
-    """「AI設定」画面からの保存。"""
+    """「AI接続」画面からの保存。"""
     models = [str(m).strip() for m in (data.get("models") or []) if str(m).strip()]
     if not models:
         raise ValueError("選択できるモデルを1つ以上残してください。")
@@ -367,7 +367,7 @@ def _create(**kwargs):
 def ask_json(system: str, user: str, what: str = "AIの応答", model: str | None = None) -> dict:
     """AIに聞いて、応答からJSONオブジェクトを取り出す（``` で囲まれていても可）。"""
     if not is_configured():
-        raise LLMNotConfigured("AIの接続先が未設定です。「AI設定」でAPIキーと接続先を設定してください。")
+        raise LLMNotConfigured("AIの接続先が未設定です。「AI接続」でAPIキーと接続先を設定してください。")
     kwargs = dict(
         model=model or current_model(),
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -394,13 +394,18 @@ def ask_json(system: str, user: str, what: str = "AIの応答", model: str | Non
 
 
 def friendly_error(exc: Exception) -> str:
-    if isinstance(exc, (LLMNotConfigured, RateLimited, ValueError)):
+    if isinstance(exc, (LLMNotConfigured, RateLimited, ValueError, LLMCallError)):
         return str(exc)
+    from openai import APIConnectionError, APITimeoutError
+
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        # SDK の英語の文（Connection error. など）ではなく、ジョブと同じ日本語の説明を出す
+        return str(classify_error(exc, current_model()))
     status = getattr(exc, "status_code", None)
     if status in (401, 403):
-        return "APIキーが拒否されました。「AI設定」でキーを確認してください。"
+        return "APIキーが拒否されました。「AI接続」でキーを確認してください。"
     if status == 404:
-        return f"モデルまたは接続先が見つかりません（{current_model()}）。「AI設定」を確認してください。"
+        return f"モデルまたは接続先が見つかりません（{current_model()}）。「AI接続」を確認してください。"
     text = str(exc)
     return f"AI呼び出しに失敗しました: {text[:160]}"
 
@@ -485,7 +490,7 @@ def job_client_settings(model: str | None = None, params: dict | None = None) ->
     fingerprint にキーは含めない。ジョブの params に保存するときは public_settings() でキーを外す。
     """
     if not is_configured():
-        raise LLMNotConfigured("AIの接続先が未設定です。「AI設定」でAPIキーと接続先を設定してください。")
+        raise LLMNotConfigured("AIの接続先が未設定です。「AI接続」でAPIキーと接続先を設定してください。")
     chat_url = llm_chat_url()
     local = is_local_endpoint(chat_url)
     if params is None:
@@ -578,11 +583,11 @@ def classify_error(exc: Exception, model: str = "") -> LLMCallError:
         return LLMCallError("fatal", "AIの接続先に接続できませんでした。接続先URLとサーバーの起動を確認してください。",
                             None, None, model)
     if status in (401, 403):
-        return LLMCallError("fatal", "APIキーが拒否されました。「AI設定」でキーを確認してください。", status, None, model)
+        return LLMCallError("fatal", "APIキーが拒否されました。「AI接続」でキーを確認してください。", status, None, model)
     if status == 402 or "insufficient_quota" in low:
         return LLMCallError("fatal", "APIの残高・利用枠が不足しています。", status, None, model)
     if status == 404 or ("model" in low and ("not found" in low or "does not exist" in low)):
-        return LLMCallError("fatal", f"モデルまたは接続先が見つかりません（{model}）。「AI設定」を確認してください。",
+        return LLMCallError("fatal", f"モデルまたは接続先が見つかりません（{model}）。「AI接続」を確認してください。",
                             status, None, model)
     if status == 429 or "rate_limit" in low:
         return LLMCallError("retry", "混み合っています（レート制限）。", status, _retry_after(exc), model)
@@ -606,22 +611,26 @@ def chat_raw(settings: dict, messages: list[dict], response_format: dict | None 
     """1回の chat 呼び出し（SDK の再試行なし）。受け付けない引数だけはエラー文から直して投げ直す。
 
     失敗は LLMCallError（kind=fatal/retry/row）。レート制限の待機と再試行は呼び出し側（ジョブ）で行う。
+    timeout を渡すとこの1回だけその秒数で打ち切る（クライアントは設定のタイムアウトのものを使い回す。
+    行ごとの残り時間で毎回違う値になっても、クライアントを作り増やさない）。
     """
     model = str(settings.get("model") or "")
-    timeout = float(timeout or settings.get("timeout") or CLOUD_TIMEOUT)
+    base_timeout = float(settings.get("timeout") or CLOUD_TIMEOUT)
+    timeout = float(timeout or base_timeout)
+    per_request = {"timeout": timeout} if timeout != base_timeout else {}
     kwargs = dict(settings.get("params") or {})
     kwargs.update(model=model, messages=messages)
     if response_format:
         kwargs["response_format"] = response_format
     if max_tokens:
         kwargs["max_tokens"] = int(max_tokens)
-    cli = _job_client(settings, timeout)
+    cli = _job_client(settings, base_timeout)
     fixes = 0
     while True:
         attempt = _apply_quirks(kwargs)
         started = time.monotonic()
         try:
-            raw = cli.chat.completions.with_raw_response.create(**attempt)
+            raw = cli.chat.completions.with_raw_response.create(**attempt, **per_request)
             resp = raw.parse()
         except Exception as e:
             err = classify_error(e, model)

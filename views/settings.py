@@ -178,7 +178,7 @@ def import_table_template():
         return redirect(back)
     try:
         data = json.loads(storage.read(5 * 1024 * 1024).decode("utf-8-sig"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):  # 深く入れ子のJSONは RecursionError になる
         flash(NOT_A_TEMPLATE_JSON, "error")
         return redirect(back)
     spec_dict = data.get("spec") if isinstance(data, dict) else None

@@ -78,6 +78,18 @@ class RecordRow:
                 "source": self.source, "warnings": self.warnings}
 
 
+# 「上と同じ」の記号。セル全体がこれだけなら直前のデータ行の値で補う（NFKC で ″ は ′′ になる）
+DITTO_MARKS = {"〃", "″", "′′", "同上", "々", "仝"}
+DITTO_ROLES = ("date", "entity", "entity_label", "category", "attribute")
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def is_ditto(text) -> bool:
+    """セル全体が「〃」「同上」などの「上と同じ」の記号か。"""
+    t = str(text or "").strip()
+    return bool(t) and (t in DITTO_MARKS or unicodedata.normalize("NFKC", t).strip() in DITTO_MARKS)
+
+
 @dataclass
 class ImportStats:
     file: str = ""
@@ -98,6 +110,7 @@ class ImportStats:
     year_context_label: str = ""
     error_values: int = 0
     filled_down: dict = field(default_factory=dict)
+    ditto_filled: dict = field(default_factory=dict)  # 列キー → 「〃」「同上」を直前の行の値で補った数
     unused_headers: list = field(default_factory=list)
     missing_required: list = field(default_factory=list)
     missing_optional: list = field(default_factory=list)
@@ -566,6 +579,7 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
 
     anchors: dict[tuple[int, int], tuple[object, str, str | None]] = {}
     prev_raw: dict[str, tuple[object, str, str | None]] = {}
+    last_row_raw: dict[str, tuple[object, str, str | None]] = {}  # 直前のデータ行の値（「〃」の補完に使う）
     pending: list[RecordRow] = []
     last_record: RecordRow | None = None
     running: dict[int, float] = {}
@@ -690,11 +704,24 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
         record_warnings: list[str] = []
         originals: dict[str, str] = {}
         values: dict[str, object] = {}
+        row_raw: dict[str, tuple[object, str, str | None]] = {}
         for col, pos in columns:
             raw = cell_raw(row, pos)
+            if col.role in DITTO_ROLES and is_ditto(raw[1]):
+                # 「〃」「同上」は「上と同じ」の書き方。空欄は上の値の設定に関わらず、直前のデータ行の値で補う
+                above = last_row_raw.get(col.key)
+                if above is not None:
+                    raw = above
+                    stats.ditto_filled[col.key] = stats.ditto_filled.get(col.key, 0) + 1
+                else:
+                    add_row_issue(Issue("warning", "ditto_unfilled",
+                                        f"{col.display}の「{raw[1]}」を補えませんでした（上の行に値がありません）",
+                                        row=row.index, column=col.display))
+            row_raw[col.key] = raw
             if col.fill_down_blank and not raw[1] and raw[0] is None:
                 if col.key in prev_raw:
                     raw = prev_raw[col.key]
+                    row_raw[col.key] = raw
                     stats.filled_down[col.key] = stats.filled_down.get(col.key, 0) + 1
             elif raw[1] or raw[0] is not None:
                 prev_raw[col.key] = raw
@@ -707,6 +734,7 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
 
         for col, pos in measure_cols:
             accumulate(pos, values.get(col.key))
+        last_row_raw = {k: v for k, v in row_raw.items() if v[1] or v[0] is not None}
         record = RecordRow("", values, originals, src, record_warnings)
         pending.append(record)
         last_record = record
@@ -735,10 +763,15 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
         v = rec.values.get(date_key)
         if v:
             s = str(v)
-            dates.append(s[:10])
+            if _ISO_DATE_RE.fullmatch(s[:10]):
+                dates.append(s[:10])  # 変換できず原文のまま残った「不明」などは日付の範囲に入れない
             if len(s) >= 7 and s[4] == "-":
                 months[s[:7]] += 1
     stats.months = dict(sorted(months.items()))
+    if stats.ditto_filled:
+        names = {c.key: c.display for c in spec.columns}
+        detail = "、".join(f"{names.get(k, k)} {n}件" for k, n in stats.ditto_filled.items())
+        issues.append(Issue("warning", "ditto_filled", f"「〃」「同上」を直前の行の値で補いました（{detail}）"))
     stats.date_min = min(dates) if dates else None
     stats.date_max = max(dates) if dates else None
     stats.records = len(pending)

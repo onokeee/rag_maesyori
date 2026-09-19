@@ -494,8 +494,10 @@ class ExcelSource:
             return
         default = self._default_style
         style_of = self._style
+        done = -1  # 読み終えた行（-1: まだ行を読み始めていない）
         try:
             with zipfile.ZipFile(self.path) as zf:
+                done = 0
                 parsed = self._parsed_rows(zf, meta, end)
                 pending = next(parsed, None)
                 for r in range(1, end + 1):
@@ -533,8 +535,13 @@ class ExcelSource:
                             continue
                         row_cells.append(CellInfo(value=value, text=cell_text(value), number_format=number_format,
                                                   bold=bold, strike=strike, fill=fill, merged_anchor=anchor))
+                    done = r
                     yield SourceRow(index=r, cells=row_cells, hidden=_row_hidden(attrs))
         except (UploadError, GeneratorExit):
             raise
         except Exception as e:
+            if done >= 0:
+                # 途中の行の値（<v>NaN</v> など Excel 以外のソフトが書いた値）が読めない。場所を示す
+                raise UploadError(f"{max(done, begin - 1) + 1}行目付近の値を読めません（NaN など）。"
+                                  "Excelで開いて値を直し、保存し直してください") from e
             raise UploadError(_OPEN_ERROR) from e

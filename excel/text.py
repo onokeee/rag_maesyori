@@ -49,6 +49,9 @@ _VALUE_UNIT_RE = re.compile(r"^-?(?:\d+(?:\.\d+)?|\.\d+)\s*([^\d\s.,\-]{1,4})$")
 _UNIT_AFTER_RE = re.compile(r"\s*([^\d\s.,\-:/~()\[\]{}<>、。・]{1,4})(?![^\d\s.,\-:/~()\[\]{}<>、。・])")
 # 会計の書き方の負号「▲50万円」「△0.8」（一覧表の側と同じく負の数として読む）
 _MINUS_MARK_RE = re.compile(r"^[△▲]\s*(?=\d)")
+# 見えない文字（ゼロ幅スペース・語結合子・BOM・方向制御・ソフトハイフン）。Web や Teams から貼った文字に混ざり、
+# NFKC でも消えないので、ラベルが見つからない・同じ値が別の値になる。セルの文字とラベル・値の正規化で消す
+_INVISIBLE_RE = re.compile("[\u200b-\u200d\u2060\ufeff\u202a-\u202e\u2066-\u2069\u00ad]")
 # 見出しの括弧書きのうち単位とみなす和文（「発生原因（推定）」「担当（記入）」の括弧書きは単位でない）。
 # 英字・記号の単位（h, min, mm, %, ℃）と1文字の和文（分・円・枚・個）はこの一覧に無くても単位とみなす
 _JA_UNITS = {"時間", "千円", "万円", "百万円", "人日", "人時", "日間", "ヶ月", "か月", "カ月", "箇所", "ケ所"}
@@ -78,9 +81,14 @@ def normalize_label(text) -> str:
 
     例: 「設備№：」「 設備 No. 」「【設備NO】」→ "設備no"
     """
-    s = unicodedata.normalize("NFKC", str(text))
+    s = unicodedata.normalize("NFKC", strip_invisible(str(text)))
     s = re.sub(r"\s+", "", s)
     return _strip_edges(s).lower()
+
+
+def strip_invisible(text: str) -> str:
+    """見えない文字（ゼロ幅スペースなど）を消す。多くの文字列には無いので、先に確かめてから置き換える。"""
+    return _INVISIBLE_RE.sub("", text) if _INVISIBLE_RE.search(text) else text
 
 
 def _strip_edges(s: str) -> str:
@@ -191,7 +199,7 @@ def label_base(norm: str) -> str:
 
 
 def normalize_sheet_name(name) -> str:
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(name))).lower()
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", strip_invisible(str(name)))).lower()
 
 
 def nfkc_value(text) -> str:
@@ -201,7 +209,7 @@ def nfkc_value(text) -> str:
     """
     if text is None:
         return ""
-    s = unicodedata.normalize("NFKC", str(text)).replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
+    s = unicodedata.normalize("NFKC", strip_invisible(str(text))).replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
     lines = [_SPACES_RE.sub(" ", line).strip() for line in s.split("\n")]
     while lines and not lines[0]:
         lines.pop(0)
@@ -322,7 +330,7 @@ def cell_text(value) -> str:
         return f"{sign}{hours}:{minutes:02d}" + (f":{secs:02d}" if secs else "")
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
-    text = str(value).replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
+    text = strip_invisible(str(value)).replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
     return text.strip()
 
 

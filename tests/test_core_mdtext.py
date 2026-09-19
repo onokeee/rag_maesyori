@@ -54,6 +54,10 @@ def test_estimate_tokens():
     assert estimate_tokens("abcd") == 2
     assert estimate_tokens("CMP研磨") == 4
     assert estimate_tokens("あ" * 100) == 110
+    # ASCII をまとめて数えても、1文字ずつ数えたときと同じ（U+007F/U+0080 の境目・絵文字・孤立サロゲート）
+    assert estimate_tokens("\x7f\x80") == 2
+    assert estimate_tokens("a\U0001F600b") == 3
+    assert estimate_tokens("\ud800x") == 2
 
 
 def test_join_blocks():

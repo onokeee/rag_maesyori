@@ -34,6 +34,8 @@ def detect_images(path: str | Path) -> list[dict]:
             return results
         workbook = ET.fromstring(zf.read(workbook_part))
         workbook_rels = _rels(zf, names, workbook_part)
+        # 複数のシートが同じ drawing を指すことがあるので、drawing ごとに1回だけ読む
+        parsed: dict[str, ET.Element] = {}
 
         for sheet in workbook.findall("main:sheets/main:sheet", NS):
             sheet_part = workbook_rels.get(sheet.get(R_ID), ("", ""))[1]
@@ -42,7 +44,9 @@ def detect_images(path: str | Path) -> list[dict]:
             for rtype, drawing_part in _rels(zf, names, sheet_part).values():
                 if not rtype.endswith("/drawing") or drawing_part not in names:
                     continue
-                results.extend(_images_in_drawing(zf.read(drawing_part), sheet.get("name")))
+                if drawing_part not in parsed:
+                    parsed[drawing_part] = ET.fromstring(zf.read(drawing_part))
+                results.extend(_images_in_drawing(parsed[drawing_part], sheet.get("name")))
     return results
 
 
@@ -62,9 +66,9 @@ def _rels(zf: zipfile.ZipFile, names: set[str], part: str) -> dict[str, tuple[st
     return out
 
 
-def _images_in_drawing(xml: bytes, sheet_name: str) -> list[dict]:
+def _images_in_drawing(root: ET.Element, sheet_name: str) -> list[dict]:
     images = []
-    for anchor in ET.fromstring(xml):
+    for anchor in root:
         if anchor.tag.rsplit("}", 1)[-1] not in ANCHOR_TAGS:
             continue
         location = _anchor_location(anchor)
