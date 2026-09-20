@@ -132,7 +132,6 @@ def test_form_rows_roundtrip_unit_rag_output_and_title_fields():
     meta, sheet_rows, field_rows, errors = parse_pattern_form(form)
     assert errors == []
     assert meta["title_fields"] == ["report_id", "equipment_id"]
-    assert meta["md_options"]["omit_person_fields"] is False  # チェックなしで送信された
     pattern = rows_to_pattern(3, meta, sheet_rows, field_rows)
     work = pattern.fields[2]
     assert (work.unit, work.rag_output) == ("時間", "omit")
@@ -140,9 +139,6 @@ def test_form_rows_roundtrip_unit_rag_output_and_title_fields():
     _, rows = pattern_to_rows(pattern)
     assert rows[2]["unit"] == "時間" and rows[2]["rag_output"] == "omit"
     assert pattern_to_meta(pattern)["title_fields"] == ["report_id", "equipment_id"]
-
-    meta2, _, _, _ = parse_pattern_form({k: v for k, v in form.items() if k != "md_options_form"})
-    assert meta2["md_options"]["omit_person_fields"] is True  # 設定欄のない画面からは既定のまま
 
 
 def test_extraction_carries_unit_rag_output_and_title_fields(repair_infos):

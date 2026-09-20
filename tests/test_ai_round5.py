@@ -1,11 +1,11 @@
-"""AI まわり（5巡目）：レート制限が続くときの一時停止、方式判定の出力上限、帳票AIのクライアント・応答の読み取り、
+"""AI まわり（5巡目）：レート制限が続くときの一時停止、方式判定の出力上限、AIのクライアント・応答の読み取り、
 一時停止を頼んだ直後の画面。"""
 import pytest
 
 from aiproc import items, runner
 from core import jobs
 from models import database
-from services import ai_assist, llm
+from services import llm
 from tests.fake_servers import Reply, keep_scenario, segments_of
 from tests.test_aiproc import ROWS, _make_import, _wait, ai_app, fake  # noqa: F401  (fixture)
 
@@ -90,7 +90,7 @@ def test_detect_mode_truncated_every_time_is_not_remembered(ai_app, fake):
         assert (s["chat_url"], "gpt-test") not in llm._MODES     # 次回また判定する
 
 
-# ---- R5-AI-3 帳票AIのクライアントは明示タイムアウト・SDK の再試行なし ------------------------------------
+# ---- R5-AI-3 AIのクライアントは明示タイムアウト・SDK の再試行なし ------------------------------------
 
 def test_ask_json_client_has_finite_timeout_and_no_sdk_retries(ai_app, fake):
     with ai_app.app_context():
@@ -116,48 +116,6 @@ def test_ask_json_strips_think_blocks_and_errors_in_japanese(ai_app, fake):
         assert llm.friendly_error(e.value) == str(e.value)
 
 
-# ---- R5-AI-6 fill_missing は想定外の型を捨て、途中で失敗しても一部だけ入力済みにしない -----------------------
-
-class _Info:
-    grids = {"Sheet1": object()}
-    date1904 = False
-
-
-def _field(name):
-    return {"field_name": name, "display_name": name, "data_type": "text", "value": None}
-
-
-def test_fill_missing_ignores_odd_types_from_ai(monkeypatch, app):
-    reply = {"values": {"a": {"value": "山田", "sheet": ["Sheet1"], "cell": {"x": 1}},
-                        "b": {"value": ["x"], "sheet": "Sheet1", "cell": "B2"},
-                        "c": {"value": "3号機", "sheet": "Sheet1", "cell": " C3 "}}}
-    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: reply)
-    monkeypatch.setattr(llm, "current_model", lambda: "gpt-test")
-    monkeypatch.setattr(ai_assist, "_dump_cells", lambda info, sheets: [])
-    extraction = {"fields": [_field("a"), _field("b"), _field("c")], "sheets": ["Sheet1"]}
-    with app.app_context():
-        assert ai_assist.fill_missing(_Info(), extraction) == ["a", "c"]
-    a, b, c = extraction["fields"]
-    assert a["value"] == "山田" and a["sheet"] is None and a["value_cell"] is None and a["ai_filled"]
-    assert b["value"] is None and "ai_filled" not in b
-    assert c["sheet"] == "Sheet1" and c["value_cell"] == "C3"
-
-
-def test_fill_missing_leaves_no_partial_fill_when_it_fails(monkeypatch, app):
-    reply = {"values": {"a": {"value": "山田"}, "b": {"value": "2026/13/45"}}}
-    monkeypatch.setattr(llm, "ask_json", lambda *a, **k: reply)
-    monkeypatch.setattr(llm, "current_model", lambda: "gpt-test")
-    monkeypatch.setattr(ai_assist, "_dump_cells", lambda info, sheets: [])
-
-    def boom(*a, **k):
-        raise RuntimeError("想定外")
-    monkeypatch.setattr(ai_assist, "to_date", boom)
-    extraction = {"fields": [_field("a"), dict(_field("b"), data_type="date")], "sheets": ["Sheet1"]}
-    with app.app_context(), pytest.raises(RuntimeError):
-        ai_assist.fill_missing(_Info(), extraction)
-    assert all(f["value"] is None and "ai_filled" not in f for f in extraction["fields"])
-
-
 # ---- R5-AI-4 一時停止を頼んだ直後（まだ実行中）でも［再開］を出す ------------------------------------------
 
 def test_ai_page_shows_resume_while_pause_is_pending(ai_app):
@@ -169,5 +127,8 @@ def test_ai_page_shows_resume_while_pause_is_pending(ai_app):
                      "updated_at) VALUES ('ai_format', 'table_import', ?, 'running', 1, ?, ?, ?)", (iid, now, now, now))
         conn.commit()
         conn.close()
-    page = ai_app.test_client().get(f"/tables/imports/{iid}/ai").get_data(as_text=True)
-    assert "/ai/resume" in page and "/ai/pause" not in page and "一時停止中…" in page
+    from tests.tables_helpers import panel_html
+
+    page = panel_html(ai_app.test_client(), iid, "ai")
+    assert 'data-ai-control="resume"' in page and 'data-ai-control="pause"' not in page
+    assert "一時停止中…" in page

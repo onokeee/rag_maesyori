@@ -381,16 +381,77 @@ def column_value(value, label: str):
     return "\n".join(cells) if cells else None
 
 
-def evaluate_template(folder: Path, n_samples: int, offset: int = 0) -> dict:
+def click_rows(sample_infos: list, name: str) -> tuple[list[dict], list[dict]]:
+    """画面と同じ「見出しのセル → 値のセル」のクリックで種類を作る（どのセルを押すかは自動で選ぶ）。
+
+    人が読み取りたい欄は、見本から候補を作る旧方式が選ぶ欄と同じとみなし、その欄の見出しセルと値セルを
+    クリックしたことにする。見本ごとに見出しの書き方が違う欄は、見本の数だけクリックする（画面と同じで、
+    辞書で同じ項目と分かる欄はその項目の見出しに足され、分からない欄は別の項目になる）。
+    """
+    from excel.extractor import locate_table, locate_value
+    from pattern.clicks import click_field, merge_labels, merge_target, split_rows
+    from pattern.dictionary import DICTIONARY_NORMS
+
+    meta = {"name": name, "version": "eval"}
+    base_sheets, base_fields = suggest_rows(sample_infos)
+    base = rows_to_pattern(1, meta, base_sheets, base_fields)
+    stop = base.label_norms() | DICTIONARY_NORMS
+    sheet_rows: list[dict] = []
+    rows: list[dict] = []
+    used: set[str] = set()
+    known_labels: set[str] = set()
+    for fd in base.fields:
+        for info in sample_infos:
+            for sheet in (s.sheet_name for s in base.sheets):
+                grid = info.grids.get(sheet)
+                if grid is None:
+                    continue
+                if fd.data_type == "table":
+                    anchor, table = locate_table(grid, fd, stop)
+                    if table is None or not table.header or table.to_value() is None:
+                        continue
+                    # 画面と同じ: 列見出しの1つ目をクリックする
+                    label_coord, value_coord = table.header[0].coord.split(":")[0], ""
+                else:
+                    label, values, inline = locate_value(grid, fd, stop)
+                    if label is None or not values:
+                        continue
+                    label_coord = label.coord.split(":")[0]
+                    value_coord = label_coord if inline is not None else values[0].coord.split(":")[0]
+                row, _error = click_field(grid, label_coord, value_coord, used)
+                if row is None or (fd.data_type == "table") != (row["data_type"] == "table"):
+                    continue  # その見本では明細表の形に見えない（別の見本でクリックする）
+                label_norm = normalize_label((row["candidates"].splitlines() or [""])[0])
+                if label_norm and label_norm in known_labels:
+                    break  # 同じ見出しはもう項目になっている
+                known_labels.add(label_norm)
+                # 画面と同じ: 番号と名前をまとめた「使用設備」欄は設備番号・設備名の2項目になる
+                for part in split_rows(row, used):
+                    same = merge_target(rows, part)
+                    if same is not None:
+                        merge_labels(same, part)  # 画面と同じ: 書き方の違う同じ欄は見出しに足す
+                        continue
+                    used.add(part["field_name"])
+                    rows.append(part)
+                if not any(s["sheet_name"] == sheet for s in sheet_rows):
+                    sheet_rows.append({"use": True, "sheet_name": sheet, "required": False})
+                break
+    return sheet_rows, rows
+
+
+def evaluate_template(folder: Path, n_samples: int, offset: int = 0, by_clicks: bool = True) -> dict:
     entries = [json.loads(line) for line in (folder / "_expected.jsonl").open(encoding="utf-8") if line.strip()]
     samples = pick_samples(entries, n_samples, offset)
     infos = {e["file"]: load_workbook_info(folder / e["file"]) for e in entries}
 
-    sheet_rows, field_rows = suggest_rows([infos[e["file"]] for e in samples])
     meta = {"name": folder.name, "version": "eval"}
+    if by_clicks:
+        sheet_rows, field_rows = click_rows([infos[e["file"]] for e in samples], folder.name)
+    else:
+        sheet_rows, field_rows = suggest_rows([infos[e["file"]] for e in samples])
     pattern = rows_to_pattern(1, meta, sheet_rows, field_rows)
     mapping = map_fields(pattern, entries)
-    unused_dictionary = [r["field_name"] for r in field_rows if not r["use"] and r["field_name"] in FIELD_MAP]
+    unused_dictionary = [r["field_name"] for r in field_rows if not r.get("use", True) and r["field_name"] in FIELD_MAP]
 
     per_field: dict[str, Counter] = defaultdict(Counter)
     per_version: dict[str, Counter] = defaultdict(Counter)
@@ -540,6 +601,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="見本の選び方をずらす（版ごとに何番目から取るか。既定: 0 = 先頭から）")
     parser.add_argument("--only", help="対象フォルダ名の先頭（例: F1,F3）")
     parser.add_argument("--json", help="結果を書き出す JSON のパス（既定: <forms>/_evaluation.json）")
+    parser.add_argument("--builder", action="store_true",
+                        help="クリックではなく、見本から候補を自動で作る旧方式で評価する")
     args = parser.parse_args(argv)
 
     root = Path(args.forms)
@@ -548,7 +611,7 @@ def main(argv: list[str] | None = None) -> int:
         prefixes = [p.strip() for p in args.only.split(",") if p.strip()]
         folders = [d for d in folders if any(d.name.startswith(p) for p in prefixes)]
     t0 = time.perf_counter()
-    results = [evaluate_template(d, args.samples, args.offset) for d in folders]
+    results = [evaluate_template(d, args.samples, args.offset, by_clicks=not args.builder) for d in folders]
     print_report(results)
     ok = sum(rate(r["totals"])[0] for r in results)
     n = sum(rate(r["totals"])[1] for r in results)

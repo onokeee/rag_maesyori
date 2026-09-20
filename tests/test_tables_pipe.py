@@ -30,7 +30,6 @@ from tables.spec import (
 )
 
 SAMPLES = Path(__file__).resolve().parent.parent / "samples" / "tables"
-HINT = ".[legacy-R(chunk_ts=1500,chunk_ol=0)].md"
 
 
 # ---- 合成データ ---------------------------------------------------------------------------
@@ -324,7 +323,7 @@ def test_list_markdown_and_determinism(tmp_path):
     names = [f.name for f in files]
     assert names == [
         "トラブル対応一覧_00_データセット説明.md",
-        "トラブル対応一覧_2026-08" + HINT,   # 分割ヒントは新しい取り込み設定の既定（記録ファイルだけに付く）
+        "トラブル対応一覧_2026-08.md",   # 分割ヒントは新しい取り込み設定の既定（記録ファイルだけに付く）
         "トラブル対応一覧_集計_月次_2026-08.md",
         "トラブル対応一覧_集計_設備別_CMP-101_2026年度.md",
         "トラブル対応一覧_集計_設備別_CVD-201_2026年度.md",
@@ -342,7 +341,7 @@ def test_list_markdown_and_determinism(tmp_path):
     timeline = [ln for ln in block1.split("\n") if ln.startswith("  1. ")]
     assert timeline and timeline[0].startswith("  1. 2026-08-03 10:00［連絡・初動］") and "CMP研磨装置1号機" in timeline[0]
     assert "  2. 2026-08-03 10:20" in block1
-    assert "担当者" not in rec and "田中｜" in rec  # 担当者列は出さない（時系列の記入者は原文由来）
+    assert "- 担当者: 田中" in rec and "田中｜" in rec  # 人名の列も出す
     assert "出してはいけない" not in rec
     assert "- 処置:\n  \\- 再起動\n  続き:ケーブル交換" in rec
     assert "- 現象: +停止(セル先頭が記号)" in rec
@@ -359,7 +358,7 @@ def test_list_markdown_and_determinism(tmp_path):
     assert "- CVD-201の2026年度（2026年8月〜2026年8月）の記録は2件です。" in fy
     assert "- 停止時間の合計は150分（2.5時間）、1件あたり平均75分です。" in fy
     card = files[0].text
-    assert "- 取り込み範囲: 2026-08-03〜2026-08-20（記録 4件）" in card and "- 担当者" not in card
+    assert "- 取り込み範囲: 2026-08-03〜2026-08-20（記録 4件）" in card and "- 担当者" in card
 
     # 決定的: 入力の順番を変えても同じバイト列
     shuffled = list(aug)
@@ -367,20 +366,15 @@ def test_list_markdown_and_determinism(tmp_path):
     again = render_all(spec, shuffled, ai, {"coverage": {"start": "2026-08", "end": "2026-08"}})
     assert [hashlib.sha256(f.data).hexdigest() for f in again] == [hashlib.sha256(f.data).hexdigest() for f in files]
 
-    # 分割・人名を出す設定、設備×月（ヒントは既定のオンのまま）
-    spec2 = spec_from_dict(list_spec_dict(max_records_per_file=3, omit_person=False))
-    files2 = render_all(spec2, aug, {}, {})
-    part1 = next(f for f in files2 if f.name == "トラブル対応一覧_2026-08" + HINT)
-    assert "トラブル対応一覧_2026-08_part2" + HINT in [f.name for f in files2]
-    assert "- このファイルの記録: 3件（2026年8月の全 4件のうち 1〜3件目）" in part1.text
-    assert "- 担当者: 田中" in part1.text
+    # 記録ファイルは件数では分けない（月ごとに1ファイル）。設備×月の設定も同じ
+    assert [f.name for f in files if f.kind == "records"] == ["トラブル対応一覧_2026-08.md"]
     files3 = render_all(spec_from_dict(list_spec_dict(group_by="entity_month")), aug, {}, {})
-    ent = next(f for f in files3 if f.name == "トラブル対応一覧_CMP-101_2026-08" + HINT)
+    ent = next(f for f in files3 if f.name == "トラブル対応一覧_CMP-101_2026-08.md")
     assert "- このファイルの記録: 2件（CMP-101の2026年8月の全件）" in ent.text
 
     # 7月と8月の両方がある取り込みは月ごとのファイルになる
     all_names = [f.name for f in render_all(spec, [r.to_dict() for r in records], {}, {})]
-    assert "トラブル対応一覧_2026-07" + HINT in all_names and "トラブル対応一覧_2026-08" + HINT in all_names
+    assert "トラブル対応一覧_2026-07.md" in all_names and "トラブル対応一覧_2026-08.md" in all_names
 
 
 def test_zip_csv_and_formula_guard():
@@ -434,7 +428,7 @@ def test_system_csv_quirks(tmp_path):
     assert records[1].source == {"file": path.name, "sheet": "", "row": 6}
     assert stats.excluded == {"合計": 1} and row_issues == []
     files = render_all(spec, [r.to_dict() for r in records], {}, {})
-    rec = next(f for f in files if f.name == "故障_2026-08" + HINT).text
+    rec = next(f for f in files if f.name == "故障_2026-08.md").text
     assert "- 発生日: 2026-08-03 14:20（2026年8月）" in rec and "発生時刻" not in rec
     assert "## 【00124】CMP-101 複数行の｜2026-08-04" in rec
     assert "- 現象:\n  複数行の\n  現象\n" in rec
@@ -480,9 +474,9 @@ def test_pipeline_read_render_download(app):
         assert len(pipeline.load_rows(import_id)) == 5 and len(pipeline.load_rows(import_id, 1, 2)) == 2
 
         listing = pipeline.preview_files(import_id, imp, pipeline.spec_for_import(imp))
-        assert "トラブル対応一覧_2026-07" + HINT in [f["name"] for f in listing]
+        assert "トラブル対応一覧_2026-07.md" in [f["name"] for f in listing]
         preview_dir = pipeline.import_files(import_id)["preview"]
-        assert pipeline.md_text(preview_dir, "トラブル対応一覧_2026-08" + HINT).startswith("# トラブル対応一覧 2026年8月")
+        assert pipeline.md_text(preview_dir, "トラブル対応一覧_2026-08.md").startswith("# トラブル対応一覧 2026年8月")
         assert pipeline.md_text(preview_dir, "../x.md") is None
 
         done = pipeline.run_render(FakeCtx(), import_id)
@@ -670,9 +664,10 @@ def test_sample_t1_end_to_end():
     assert Counter(str(r.values.get("occurred_at"))[:4] for r in records) == {"2023": 1534, "2024": 2195, "2025": 2553, "2026": 1813}
     assert not has_blocking(run_checks(records, spec, stats))
     files = render_all(spec, [r.to_dict() for r in records], {}, {})
-    assert sum(f.text.count("\n## ") for f in files if f.kind == "records") == 8095
-    first = next(f for f in files if f.name == "トラブル対応一覧_2023-04" + HINT)
-    assert "- 発生日: 2023-04-01 02:21（2023年4月）" in first.text and "担当者" not in first.text
+    heads = [ln for f in files if f.kind == "records" for ln in f.text.split("\n") if ln.startswith("## ")]
+    assert sum(1 for h in heads if "（続き" not in h) == 8095   # 大きい記録は「（続きn/m）」に分かれる
+    first = next(f for f in files if f.name == "トラブル対応一覧_2023-04.md")
+    assert "- 発生日: 2023-04-01 02:21（2023年4月）" in first.text and "- 担当者: " in first.text
     assert _no_blank_inside_records(first.text)
 
 
@@ -682,8 +677,8 @@ def _rec(key: str, **values) -> dict:
     return {"key": key, "values": values, "source": {"file": "x.xlsx", "row": 4}}
 
 
-def test_timeline_drops_sentences_that_repeat_other_columns():
-    """時系列の本文から、同じ記録の原因・処置内容と同じ文を省く（全部同じなら「（処置と同じ）」に縮める）。"""
+def test_timeline_keeps_every_sentence_even_when_other_columns_repeat_them():
+    """時系列は原文のまま出す（他の列と同じ文でも省かない。入力の内容を削らない）。"""
     spec = spec_from_dict(list_spec_dict())
     log = ("8/3 10:00 田中：スラリー流量低下アラームで研磨停止。保全へ連絡\n"
            "8/3 11:00 田中：フィルター交換、流量の再校正を実施\n"
@@ -693,46 +688,40 @@ def test_timeline_drops_sentences_that_repeat_other_columns():
                action="フィルター交換、流量の再校正を実施", response_log=log)
     lines = record_block(rec, spec)
     timeline = [ln.strip() for ln in lines[lines.index("- 対応の時系列:") + 1:]]
-    assert timeline[0].endswith(": 保全へ連絡")          # 現象と同じ文は省く
-    assert timeline[1].endswith(": （処置と同じ）")      # 全部が処置と同じ
-    assert timeline[2].endswith(": 復旧を確認。")        # 重複しない文は残す
-    # 元の列はそのまま残る
+    assert timeline[0].endswith(": スラリー流量低下アラームで研磨停止。保全へ連絡")
+    assert timeline[1].endswith(": フィルター交換、流量の再校正を実施")
+    assert timeline[2].endswith(": 復旧を確認。流量の再校正を実施")
     assert "- 現象: スラリー流量低下アラームで研磨停止" in lines and "- 処置: フィルター交換、流量の再校正を実施" in lines
 
-    # 短い文（6文字未満）は偶然の一致を避けるため省かない
-    rec2 = _rec("TR-002", record_no="TR-002", occurred_at="2026-08-04", equipment_id="CMP-101",
-                action="完了", response_log="8/4 10:00 田中：完了\n")
-    assert any("完了" in ln for ln in record_block(rec2, spec)[-4:])
 
+def test_long_record_is_split_into_continuation_blocks_without_losing_text():
+    """上限を超える記録は「（続きn/m）」に分ける。文は1つも消さず、どの部分にも管理No・設備・日付を書く。"""
+    from tables.markdown import RECORD_TOKEN_BUDGET, record_blocks
 
-def test_record_is_cut_to_the_token_budget_including_the_ai_points():
-    """推定トークンが上限（ヒントの chunk_ts − 100）を超える記録は、要点も含めた合計で判定して時系列を切る。"""
-    from tables.markdown import RECORD_TOKEN_BUDGET
-
-    assert RECORD_TOKEN_BUDGET == 1400
+    assert RECORD_TOKEN_BUDGET == 400
     log = "".join(f"8/3 {9 + i // 6:02d}:{(i % 6) * 10:02d} 田中：{'対応の記録です。' * 12}\n" for i in range(40))
     rec = _rec("TR-003", record_no="TR-003", occurred_at="2026-08-03", equipment_id="CMP-101", response_log=log)
-    lines = record_block(rec, spec_from_dict(list_spec_dict()))
-    assert estimate_tokens("\n".join(lines)) <= RECORD_TOKEN_BUDGET
-    note = [ln for ln in lines if "管理用の正規化CSVに収録" in ln]
-    assert len(note) == 1
-    kept = len([ln for ln in lines if ln.startswith("  ") and ln.strip()[0].isdigit()])
-    assert kept < 20  # 設定の20件よりさらに減らして収める
+    blocks = record_blocks(rec, spec_from_dict(list_spec_dict()))
+    assert len(blocks) > 1
+    for n, block in enumerate(blocks, start=1):
+        tail = f"（続き{n}/{len(blocks)}）" if n > 1 else f"（1/{len(blocks)}）"
+        assert block[0].startswith("## ") and block[0].endswith(tail)
+        for line in ("- 管理No: TR-003", "- 発生日: 2026-08-03（2026年8月）", "- 設備番号: CMP-101"):
+            assert line in block, (n, line)
+        assert estimate_tokens("\n".join(block)) <= RECORD_TOKEN_BUDGET
+    body = "\n".join(ln for block in blocks for ln in block)
+    assert body.count("対応の記録です。" * 12) == 40      # 40件の記入がすべて残っている
+    assert "管理用の正規化CSVに収録" not in body
 
 
-def test_opaque_code_columns_are_suggested_as_not_output():
-    """「状態コード: 9」のような、置き換え表なしでは意味の分からない列は既定で md=omit にする。"""
-    headers = ["管理番号", "状態コード", "再発フラグ", "発見区分コード", "ラインコード", "現象", "設備名"]
-    rows = [[f"MS-{i:04d}", "9", "0", "H01", "L2", f"アラーム{i}が出た", "CMP研磨装置1号機"] for i in range(30)]
+def test_code_and_person_columns_are_written_by_default():
+    """コードの列も人名の列も既定で出す（入力の内容を勝手に落とさない）。空欄だけの列は出さない。"""
+    headers = ["管理番号", "状態コード", "再発フラグ", "発見区分コード", "担当者", "現象", "備考"]
+    rows = [[f"MS-{i:04d}", "9", "0", "H01", "田中", f"アラーム{i}が出た", ""] for i in range(30)]
     by_header = {s.header: s for s in suggest_columns(headers, rows)}
-    assert [h for h, s in by_header.items() if s.md == "omit"] == ["状態コード", "再発フラグ", "発見区分コード", "ラインコード"]
-    assert by_header["管理番号"].md != "omit" and by_header["現象"].md != "omit"
-
-    # 値の種類が多い（20種類超）・見出しがコードらしくない列は出す
-    rows2 = [[f"MS-{i:04d}", f"S{i:03d}", "処置済み", "H01", "L2", "x", "y"] for i in range(30)]
-    by_header2 = {s.header: s for s in suggest_columns(["管理番号", "状態コード", "状況", "発見区分コード", "工程", "a", "b"], rows2)}
-    assert by_header2["状態コード"].md != "omit"   # S000〜S029 は30種類あるのでコード表がなくても見分けが付く
-    assert by_header2["状況"].md != "omit" and by_header2["工程"].md != "omit"
+    assert [h for h, s in by_header.items() if s.md == "omit"] == ["備考"]
+    assert by_header["備考"].omit_reason == "blank"
+    assert by_header["担当者"].role == "person" and by_header["担当者"].md != "omit"
 
 
 def test_entity_code_and_name_in_one_column_are_split_before_grouping():
@@ -750,9 +739,9 @@ def test_entity_code_and_name_in_one_column_are_split_before_grouping():
                _rec("A-2", record_no="A-2", occurred_at="2026-08-10", equipment_id="ETC-302")]
     files = render_all(spec, records, {}, {})
     names = [f.name for f in files]
-    assert "トラブル対応一覧_ETC-302_2026-08" + HINT in names      # 1つのファイルにまとまる
+    assert "トラブル対応一覧_ETC-302_2026-08.md" in names      # 1つのファイルにまとまる
     assert not any("OXIDE" in n for n in names)
-    rec_file = next(f for f in files if f.name == "トラブル対応一覧_ETC-302_2026-08" + HINT)
+    rec_file = next(f for f in files if f.name == "トラブル対応一覧_ETC-302_2026-08.md")
     assert "- このファイルの記録: 2件" in rec_file.text
     assert "- 設備: OXIDEエッチャ 2号機（ETC-302）" in rec_file.text
     assert len([f for f in files if f.kind == "summary" and "設備別" in f.name]) == 1
@@ -771,7 +760,7 @@ def test_entity_name_before_code_is_also_split():
     records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="Oxideエッチャ 2号機（ETC-302）"),
                _rec("A-2", record_no="A-2", occurred_at="2026-08-10", equipment_id="ETC-302")]
     names = [f.name for f in render_all(spec, records, {}, {})]
-    assert "トラブル対応一覧_ETC-302_2026-08" + HINT in names
+    assert "トラブル対応一覧_ETC-302_2026-08.md" in names
     assert not any("Oxide" in n for n in names)
 
 
@@ -806,14 +795,16 @@ def test_category_column_that_is_not_in_the_records_is_not_used_for_breakdowns()
     assert "- 記録に出していない列: 故障区分" in card
 
 
-def test_omitted_person_column_is_explained_separately_from_code_columns():
-    """人名の列に「意味の分からないコード値のため」という理由を付けない。"""
+def test_only_columns_set_to_not_output_are_left_out_of_the_records():
+    """「出さない」にした列だけを出さない（人名の列は出す）。データセット説明にはその列名を書く。"""
     spec = spec_from_dict(list_spec_dict())
     spec.column("failure_category").md = "omit"
     records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="CMP-101", worker="田中")]
-    card = next(f for f in render_all(spec, records, {}, {}) if f.kind == "dataset").text
-    assert "- 記録に出していない列: 故障区分（意味の分からないコード値" in card
-    assert "- 記録に出していない列（人名）: 担当者（人名のため出していません" in card
+    files = render_all(spec, records, {}, {})
+    card = next(f for f in files if f.kind == "dataset").text
+    assert "- 記録に出していない列: 故障区分（取り込み設定で「出さない」にした列です" in card
+    rec = next(f for f in files if f.kind == "records").text
+    assert "- 担当者: 田中" in rec and "故障区分" not in rec
 
 
 def test_record_title_is_cut_at_a_readable_place():
@@ -849,18 +840,6 @@ def test_record_title_drops_a_date_only_preamble():
     assert record_title(values3, spec) == "【CA-1】ETC-305 スラリー流量低下｜2023-04-03"
 
 
-def test_timeline_keeps_the_sentence_end_of_a_dropped_sentence():
-    """重複で省いた文が「。」で終わっていたら、前後がつながって元にない1文にならないようにする。"""
-    spec = spec_from_dict(list_spec_dict())
-    log = ("8/3 10:00 田中：過負荷で停止、チャンバー圧力上昇（同型機は正常）。保全へ連絡\n"
-           "8/3 11:00 田中：メーカー手配\n")
-    rec = _rec("TR-9", record_no="TR-9", occurred_at="2026-08-03", equipment_id="CMP-101",
-               symptom="チャンバー圧力上昇（同型機は正常）", response_log=log)
-    lines = record_block(rec, spec)
-    timeline = [ln.strip() for ln in lines[lines.index("- 対応の時系列:") + 1:]]
-    assert timeline[0].endswith(": 過負荷で停止。保全へ連絡")
-
-
 def test_record_body_shows_the_split_entity_like_the_heading():
     """設備名の列がない台帳でも、本文の設備の行を見出し・集計と同じ書き方にそろえる。"""
     d = list_spec_dict()
@@ -877,42 +856,20 @@ def test_record_body_shows_the_split_entity_like_the_heading():
 
 # ---- ユーザーが決めた出力の変更（ヒント既定オン・時系列の重複削除の選択・丸数字） ----
 
-def test_new_spec_turns_the_filename_hint_on_and_saved_specs_keep_their_value():
-    """分割ヒントは新しい取り込み設定の既定オン。保存済みの設定（JSON に値がある）は書き換えない。"""
+def test_filenames_have_no_lightrag_hint_and_retired_settings_are_ignored():
+    """ファイル名にヒント（.[...]）は付けない。保存済みの設定に残っていた項目は読み飛ばす。"""
     from tables.spec import TableSpec
 
-    assert TableSpec("新しい設定").markdown["lightrag_hint"] is True
-    assert spec_from_suggestions("新しい設定", {"header_rows": [1]}, []).markdown["lightrag_hint"] is True
+    assert "lightrag_hint" not in TableSpec("新しい設定").markdown
+    saved = list_spec_dict(lightrag_hint=True, dedupe_timeline=False, omit_person=True, max_records_per_file=3)
+    md = spec_from_dict(saved).markdown
+    assert not ({"lightrag_hint", "dedupe_timeline", "omit_person", "max_records_per_file"} & set(md))
+    assert validate_spec(spec_from_dict(saved)) == []
 
-    saved = list_spec_dict(lightrag_hint=False)          # 前に「付けない」で保存した設定
-    assert spec_from_dict(saved).markdown["lightrag_hint"] is False
-    assert spec_from_dict(spec_to_dict(spec_from_dict(saved))).markdown["lightrag_hint"] is False
-
-    # 既定のまま出すと、記録ファイルだけにヒントが付く（集計・データセット説明には付けない）
     files = render_all(spec_from_dict(list_spec_dict()),
                        [_rec("TR-1", record_no="TR-1", occurred_at="2026-08-03", equipment_id="CMP-101")], {}, {})
     for f in files:
-        assert f.name.endswith(HINT) == (f.kind == "records")
-
-
-def test_timeline_dedupe_can_be_turned_off_in_the_import_settings():
-    """「対応の時系列から、他の列と同じ内容の文を省く」を外すと、重複する文も原文のまま出す。"""
-    log = "8/3 10:00 田中：スラリー流量低下アラームで研磨停止。保全へ連絡\n8/3 11:00 田中：フィルター交換、流量の再校正を実施\n"
-    values = dict(record_no="TR-001", occurred_at="2026-08-03", equipment_id="CMP-101",
-                  symptom="スラリー流量低下アラームで研磨停止",
-                  action="フィルター交換、流量の再校正を実施", response_log=log)
-
-    def timeline(spec):
-        lines = record_block(_rec("TR-001", **values), spec)
-        return [ln.strip() for ln in lines[lines.index("- 対応の時系列:") + 1:]]
-
-    assert spec_from_dict(list_spec_dict()).markdown["dedupe_timeline"] is True   # 既定は今までの動き
-    on = timeline(spec_from_dict(list_spec_dict()))
-    assert on[0].endswith(": 保全へ連絡") and on[1].endswith(": （処置と同じ）")
-
-    off = timeline(spec_from_dict(list_spec_dict(dedupe_timeline=False)))
-    assert off[0].endswith(": スラリー流量低下アラームで研磨停止。保全へ連絡")
-    assert off[1].endswith(": フィルター交換、流量の再校正を実施")
+        assert ".[" not in f.name and "]" not in f.name and f.name.endswith(".md")
 
 
 @pytest.mark.parametrize("type_, text, expected", [
@@ -963,7 +920,7 @@ def test_split_entity_code_prefers_trailing_code_and_drops_qualifiers():
     records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="IMP-602（推定）"),
                _rec("A-2", record_no="A-2", occurred_at="2026-08-10", equipment_id="IMP-602")]
     names = [f.name for f in render_all(spec, records, {}, {})]
-    assert "トラブル対応一覧_IMP-602_2026-08" + HINT in names
+    assert "トラブル対応一覧_IMP-602_2026-08.md" in names
     assert not any("推定" in n for n in names)
 
 
@@ -991,3 +948,15 @@ def test_far_future_date_does_not_break_summaries():
                _rec("A-2", record_no="A-2", occurred_at="9999-12-31", equipment_id="CMP-101", downtime=10)]
     files = render_all(spec, records, {}, {})
     assert any("設備別_CMP-101_9999年度" in f.name for f in files)
+
+
+def test_the_file_list_counts_records_not_continuation_parts():
+    """「内容の確認」のファイル一覧の「記録」は、記録の件数（「（続きn/m）」は1件の続きなので数えない）。"""
+    from tables.markdown import MdFile
+    from tables.pipeline import _record_count
+
+    text = ("# 見出し\n\n## 【A-1】長い記録（1/3）\n- a\n\n## 【A-1】長い記録（続き2/3）\n- b\n\n"
+            "## 【A-1】長い記録（続き3/3）\n- c\n\n## 【A-2】短い記録\n- d\n")
+    assert _record_count(MdFile("記録.md", text, "records")) == 2
+    assert _record_count(MdFile("集計.md", text, "summary")) is None
+    assert _record_count(MdFile("説明.md", text, "dataset")) is None

@@ -131,7 +131,7 @@ def md_paths(import_id: int) -> list[Path]:
 
 
 def _write_md_dir(target: Path, files: list[MdFile]) -> None:
-    from services.output_folder import path_limit
+    from core.files import path_limit
 
     tmp = target.with_name(target.name + ".new")
     limit = path_limit()
@@ -369,6 +369,17 @@ def preview_signature(import_id: int, imp: dict, spec) -> str:
     return _preview_signature(import_id, imp, spec)
 
 
+def _record_count(f) -> int | None:
+    """記録ファイル1つに入っている記録の件数（画面の「記録」の列）。
+
+    大きい記録は「（続きn/m）」の見出しに分かれるが、それは1件の記録の続きなので数えない
+    （数えると、上に出る「記録件数 60件」と食い違う。tables.markdown._split_record）。
+    """
+    if f.kind != "records":
+        return None
+    return sum(1 for line in f.text.split("\n") if line.startswith("## ") and "（続き" not in line)
+
+
 def ready_preview_files(import_id: int, imp: dict, spec) -> list[dict] | None:
     """すでに作ってあるプレビューの一覧。作っていなければ None（作るのはジョブ run_preview）。"""
     index = _preview_index(import_id, _preview_signature(import_id, imp, spec))
@@ -393,8 +404,7 @@ def preview_files(import_id: int, imp: dict, spec, ctx=None) -> list[dict]:
         # 作っている間に取り込みが削除された。消したフォルダに記録の md を作り直さない（design.md 3.3）
         raise PipelineError("取り込みが削除されたため、Markdownの下書きは作りませんでした")
     _write_md_dir(base["preview"], files)
-    listing = [{"name": f.name, "kind": f.kind, "size": len(f.data),
-                "records": sum(1 for line in f.text.split("\n") if line.startswith("## ")) if f.kind == "records" else None}
+    listing = [{"name": f.name, "kind": f.kind, "size": len(f.data), "records": _record_count(f)}
                for f in files]
     index_path.write_text(json.dumps({"signature": signature, "files": listing}, ensure_ascii=False), encoding="utf-8")
     return listing

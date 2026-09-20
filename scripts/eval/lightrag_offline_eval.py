@@ -7,7 +7,8 @@
     <lightrag_src>\\venv\\Scripts\\python.exe scripts/eval/lightrag_offline_eval.py measure --out <出力先> --lightrag <lightrag_src>
 
     python scripts/eval/lightrag_offline_eval.py summary --out <出力先>
-    経路は --routes F_<chunk>_<overlap>,R_<chunk>_<overlap>,P_<size> で指定（既定 F_1200_100,R_800_0,P_2000）。
+    経路は --routes F_<chunk>_<overlap>,R_<chunk>_<overlap>,P_<size> で指定（既定 F_1200_100,F_600_50,P_2000）。
+    生成する variant は --variants month,entity_month,per_record,single で絞れる。
     大きい variant は --only と --metrics を分けて並列に計測できる。
 
 <lightrag_src> は LightRAG 1.5.7 の venv（venv/）と tiktoken のキャッシュ（tiktoken_cache/）を持つフォルダ。
@@ -132,8 +133,14 @@ def _record_meta(rec: dict | None, spec) -> dict:
             "date": str(values.get(spec.date_key) or "")[:10]}
 
 
+PART_SUFFIX = re.compile(r"（(?:続き)?\d+/\d+）$")   # 大きい記録を分けた見出しの「（1/3）」「（続き2/3）」
+
+
 def _attach_table_meta(files: list[dict], recs: list[dict], spec) -> None:
-    """記録ファイルの ## 見出しごとに、同じ見出しを持つ記録のメタを順に割り当てる。"""
+    """記録ファイルの ## 見出しごとに、同じ見出しを持つ記録のメタを順に割り当てる。
+
+    大きい記録は「（続きn/m）」に分かれて同じ見出しが続くので、その分は同じ記録のメタにする。
+    """
     from tables.markdown import record_title
 
     by_title: dict[str, list[dict]] = defaultdict(list)
@@ -144,17 +151,26 @@ def _attach_table_meta(files: list[dict], recs: list[dict], spec) -> None:
         meta = []
         if f["kind"] == "records":
             for line in f["text"].split("\n"):
-                if line.startswith("## "):
-                    cand = by_title.get(line[3:]) or []
-                    meta.append(_record_meta(cand[cursor[line] % len(cand)] if cand else None, spec))
-                    cursor[line] += 1
+                if not line.startswith("## "):
+                    continue
+                heading = line[3:]
+                title = PART_SUFFIX.sub("", heading)
+                if heading.startswith(title + "（続き"):
+                    index = max(0, cursor[title] - 1)      # 続きの部分は1つ前（同じ記録）のまま
+                else:
+                    index = cursor[title]
+                    cursor[title] += 1
+                cand = by_title.get(title) or []
+                meta.append(_record_meta(cand[index % len(cand)] if cand else None, spec))
         f["records"] = meta
 
 
-def generate_tables(out: Path, codes: list[str]) -> None:
-    from core.naming import LIGHTRAG_HINT_RECORDS, md_filename
+def generate_tables(out: Path, codes: list[str], variants: list[str] | None = None) -> None:
+    from core.naming import md_filename
     from tables.markdown import _Block, join_file, people_index_for, record_block, render_all
     from tables.normalize import read_records
+
+    want = set(variants or ("month", "entity_month", "per_record", "single"))
 
     for code in codes:
         t0 = time.perf_counter()
@@ -171,17 +187,15 @@ def generate_tables(out: Path, codes: list[str]) -> None:
             ensure_ascii=False, indent=1), encoding="utf-8")
 
         for group_by in ("month", "entity_month"):
+            if group_by not in want:
+                continue
             spec.markdown["group_by"] = group_by
-            spec.markdown["lightrag_hint"] = False  # ヒント無しの名前（取り込み設定の既定はオン。ここは比較のため明示する）
             files = [{"name": f.name, "text": f.text, "kind": f.kind} for f in render_all(spec, recs, {}, {"coverage": {}})]
             _attach_table_meta(files, recs, spec)
-            spec.markdown["lightrag_hint"] = True
-            hinted = [f.name for f in render_all(spec, recs, {}, {"coverage": {}}) if f.kind == "records"]
-            spec.markdown["lightrag_hint"] = False
-            for f, h in zip([x for x in files if x["kind"] == "records"], hinted):
-                f["hinted_name"] = h
             _write_variant(out, f"{code}_{group_by}", files)
 
+        if not ({"per_record", "single"} & want):
+            continue
         # 1件1ファイル（シミュレーション: 記録ブロックの ## を # にして単独ファイルにする）
         people = people_index_for(spec, recs) if spec.log_stage else None
         prefix = spec.file_prefix
@@ -195,9 +209,11 @@ def generate_tables(out: Path, codes: list[str]) -> None:
             if names[md_filename(parts)] > 1:
                 parts.append(str(names[md_filename(parts)]))
             text = join_file([_Block("#" + block[0][2:], [f"- データ種別: {spec.name}（1行＝1件）の記録"] + block[1:])])
-            files.append({"name": md_filename(parts), "text": text, "kind": "records", "records": [meta],
-                          "hinted_name": md_filename(parts, LIGHTRAG_HINT_RECORDS)})
-        _write_variant(out, f"{code}_per_record", files)
+            files.append({"name": md_filename(parts), "text": text, "kind": "records", "records": [meta]})
+        if "per_record" in want:
+            _write_variant(out, f"{code}_per_record", files)
+        if "single" not in want:
+            continue
         # 全件1ファイル
         header = _Block(f"# {spec.name} 全記録", [f"- データ種別: {spec.name}（1行＝1件）の記録",
                                                  f"- このファイルの記録: {len(recs):,}件"])
@@ -211,7 +227,7 @@ def generate_tables(out: Path, codes: list[str]) -> None:
 # =============================================================================
 ROUTES = {
     "F_1200_100": "legacy-F（LIGHTRAG_PARSER 未設定時の既定。chunk 1200 / overlap 100）",
-    "R_800_0": "legacy-R（ファイル名ヒント legacy-R(chunk_ts=800,chunk_ol=0)）",
+    "F_600_50": "legacy-F（狭い窓の場合。chunk 600 / overlap 50）",
     "P_2000": "native-P（CHUNK_P_SIZE 2000）",
 }
 ENTITY_LIMIT = 40
@@ -382,13 +398,10 @@ def measure_variant(vdir: Path, chunkers: dict, tok) -> dict:
                  "files_by_kind": dict(Counter(m["kind"] for m in manifest))}
     res["tokens_total"] = sum(len(tok.encode(t)) for t in texts.values())
     names = [m["name"] for m in manifest]
-    hinted = [m["hinted_name"] for m in manifest if m.get("hinted_name")]
     res["filenames"] = {
-        "forbidden_chars": sum(1 for n in names + hinted if FORBIDDEN.search(n)),
-        "hint_like_in_plain": sum(1 for n in names if HINT_RE.search(n)),
-        "hinted_total": len(hinted),
-        "hinted_parse_ok": sum(1 for n in hinted if HINT_RE.search(n) and HINT_RE.search(n).group(1).startswith("legacy-R")),
-        "max_len": max((len(n) for n in names + hinted), default=0),
+        "forbidden_chars": sum(1 for n in names if FORBIDDEN.search(n)),
+        "hint_like_in_plain": sum(1 for n in names if HINT_RE.search(n)),  # ヒント記法に見える名前（0 であること）
+        "max_len": max((len(n) for n in names), default=0),
         "collisions": sum(1 for n in names if "_dup" in n),
     }
     # LightRAG 1.5.7 は内容のハッシュ（doc-md5）で同一文書を重複として捨てる
@@ -503,14 +516,14 @@ def summarize(out: Path) -> str:
                 f"{rp['p50']}/{rp['max']} | {e['p90']}/{e['max']}（{e['chunks_over_40']}） | {r['llm_calls_est']:,} | "
                 f"{r.get('llm_input_tokens_est', 0) / 1e6:.1f}M |")
     rows += ["", "| variant | ファイル | 総tok | 記録tok p50/p90/max | >800 | >1200 | 定型行tok（ファイル間） | 定型行tok（記録内） | "
-             "内容重複 | 名前衝突 | 禁止文字 | ヒント解釈OK | 名前最大長 |", "|" + "---|" * 13]
+             "内容重複 | 名前衝突 | 禁止文字 | ヒント記法 | 名前最大長 |", "|" + "---|" * 13]
     for name, v in variants.items():
         rt, fn = v["record_tokens"], v["filenames"]
         rows.append(
             f"| {name} | {v['files']:,} | {v['tokens_total']:,} | {rt['p50']}/{rt['p90']}/{rt['max']} | {rt['over_800']:,} | "
             f"{rt['over_1200']:,} | {v['boilerplate']['token_share']:.1%} | {v.get('record_boilerplate', {}).get('token_share', 0):.1%} | "
             f"{v['duplicate_content_files']} | {fn['collisions']} | {fn['forbidden_chars']} | "
-            f"{fn['hinted_parse_ok']}/{fn['hinted_total']} | {fn['max_len']} |")
+            f"{fn['hint_like_in_plain']} | {fn['max_len']} |")
     return "\n".join(rows)
 
 
@@ -524,7 +537,8 @@ def main(argv=None) -> int:
     ap.add_argument("--lightrag", help="LightRAG 1.5.7 のフォルダ（venv/ と tiktoken_cache/ を持つ）")
     ap.add_argument("--out", required=True, help="出力先フォルダ")
     ap.add_argument("--only", help="対象の絞り込み（generate: forms,T1,T2,T5 / measure: variant 名の先頭）")
-    ap.add_argument("--routes", default="F_1200_100,R_800_0,P_2000")
+    ap.add_argument("--routes", default="F_1200_100,F_600_50,P_2000")
+    ap.add_argument("--variants", help="生成する variant（month,entity_month,per_record,single）")
     ap.add_argument("--metrics", default="metrics.json", help="計測結果のファイル名（並列実行時に分ける）")
     args = ap.parse_args(argv)
     out = Path(args.out)
@@ -534,7 +548,7 @@ def main(argv=None) -> int:
             generate_forms(out)
         codes = [c for c in TABLES if only is None or c in only]
         if codes:
-            generate_tables(out, codes)
+            generate_tables(out, codes, [x.strip() for x in args.variants.split(",")] if args.variants else None)
     if args.command == "measure":
         measure(out, Path(args.lightrag) if args.lightrag else None, args.routes.split(","), only, args.metrics)
     if args.command == "summary":

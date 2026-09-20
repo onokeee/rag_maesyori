@@ -1,57 +1,39 @@
 """6巡目の修正の、担当をまたぐ残り。
 
-- R6-2 の続き: 消し切れなかったときは、削除の案内でも「消しました」と言い切らない（一覧表・帳票）
-- UX6-3 の続き: 帳票の取り込み画面にも、保存先フォルダに保存したときも消えることを出す
-- ホームのまとまりの各帳票の［フォルダに保存］は、forms の確認文（BATCH_MEMBER_SAVE_CONFIRM）を使う
+- R6-2 の続き: 消し切れなかったときは「消しました」と言い切らない（一覧表）／
+  消し切れなかったことを画面に伝える（帳票。画面は fetch の答えで文面を決める）
 """
-import html
-
 from core import purge
-from tests.test_output_folder import _set_folder, out_dir  # noqa: F401
-from tests.test_retention import _add_confirmed_document, _confirmed_import
-from views.forms import BATCH_MEMBER_SAVE_CONFIRM
-
-
-def _flashes(client) -> str:
-    return client.get("/").get_data(as_text=True)
+from tests.conftest import add_confirmed_document, confirmed_import
 
 
 def test_table_delete_says_files_were_emptied_when_not_fully_removed(app, client, monkeypatch):
-    import_id = _confirmed_import(app, client)
+    import_id = confirmed_import(app, client)
     monkeypatch.setattr(purge.shutil, "rmtree", lambda *a, **k: None)
     res = client.post(f"/tables/imports/{import_id}/delete")
-    assert res.status_code == 302
-    page = _flashes(client)
-    assert "消し切れず" in page and "作った Markdown を消しました" not in page
+    assert res.status_code == 200
+    message = res.get_json()["message"]
+    assert "消し切れず" in message and "作った Markdown を消しました" not in message
 
 
 def test_table_delete_normal_wording_is_kept(app, client):
-    import_id = _confirmed_import(app, client)
-    client.post(f"/tables/imports/{import_id}/delete")
-    page = _flashes(client)
-    assert "作った Markdown を消しました" in page and "消し切れず" not in page
+    import_id = confirmed_import(app, client)
+    message = client.post(f"/tables/imports/{import_id}/delete").get_json()["message"]
+    assert "作った Markdown を消しました" in message and "消し切れず" not in message
 
 
-def test_form_delete_says_files_were_emptied_when_not_fully_removed(app, client, monkeypatch):
-    doc_id, _path = _add_confirmed_document(app, "報告書.xlsx")
+def test_form_delete_reports_that_files_were_not_fully_removed(app, client, monkeypatch):
+    """帳票の削除でも、消し切れなかったことを画面に伝える（core.purge.purge_incomplete の目印）。"""
+    doc_id, _path = add_confirmed_document(app, "報告書.xlsx")
     monkeypatch.setattr(purge, "remove_upload", lambda _p: False)
-    client.post(f"/forms/{doc_id}/delete")
-    page = _flashes(client)
-    assert "消し切れず" in page and "元のファイルと読み取り結果を消しました" not in page
+    res = client.post(f"/forms/{doc_id}/delete")
+    assert res.status_code == 200 and res.get_json() == {"ok": True, "incomplete": True}
 
 
-def test_form_upload_page_mentions_the_save_folder(client, out_dir):  # noqa: F811
-    assert "保存先フォルダに保存したときも同じです" not in client.get("/forms/new").get_data(as_text=True)
-    _set_folder(client, out_dir)
-    assert "保存先フォルダに保存したときも同じです" in client.get("/forms/new").get_data(as_text=True)
-
-
-def test_home_batch_member_save_uses_the_forms_wording(app, client, out_dir):  # noqa: F811
-    _set_folder(client, out_dir)
-    _add_confirmed_document(app, "a.xlsx", batch_id="B1", order=0)
-    _add_confirmed_document(app, "b.xlsx", value="EQ-002", batch_id="B1", order=1)
-    page = html.unescape(client.get("/").get_data(as_text=True))
-    assert BATCH_MEMBER_SAVE_CONFIRM in page
+def test_form_delete_reports_a_clean_removal(app, client):
+    doc_id, _path = add_confirmed_document(app, "報告書.xlsx")
+    res = client.post(f"/forms/{doc_id}/delete")
+    assert res.status_code == 200 and res.get_json() == {"ok": True, "incomplete": False}
 
 
 # ---- R6C-3 の続き（core/jobs.py）: 進捗の書き込みがロック中でもジョブを失敗にしない -----------------------

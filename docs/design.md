@@ -5,157 +5,139 @@
 ## 0. 前提と範囲
 
 - 利用者は1人。**ログインなし**。起動は `127.0.0.1` のみ（`app.py` が他のアドレスを拒否）。
-- 目的：Excel/CSV を読み取り、**LightRAG に手作業で投入しやすい Markdown(.md) を作ってダウンロードする**（または決めたフォルダ＝LightRAG の `INPUT_DIR` などに保存する。2.8）まで。LightRAG への送信・アプリ内のSQL照会は作らない。
-- 取り込みは2系統に分ける。
-  - **帳票**（1ファイル＝1件。例：設備修理報告書）… 既存の「ラベル探索」方式を改良。
-  - **一覧表**（Excel/CSV、1行＝1件。例：トラブル対応一覧、故障履歴CSV、月別停止時間のクロス集計）… 新規。
-- 一覧表の文章列（例：複数人の追記ログが1セルに入った「対応内容」）は、**ルールで時系列に分解**し、任意で **AI整形（keep モード、原文照合つき）** を重ねる。
-- AI は OpenAI 互換 API（既存 `services/llm.py`。ヘッダーでモデル選択）。AI なしでも全フローが完結すること。
-- 対象 LightRAG: 1.5.7 を主対象（1.4.x の差分は案内ページに注記）。
-- **範囲の見直し（2026-09-16、利用者の判断）**: 一覧表の更新管理（期間の置き換え・投入済みとの差分・投入済みにする・出力画面・取り消し）、クロス集計、名寄せ辞書は作らない（8章「後回し」）。一覧表は**取り込みごとに、その取り込みの記録だけから全 md を作り、全ファイルを zip で渡す**。以下の章でこれらに触れている箇所は8章が優先する。
+- 目的：Excel/CSV を読み取り、**LightRAG に自分で投げ込みやすい Markdown(.md) を作ってダウンロードする**まで。LightRAG への送信・アプリ内検索・SQL と解析は作らない。
+- 取り込みは2系統に分かれる。
+  - **帳票**（1ファイル＝1件。例：設備修理報告書）… 中身は「ラベル探し」だけで読む。
+  - **一覧表**（Excel/CSV、1行＝1件。例：トラブル対応一覧、故障履歴CSV、部位停止時間のクロス集計）。
+- 一覧表の文章列（例：日次の追記ログが1セルに入った「対応内容」）は、**手元で式系列に分解**し、任意で **AI整形（keep モード、原文と差分）** を重ねる。
+- AI は OpenAI 互換 API（実装 `services/llm.py`）。AI なしでも全フローが成立すること。
+- 対象 LightRAG: 1.5.7 だけ対象。
+
+### 0.1 画面の作り直し（2026-09-20、利用者の指示）
+
+利用者の言葉そのまま:
+
+> 「UIにほしい機能は、"帳票取り込み","表の取り込み","帳票登録"の3つのみ」
+> 「AIは、mdファイル作成時に、特定のバリューの値に対して、文章の構成を行う部分のみでよい」
+> 「作業中の表示も要らない（閉じたら消えてよい）」
+> 「①→②→③→④と進むのではなく、一画面で全部できるようにしてほしい」
+
+これにより次を決めた。
+
+- 画面は **3つだけ**：`/forms`（帳票取り込み）・`/tables`（表の取り込み）・`/form-types`（帳票登録）。`/` は帳票取り込みへ転送する。
+- **ホーム画面は無い**。**設定の画面も無い**（AI接続は「表の取り込み」画面の AI整形の段の中、帳票の種類は「帳票登録」画面、一覧表の取り込み設定は「表の取り込み」画面の中）。**取り込み履歴も無い**。
+- **①→②→③と画面を移らない**。1つの画面に「段」（`.step`）が下へ増えていき、進むほど次の段が現れる。送信はすべて `fetch`（`window.ragFetch`）で、画面のURLは変わらなくてよい。時間のかかる処理（大きな表の読み込み・Markdown作成）も、同じ画面の中に進み具合を出す。
+- **作業中のものは捨てる**。起動時にダウンロードしていない帳票・一覧表をすべて捨て、動いている間も24時間さわられていないものを捨てる（3.3）。閉じた画面の続きを開く入口は持たない。
+- **AI は「Markdown を作るときに、決めた1つの値の文章を構成する」ところだけ**。帳票側の AI 補助（AIで種類を推定・AIで空欄を探す、`services/ai_assist.py`）は削除した。
+- 読み取りの中身（ラベル探し・セクション・チェックボックス・積み上げ明細表・型と単位の推定・レイアウト判定・文字コード判定・正規化・Markdown のルール・保持期間）は**一切変えていない**。これは画面の作り直しであって、読み取りの作り直しではない。
+
+- **範囲の見直し（2026-09-16、利用者の判断）**: 一覧表の更新管理（期間の置き換え・既存済みとの差分・取込済みにする印・出力画面・履歴）、クロス集計、名寄せ辞書は作らない（8章の「作らない」）。一覧表は**取り込みごとに、その取り込みの記録だけから全 md を作り、全ファイルを zip で渡す**。以下の章でここに触れている箇所は8章を優先する。
 
 ## 1. 用語（画面の文言はこの表に従う）
 
 | 概念 | 画面の語 | 使わない語 |
 |---|---|---|
 | アプリ名 | RAG用Markdown作成 | Excel帳票AI前処理 |
-| 帳票の取り込み | 帳票を取り込む（1ファイル＝1件） | 帳票Excelのアップロード |
-| 一覧表の取り込み | 一覧表を取り込む（Excel/CSV・1行＝1件） | 表形式 |
+| 帳票の取り込み | 帳票取り込み（1ファイル＝1件） | 帳票Excelのアップロード |
+| 一覧表の取り込み | 表の取り込み（Excel/CSV・1行＝1件） | 表形式 |
 | 帳票の読み取り設定（旧 pattern/テンプレート） | 帳票の種類 | テンプレート、パターン |
+| 帳票の種類を作る画面 | 帳票登録 | パターン編集、設定 |
 | 一覧表の設定（table template） | 一覧表の取り込み設定 | 表テンプレート |
 | 見本（sample） | 見本ファイル | サンプルExcel |
 | 抽出 | 読み取り | 解析、前処理、抽出 |
 | 帳票の確認画面 | 読み取り結果の確認・修正 | 前処理結果、抽出結果 |
-| 登録 | 確定（ボタン: 確定してMarkdownを作成） | 登録 |
-| 帳票の状態 | 読み取り前 / 確認中 / 確定済み / 修正中 | 解析待ち / 確認待ち / 登録済み |
-| 帳票の種類の状態 | 作成中 / 使用中 / 停止中 | 下書き / 有効 / 無効 |
-| 一致度 | 「10項目中9項目が見つかりました」 | 信頼度%、確信度 |
-| 値の出どころ | 自動で読み取り / AIが入力（要確認） / 手で修正 | AI補完 |
-| 原本 | 元のファイル（ボタン: 元のファイルをダウンロード） | 原本を開く |
+| 登録 | 確定（ボタン: 確定してダウンロード） | 登録 |
+| 値の出どころ | 自動で読み取り / 手で修正 | AI補完 |
+| 見本 | 元のファイル（ボタン: 元のファイルをダウンロード） | 見本を開く |
 | AI の列処理 | AI整形 | 前処理 |
-| ホームに残っているものの一覧 | 作業中 / ダウンロード待ち | 取り込み履歴、登録文書、文書一覧 |
+| 1画面の中の区切り | 段（.step） | ステップ、ウィザード、手順 |
 | まとめて選んだ複数の帳票 | まとめ取り込み（例:「まとめ取り込み 3/12件目」）| バッチ、一括処理 |
 
-ボタンは動詞。1画面に主ボタンは1つ。ステップ名＝画面見出し＝次へ進むボタンの動詞。
+ボタンは動詞。1画面に主ボタンは1つ。**「次へ」は無い**（画面は移らない）。
 
 ## 2. 画面構成とルート
 
-### 2.1 ナビゲーション（base.html）
+### 2.1 ヘッダー（base.html）
 
-`ホーム` / `帳票を取り込む` / `一覧表を取り込む` / `設定 ▼`（帳票の種類・一覧表の取り込み設定・AI接続・保存先フォルダ・LightRAGへの入れ方）。右端にヘッダーのAIモデル選択（既存）。
+`帳票取り込み` / `表の取り込み` / `帳票登録` の3つだけ。設定・履歴・ホーム・AIモデル選択はヘッダーに置かない。
 
-取り込み履歴の画面は無い（3.3 のとおりデータを残さないため、履歴に出せるものが無い）。
+### 2.2 1画面の中の「段」の作り
 
-### 2.2 ホーム `GET /`
-- 大きな入口カード2枚（図＋1文）：「帳票を取り込む（1ファイル＝1件の報告書・記録票）」「一覧表を取り込む（Excel/CSV、1行＝1件の一覧・台帳・集計表）」。
-- データを残さないこと（3.3）の案内文。
-- 「作業中の帳票」（読み取り前・確認中）「作業中の一覧表」（読み込み前・読み込み中・確認中・確定処理中・失敗）：続きを開く／削除。
-- 「ダウンロード待ちの帳票」「ダウンロード待ちの一覧表」（確定済みでまだダウンロードしていないもの）：ダウンロード（押すと消える確認つき）。
-  まとめ取り込みは**まとまり1行**にまとめ、zip のボタン（全件確定なら全部、未確定が残っていれば「確定済みN件だけ」）と
-  中の帳票を出す。1件だけの `.md` には「この帳票だけがまとまりから消えます」の確認を付ける。
-  保存先フォルダ（2.8）が設定されていれば、各行に［フォルダに保存］（POST・確認つき）も出す。行ごとのボタンは小さい普通のボタンにする（1画面に主ボタンは1つ）。
-- ダウンロードすると消えるので、この画面が残っているものの一覧そのものになる（取り込み履歴の代わり）。
-- 初回（帳票の種類も一覧表の取り込み設定も0件）は「はじめに」3ステップ（見本から種類/設定を作る → 取り込む → Markdownをダウンロード）。
+3画面とも同じ作りにする。
 
-### 2.3 帳票フロー（blueprint `forms`、prefix `/forms`）
+- 段のしるしは `<section class="step" data-step="<名前>">` で、中に `.step-head`（番号・見出し・要約・開閉）と `.step-body`（中身）を持つ。`templates/components/_ui.html` の `ui.step(id, no, title, open=..., done=...)` マクロで書く。
+- 見た目は3つ：`.step`（まだ開いていない＝灰色）、`.step.is-open`（いま作業する段）、`.step.is-done`（済み。見出しに ✓ と要約が出て畳まれ、クリックで開き直せる）。CSS は `static/style.css`。
+- 開け閉ては `window.ragSections`（`static/app.js`）：`open(id)` / `done(id, 要約, 次の段)` / `reset(id)`（その段を開き直し、後ろを「まだ」に戻す）/ `body(id)`（中身の要素）/ `working(id, 文言)`（段の中に「処理中」を出す・消す）。
+- 送信は `window.ragFetch(url, options)`：`{json: {...}}`（JSONをPOST）、`{form: formまたはFormData}`（ファイルも送れる）、`{html: true}`（画面の一部のHTMLを受け取る）。サーバが JSON を返せばそのオブジェクト、HTML を返せば `{html: "…"}`。失敗はここでトーストに出してから例外を投げる（`{quiet: true}` で自分で出す）。
+- 長い処理はジョブ（`core/jobs.py`）で走らせ、`GET /api/jobs/<job_id>` を同じ画面から読んで進み具合を出す。**別の画面には移らない**。
 
-ステップ表示：`1 ファイルを選ぶ` → `2 帳票の種類とシートを確認` → `3 読み取り結果の確認・修正` → `4 完了（Markdownをダウンロード）`
+### 2.3 帳票取り込み `GET /forms`（blueprint `forms`）
+
+1画面。上から順に段が現れる。
+
+1. **ファイル**：帳票の Excel（.xlsx/.xlsm）をドロップ（複数可）。
+2. **帳票の種類とシート**：候補（「10項目中9項目が見つかりました」）から選び、使うシートを選ぶ。
+3. **読み取った値**：左に元のシート、右に項目。値を直すと Markdown のプレビューも変わる。
+4. **確定してダウンロード**：`.md`（まとめ取り込みは zip）。**渡し終わるとその帳票のデータは消える**（3.3）。
+
+読み取る前の「確定してダウンロード」は灰色のままで、見出しに「読み取りが終わると確定できます」と出る。
+
+AI による種類の推定・空欄探しは無い（0.1）。
+
+### 2.4 表の取り込み `GET /tables`（blueprint `tables`）
+
+1画面。上から順に段が現れる。
+
+1. **ファイル**：Excel/CSV をドロップ。
+2. **読み取り方と取り込み設定**：CSV は文字コード・区切り・前置行、Excel はシート。保存してある取り込み設定の候補（必須列の一致数つき）から選ぶか「新しく作る」。いらない設定の削除もここ（`POST /tables/templates/<id>/delete`）。選び直すたびに自動で保存し、下の「表の範囲」を作り直す。
+3. **表の範囲と見出し行**：先頭60行の色つきグリッドで確かめ、必要なら直す。
+4. **列の対応づけ**：どの列が何か、型・単位・md での扱い、AI整形の対象（1列だけ）。保存してある取り込み設定がそのまま使えるとき（見出しが変わっていないとき）はこの段を飛ばし、済みにして見出しに「〈設定名〉（保存してある取り込み設定をそのまま使いました）」と出す（見出しをクリックすれば開いて直せる）。
+5. **AI整形（任意）**：決めた1つの列（いまは一覧表の追記ログ列）の文章を構成する。**AI接続の設定（接続先URL・APIキー・使うモデル・接続テスト）はこの段の中に畳んで置く**（`details`、既定は閉じる）。対象の列が無い取り込みでは灰色のままで、見出しに「追記ログの列（AI整形の対象）がないので、この取り込みでは使いません」と1行だけ出す。
+6. **できるものの確認**：作られる md の一覧と中身、警告、合計の照合。
+7. **確定してダウンロード（zip）**：渡し終わるとその取り込みのデータは消える（3.3）。
+
+### 2.5 帳票登録 `GET /form-types`（blueprint `form_types`）
+
+1画面。登録済みの帳票の種類の一覧も同じ画面に出す。
+
+1. **見本ファイル**：帳票の Excel をドロップ。
+2. **名前**：ファイル名から入れておく。直せる。
+3. **項目を決める**：シートのグリッドで、見出しセル → 値セル の順にクリックすると項目が1つ増える。
+4. **読み取りテスト**：その場で読み取り結果を出す。
+5. **使用開始**。
+
+### 2.6 設定の画面（無い）
+
+設定の画面も、設定の blueprint（`views/settings.py`）も無い。AI接続（接続先・APIキー・モデル・接続テスト）は
+**「表の取り込み」画面の AI整形の段の中**にある `details`（既定は畳んである）で、次のルートが受ける。
 
 | ルート | 内容 |
 |---|---|
-| `GET /forms/new` | ファイル選択（ドラッグ＆ドロップ可、**複数選択可**）。.xlsx/.xlsm。帳票の種類が0件なら作成へ案内 |
-| `POST /forms/upload` | 1ファイル: 保存→ `/forms/<id>/type`。複数ファイル（50件まで）: 1つの**取り込みのまとまり**（`documents.batch_id`）にして先頭の帳票へ。読めなかったファイルはメッセージにして他は進める |
-| `GET /forms/<id>/type` | 候補の種類（「10項目中9項目」表示）、シート選択、[AIで種類を推定]。一覧表らしい（見出し行の下に同形行が10行以上）なら「一覧表の取り込みへ」を提案 |
-| `POST /forms/<id>/read` | 読み取り→ `/forms/<id>/review` |
-| `GET /forms/<id>/review` | 左：元のシートのHTMLプレビュー（セルグリッド、項目にフォーカスで見出しセル・値セルをハイライト）。右：項目（入力欄、状態タグ、警告）。上部チップ「要確認 N / AIが入力 N / 手で修正 N」。[AIで空欄を探す]。Markdownプレビュー（タブ、入力に連動して更新）。主ボタン [確定してMarkdownを作成]。出口は非破壊の「ホームに戻る（作業内容は保存されています）」 |
-| `POST /forms/<id>/draft` | 入力内容の途中保存（JSON、fetch。PRGなし・204） |
-| `POST /forms/<id>/ai-fill` | 空欄をAIで探す→review へ |
-| `POST /forms/<id>/confirm` | 必須欠落があれば止める（「空欄のまま確定」チェックで許可）。confirmed に保存→ `/forms/<id>/done` |
-| `GET /forms/<id>/done` | 完了。主ボタン [この帳票のMarkdownをダウンロード（.md）]（押すと消える確認つき）、[次の帳票を取り込む]、[ホームへ]。まとまりの帳票なら進み具合（3/12）・一覧・[次の帳票へ]、全件確定後は [まとめてMarkdownをダウンロード（zip）]、未確定が残っていれば [確定済みN件だけをダウンロード（zip）] |
-| `GET /forms/<id>` | 詳細（確定内容、Markdown、元ファイル）。[修正する]→review（修正中） |
-| `POST /forms/<id>/discard-changes` | 修正中の変更を破棄し確定済みの版に戻す |
-| `GET /forms/<id>/download.md` | ダウンロード。md は **確定済みデータから毎回生成**。**渡したあとその帳票のデータを消す**（3.3） |
-| `GET /forms/batches/<batch_id>/download.zip` | まとまりの全 md を zip で渡し、**まとまり全体を消す**。未確定が残っていれば断ってその帳票へ戻す。`?confirmed_only=1` なら確定済みの分だけを zip にして**その分だけ**消す（読めない帳票が1件混ざっても作業が止まらないように） |
-| `POST /forms/<id>/save-to-folder` | ダウンロードの代わりに、同じ .md を保存先フォルダ（2.8）に書き、書き終えたらダウンロードと同じくその帳票のデータを消す |
-| `POST /forms/batches/<batch_id>/save-to-folder` | まとまりの .md を zip にせず1ファイルずつ保存先フォルダに書き、zip のダウンロードと同じ分を消す（フォームの `confirmed_only=1` で確定済みの分だけ） |
-| `GET /forms/<id>/download.json` / `original` | 確認用のダウンロード（消さない。ボタンにも「（消えません）」と書く）。JSON の `source` はファイル名・ハッシュ・シートだけで、`original` への URL は書かない（md をダウンロードすると消えて 404 になるため） |
-| `POST /forms/<id>/delete` | 削除（確認文「元のファイルと読み取り結果を削除します。元に戻せません」）。`next=` で戻り先を指定（ホームから使う） |
-| `POST /forms/<id>/reread` | 種類/シートを選び直して再読み取り（確定済み・修正中なら「手修正とAI入力が失われます」確認必須） |
+| `POST /tables/ai-connection` | AI接続の保存（接続先・APIキー・モデル・既定モデル）。JSON |
+| `POST /tables/ai-connection/models` | API からモデル一覧を取る。JSON |
+| `POST /tables/ai-connection/test` | 接続テスト（models.list ＋ 1回の短い chat）。JSON |
+| `POST /tables/templates/<id>/delete` | 取り込み設定の削除（読み取り方の段の候補一覧から）。JSON |
 
-### 2.4 一覧表フロー（blueprint `tables`、prefix `/tables`）
+旧ルート（`/documents/*`, `/patterns/*`, `/settings/*` すべて, `/history/*`, `/api/models`）は削除。
+`/settings/…` を開くと 404（エラー画面に「帳票取り込みへ」が出る）。取り込み設定の JSON 書き出し・読み込みも無くなった。
 
-ステップ表示：`1 ファイルを選ぶ` → `2 取り込み設定を選ぶ` → `3 表の範囲と見出しを確認` → `4 列の対応づけ`（設定を作る/変える時のみ） → `5 AI整形（任意）` → `6 内容とファイルの確認` → `7 完了（ダウンロード）`
-
-| ルート | 内容 |
-|---|---|
-| `GET /tables/new` | ファイル選択（.xlsx/.xlsm/.csv/.tsv/.txt） |
-| `POST /tables/upload` | 事前チェック（形式・zip上限・文字コード判定）→ import 作成 → `/tables/imports/<id>/source` |
-| `GET /tables/imports/<id>/source` | CSV：文字コード/区切り/前置き行の判定結果（変更可）。Excel：シート一覧。取り込み設定の候補（「必須列 5/5 一致」）と「新しい取り込み設定を作る」 |
-| `POST /tables/imports/<id>/source` | 選択を保存→ layout |
-| `GET /tables/imports/<id>/layout` | 先頭60行の色分けグリッド（見出し=青、データ=白、小計・合計=橙、注記=緑、継続行=水色、除外=灰、非表示/取り消し線=斜線）。見出し行・データ終了行を変更（JSで即時再判定 `POST .../layout/detect` JSON）。クロス集計は縦持ち変換の先頭20行も表示 |
-| `POST /tables/imports/<id>/layout` | 範囲を保存→（新規設定なら）columns / （既存設定なら）見出し変更がなければ ai、変更があれば columns（見出しの変更を確認） |
-| `GET/POST /tables/imports/<id>/columns` | 列の対応づけ表（元の見出し/値の例/推定型と型エラー率/空欄率/標準キー/表示名/説明/型/単位/役割/空欄＝上と同じ/mdでの扱い/AI整形の対象）。保存は JSON（fetch）。設定名・期間の単位・ファイルのまとめ方もここ |
-| `GET /tables/imports/<id>/ai` | AI整形（log 役割の列がある場合のみ。なければスキップして preview）。分割プレビュー（AIなし）→ 試し実行（10行）→ 全件実行（範囲・同時実行数・見積もり・外部送信の確認）→ 進捗（一時停止/再開/中止）。「AI整形をしないで進む」 |
-| `POST /tables/imports/<id>/ai/...` | `split-preview`（JSON）, `trial`（1行ずつ, JSON）, `run`, `pause`, `resume`, `cancel` |
-| `GET /tables/imports/<id>/preview` | 概要（読込件数・除外件数と理由・エラー/警告・合計の照合）、**作られる md の一覧と中身**（下書きはジョブで作り、待ち画面を出す）、問題一覧（CSV）、データ（100行ずつ）。ダウンロードで消えることの一文。期間の置き換え・投入済みとの差分は持たない（8.1） |
-| `POST /tables/imports/<id>/confirm` | エラーが残っていれば止める。ジョブで全 md を作る→ done |
-| `GET /tables/imports/<id>/done` | [Markdownをまとめてダウンロード（zip）]（押すと消える確認つき）[正規化CSVをダウンロード]。zip は渡したあと**その取り込みのデータを消す**（3.3）。正規化CSVは zip の「管理用_RAGには入れない」フォルダにも入る |
-| `POST /tables/imports/<id>/save-to-folder` | zip の代わりに、`RAG投入用/` と同じ md を保存先フォルダ（2.8）の直下に1ファイルずつ書く。設定でオンなら `管理用_RAGには入れない/` と同じファイルを `<保存先>/_管理用_RAGには入れない/<取り込み名>_<日時>/` に書く。書き終えたら zip のダウンロードと同じくその取り込みのデータを消す |
-| `GET /tables/imports/<id>/normalized.csv` | 正規化CSV（消さない。zip にも同じものが入る） |
-| `POST /tables/imports/<id>/delete` | 取り込みを削除（`core.purge.purge_table_import`）。戻り先はホーム |
-| `GET /api/jobs/<job_id>` | ジョブ進捗（JSON） |
-
-### 2.5 取り込み履歴（作らない）
-データを残さない方針（3.3）にしたため、`/history` の画面・`views/history.py`・`templates/history.html` は削除した。
-残っているもの（作業中・ダウンロード待ち）の一覧はホーム（2.2）が持ち、確定済み帳票のまとめ zip は
-「取り込みのまとまり」（`GET /forms/batches/<batch_id>/download.zip`）が引き継ぐ。
-
-### 2.6 設定（blueprint `settings`、prefix `/settings`）
-| ルート | 内容 |
-|---|---|
-| `/settings/form-types` | 帳票の種類の一覧・作成（見本ファイル→候補確認→読み取りテスト→**使用開始**）・編集（保存しても使用中にしない。作成中のものは読み取りテスト後に[使用開始]）・停止/再開・削除（影響：確定済み帳票N件は残る） |
-| `/settings/table-templates` | 一覧表の取り込み設定の一覧・編集・JSON書き出し/読み込み・削除 |
-| `/settings/ai` | AI接続（既存）＋[接続テスト]（models.list と 1回の短い chat） |
-| `/settings/output` | 保存先フォルダ（2.8）: md の保存先フォルダ（絶対パス。空欄＝使わない）、管理用ファイルもサブフォルダに保存するか、同じ名前があるとき（止める＝既定／上書き）。保存のときに確かめる。[フォルダを確認する]（`POST /settings/output/check`、JSON）で確かめ直す |
-| `/settings/lightrag` | LightRAGへの入れ方（サーバー設定の推奨、ファイルの入れ方・入れ替え手順、エンティティ種別YAMLのダウンロード） |
-
-旧ルート（`/documents/*`, `/patterns/*`, `/settings/models`, `/settings/aliases`（名寄せ辞書は 8.1）, `/history/*`（2.5））は削除。`/api/models` は維持。
-
-エラー画面（`templates/errors/`）はすべて日本語で、ホームへのボタンを置く。403 は他サイトからの書き込みを断ったとき（`app._refuse_cross_site_write`）で、画面の JSON 送信（`Accept: application/json`）には同じ理由を JSON で返す。404 は「ダウンロード済みか削除されたか URL 違い」、500 は起動した画面のメッセージを見るよう案内する。
+エラー画面（`templates/errors/`）はすべて日本語で、帳票取り込みへ戻るボタンを置く。403 は他サイトからの書き込みを断ったとき（`app._refuse_cross_site_write`）で、画面の JSON 送信（`Accept: application/json`）には同じ理由を JSON で返す。404 は「ダウンロード済みか、しばらく置いたままで捨てられたか、URL違い」、500 は起動した画面のメッセージを見るよう案内する。
 
 ### 2.7 UI共通部品（templates/components/_ui.html のマクロ）
-`steps(items, current)`、`card`, `badge(state)`, `chips`, `empty_state`, `confirm_delete_form`, `save_form`（保存先フォルダに保存する POST フォーム）, `progress(job)`, `data_grid(rows)`（セルグリッド）, `file_drop(name, accept)`。CSS はデザイントークン（色・余白・角丸）を `:root` 変数で統一。ライト基調、配色は現行を踏襲しつつ整理。
+`step(id, no, title, open=, done=, summary=)`（1画面の中の段。3画面ともこれで書く）、`card`, `badge(state)`, `chips`, `empty_state`, `progress(job)`, `data_grid(rows)`（セルグリッド）, `file_drop(name, accept)`。CSS はデザイントークン（色・余白・角丸）を `:root` 変数で統一。PC専用（`body { min-width: 1200px }`）。
 
-### 2.8 保存先フォルダ（2026-09-19 追加。`services/output_folder.py`・`views/folder_save.py`）
-ダウンロードしたファイルをエクスプローラーで探して LightRAG に入れ直す手間をなくすため、作った md を**利用者が決めたフォルダに直接保存**できる。
-ふつうは LightRAG サーバーの `INPUT_DIR`（`WORKSPACE` を使うなら `INPUT_DIR/<ワークスペース名>`）を指定し、保存したあと LightRAG の［スキャン］（`POST /documents/scan`）で取り込む。LightRAG への送信はしない（0章のまま。書くのはファイルだけ）。
-- **設定**（`data/output_settings.yaml`。AI接続と同じく `services/settings_store` で書く。設定なので残す）：`folder`（絶対パス。空＝使わない）、`save_admin`（管理用ファイルも保存）、`on_conflict`（`stop`＝保存を止めて知らせる〈既定〉／`overwrite`＝上書き）。
-  保存時と［フォルダを確認する］で、絶対パスか・あるか・フォルダか・書き込めるか（一時ファイルを作って消す）を確かめる。エクスプローラーの「パスのコピー」が付ける `"` は外す。アプリ自身のデータの置き場所（`UPLOAD_DIR`・`DATA_DIR`・`TABLES_DIR`）の中は断る（起動時の片付けで消されるため）。
-- **ボタン**：フォルダが設定されているときだけ、ダウンロードがある所（帳票の完了・詳細の .md、まとまりの zip と「確定済みN件だけ」、一覧表の完了の zip、ホームのダウンロード待ちの行）に［保存先フォルダに保存］を出す。完了・詳細画面ではこれを主ボタンにし、ダウンロードは次の選択肢として残す。POST なので他サイトからの書き込みを断る仕組み（`app._refuse_cross_site_write`）がそのまま効く。確認文はダウンロードと同じく「このPCのアプリから消える／もう一度保存・ダウンロードできない」（修正中の帳票は変更が入らないことを先に書く）。
-- **書くもの**：ダウンロードと**同じ中身**（帳票は `download.md`／まとまりの zip の中身と同じ名前・バイト列。一覧表は `tables/pipeline.build_download_files` を zip と共有）を zip にせず1ファイルずつ。md は保存先の直下。一覧表の管理用ファイル（正規化データ・問題一覧・取込レポート）は `save_admin` がオンのときだけ `<保存先>/_管理用_RAGには入れない/<取り込み名>_<日時>/` に置く。
-- **LightRAG がサブフォルダを読まないことの根拠**（LightRAG 1.5.7 `lightrag/api/routers/document_routes.py`）：`POST /documents/scan`（4409〜4412行）は `run_scanning_process` の中で `doc_manager.iter_new_files()`（3785行）だけから候補を集める。`iter_new_files`（1502〜1547行）は `os.scandir(self.input_dir)` で `INPUT_DIR` の**直下だけ**を見て（1530行）、拡張子が読める種類にない物と**ファイルでない物（フォルダ）は飛ばす**（1533〜1536行「`__parsed__` and any other directory is skipped」）。再帰はしない。だからサブフォルダ `_管理用_RAGには入れない/` の CSV は取り込まれない（兄弟フォルダに分ける必要は無い）。
-- **書き方**：各ファイルは同じフォルダの一時ファイル `.rag_<乱数>.tmp`（`.tmp` は LightRAG の対応拡張子に無いので、書き途中をスキャンが拾わない）に書いて `fsync` し、`os.replace` で本来の名前にする。名前は `core/naming` で作ったものだが、保存先の直下を指すか（区切り文字・`..`・`:` を含まない、`resolve()` した親が保存先）を必ず確かめる。
-- **同じ名前**：LightRAG 1.5.x は文書をファイル名で見分ける（doc_id＝名前の MD5。末尾の分割ヒント `.[…]` は外して比べる: `lightrag/parser/routing.py` 62行・1085〜1099行）。取り込み終えたファイルは `INPUT_DIR/__parsed__/` に移り、そこに同名があれば `_001` などを足す（`lightrag/utils.py` 917〜942行、`document_routes.py` 164行）。同じ名前のまま**スキャン**すると、`classify_scan_file`（`document_routes.py` 3040〜3135行）が既存の行を見て分ける：`PROCESSED` なら取り込まず `__parsed__/<名前>_001.md` などに移すだけ（3101行・3843〜3850行「Skipping already processed file」。文書の一覧には何も出ない）、取り込み待ち・取り込み中の行で同じ物理名なら `RESUME_SAME_PHYSICAL_SOURCE`（3126〜3129行・3897〜3904行）で**前の内容（full_docs）のまま**処理を続け、上書きした中身は使われない。どちらも LightRAG の中身は古いまま。（アップロード・insert の経路では `[DUPLICATE:filename]` になる: `lightrag/pipeline.py` 1340〜1409行。）
-  **削除と `delete_file`**：LightRAG の文書の削除は、既定ではファイルを消さない（`DeleteDocRequest.delete_file` の既定は False: 1065〜1068行。WebUI の「アップロードされたファイルも削除」も既定はオフ: `lightrag_webui/src/components/documents/DeleteDocumentsDialog.tsx` 45行）。オンにすると `delete_file_variants_by_file_path`（2153〜2200行、4232〜4236行から呼ぶ）が `INPUT_DIR` と `INPUT_DIR/__parsed__` の**両方**から同じ名前（`__parsed__` では `_001` などを外して比べる）のファイルを消す。
-  そこで利用者への案内は、**保存の前に**削除するなら `delete_file=true`（`__parsed__` の古いファイルも消え、アプリの「止める」に引っかからない）、**保存のあとで**削除するなら `delete_file=false`（true だと、いま保存したファイルも消える。アプリにはもうデータが無い）とする（保存の結果の画面・LightRAGへの入れ方 6・設定の画面・README）。
-  そこで保存の前に、保存先の直下と `__parsed__/` にある「LightRAG で同じ文書になる名前」（ヒントを外し、大文字・小文字をそろえて比べる。`__parsed__` では末尾の `_001` などが LightRAG の番号か名前の一部（`No._123` など）か分からないので、番号を外した名前と外さない名前の**どちらか**が合えば同じとみなす。`output_folder.lightrag_key`・`find_clashes`）を探す。
-  `stop` なら**何も書かずに**名前の一覧と「LightRAG で先に削除してから入れ直す」説明を出す（409）。`overwrite` なら同じ名前のファイルは上書きし、結果の画面に上書きした名前と、LightRAG で同じ文書とみなされる別のファイル（ヒント違い・`__parsed__`）を出す。
-- **失敗したとき**：1つでも書けなければ、この回に書いたファイルを消し、上書きしたファイルは退避しておいた元の中身に戻し、作ったサブフォルダも消す。データは消さない（もう一度押せる）。失敗の画面には書けなかったファイルの名前を出す。
-  消すときは `core.files.remove_upload` と同じく少し待って何度か試し（読み取り専用なら外してから）、それでも消せなかったファイル（ウイルス対策・同期ソフトが掴んでいたなど）は「消した」とは言わず、失敗の画面にパスを並べて「スキャンの前に消す」よう案内する（画面に出すだけで flash には入れない）。上書きで退避した `.rag_….bak` が消せなかったときも結果の画面に出す。
-- **パスの長さ**：Windows の長いパスが無効（`LongPathsEnabled`=0）なら、パス全体で259文字（フォルダを作るときは247文字）まで。保存の前にすべての名前（一時ファイル `.rag_<16桁>.tmp` の長さも含む）を確かめ、超える名前があれば何も書かずに 400 で知らせる。設定の画面と［フォルダを確認する］では、名前に使える文字数が120文字を切るフォルダに注意を出し、確かめ用の一時ファイルも書けない長さなら「パスが長すぎます」と出す（権限の問題とは言わない）。
-- **書けるかの確かめ**：一時ファイルを `os.open(O_CREAT|O_EXCL)` で1回だけ作って消す。`tempfile.mkstemp` は使わない（Windows でアクセス権で断られたフォルダだと、`PermissionError` を名前の衝突とみなして試し続け、戻ってこない。保存はロックの中で確かめるので、ほかの保存まで止まる）。
-- **管理用のサブフォルダ**：`_管理用_RAGには入れない` がジャンクション・シンボリックリンクなら（あるいは解決した先が保存先の直下でなければ）何も書かずに断る。作った日時のフォルダも、解決した先が保存先の中かを確かめてから書く。
-- **消す**：すべて書けたあとにだけ、ダウンロードを渡し終えたときと同じ関数（`purge_documents` / `purge_batch` / `purge_table_import`）で消す（3.3）。同じものを2回押しても重ならないよう、保存と削除はプロセス内のロックで1つずつ行う（2回目は「もう無い」404）。
-- **結果の画面**：POST の応答でそのまま出す（リダイレクトしない・`Cache-Control: no-store`）。保存先、md の件数、ファイル名（スクロールする一覧）、上書きした名前、次に LightRAG で行うこと（［スキャン］か `POST /documents/scan`、入れ替えなら削除してから。**この時点の削除は「アップロードされたファイルも削除」をオフで**。上書きした名前か同じ文書とみなす別のファイルがあれば、その注意を目立たせて出す）。ファイル名は flash（セッションクッキー）に入れない（3.3）。
-  同じ名前で止めた画面（409）は、`__parsed__` にあるものについては「削除のときに『アップロードされたファイルも削除』を入れる（または `__parsed__` の古いファイルを手で消す）」と案内し、「上書きする」への切り替えは直下にあるときだけ勧める（`__parsed__` の重なりは上書きしても LightRAG に入らないため）。
-- **ボタン（ホームのまとまりの中）**：まとまりの中の1件ずつにある「.mdだけ」の横にも、フォルダが設定されていれば「フォルダに保存」を出す（その1件だけがまとまりから消える）。
+### 2.8 保存先フォルダ（2026-09-19 追加 → 2026-09-20 廃止）
+作った md を利用者が決めたフォルダへ直接保存する機能は削除した。受け取り口はダウンロードだけ（`services/output_folder.py`・`views/folder_save.py`・`/settings/output`・`data/output_settings.yaml` は無い）。
+
+### 2.9 LightRAGへの取り込み案内ページ（2026-09-20 廃止）
+`/settings/lightrag` と設備保全向けエンティティ種別 YAML の配布は削除した。作る Markdown は**どのサーバー設定でも安全**でなければならず、ファイル名の文字ヒント（`.[legacy-R(...)]`）には頼らない。確認の段では「zip に何が入っているか」と「`管理用_RAGには入れない` は LightRAG に入れないこと」だけを2〜3文で伝える。
 
 ## 3. データモデル（SQLite `instance/app.db`）
 
 `models/database.py`：接続時に `PRAGMA foreign_keys=ON; journal_mode=WAL; busy_timeout=5000`。`PRAGMA user_version` による連番マイグレーション（`MIGRATIONS: list[Callable[[sqlite3.Connection], None]]`）。バックグラウンドスレッド用に `connect()`（`g` を使わない接続）を公開。
 
 ### 3.1 帳票（既存を拡張）
-- `patterns`：既存列＋`title_fields TEXT DEFAULT '[]'`（タイトル・ファイル名に使う field_name の配列）、`md_options TEXT DEFAULT '{}'`（`{"domain_context_fields": [...], "omit_person_fields": true}` 等）、`version_no INTEGER DEFAULT 1`（保存ごとに+1）。`status` の値は draft/active/inactive のまま（表示語だけ変更）。
+- `patterns`：既存列＋`title_fields TEXT DEFAULT '[]'`（タイトル・ファイル名に使う field_name の配列）、`md_options TEXT DEFAULT '{}'`（`{"domain_context_fields": [...]}` 等。入力を削る設定は置かない＝人名の項目も必ず出す）、`version_no INTEGER DEFAULT 1`（保存ごとに+1）。`status` の値は draft/active/inactive のまま（表示語だけ変更）。
 - `pattern_fields`：＋`unit TEXT DEFAULT ''`、`rag_output TEXT DEFAULT 'show'`（show/omit）。`data_type` は string/text/date/number/table（明細表）。`extraction_rule` は `{"direction": "auto"}`、明細表は＋`"columns": [見本で見た列見出し]`（見出しの書き方が違う帳票で、列見出しが似た表を探すのに使う）。探す区画がある項目は＋`"section": "回答"`（区切りの見出しの名前。その区画の中だけでラベルを探す。8.0）。
 - 明細表の値（`data_json` の各項目の `value`）：`{"columns": ["品番", "品名", "数量"], "rows": [["PW48-1591", "ベアリング", "2"], ...]}`。行が無ければ null。連番だけの No 列と「なし」だけの行は読まない。
 - `documents`：＋`confirmed_json TEXT`、`confirmed_at TEXT`、`title TEXT DEFAULT ''`（一覧の見出し。タイトル項目の値を連結）、`batch_id TEXT DEFAULT ''`・`batch_order INTEGER DEFAULT 0`（まとめ取り込み。同じ `batch_id` の帳票を順に確認し、zip でまとめて渡して一緒に消す）。`data_json` は作業中の値。状態は導出：`data_json IS NULL`→読み取り前、`confirmed_json IS NULL`→確認中、`confirmed_json != data_json`→修正中、それ以外→確定済み。`markdown`・`registered_at`・`status` 列は使わない（互換のため残す。マイグレーションで `registered_at`→`confirmed_at`、`status='registered'` の `data_json`→`confirmed_json` にコピー）。
@@ -188,15 +170,11 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 
 | | 消すもの | いつ |
 |---|---|---|
-| 帳票 | `uploads/documents/<保存名>`、`documents` の行（と `document_id` を持つ表の行） | `GET /forms/<id>/download.md` を**送り終えたあと**。まとまりは `GET /forms/batches/<batch_id>/download.zip` でまとまり全体（`?confirmed_only=1` なら確定済みの分だけ）。保存先フォルダに保存したとき（`POST …/save-to-folder`）は、**全ファイルを書き終えたあと**に同じ範囲 |
-| 一覧表 | `uploads/tables/<保存名>`、`TABLES_DIR/imports/<id>/`（rows.jsonl.gz・issues・控え・md・preview_md）、`table_imports` の行、`jobs`（`ref_type='table_import'`）、`ai_items`（`import_id` がこの取り込みの分）、どの `ai_items` からも参照されなくなった `llm_calls` | `GET /tables/imports/<id>/download.zip` を**送り終えたあと**。保存先フォルダに保存したとき（`POST /tables/imports/<id>/save-to-folder`）は**全ファイルを書き終えたあと** |
+| 帳票 | `uploads/documents/<保存名>`、`documents` の行（と `document_id` を持つ表の行） | `GET /forms/<id>/download.md` を**送り終えたあと**。まとまりは `GET /forms/batches/<batch_id>/download.zip`。zip に入るのは**確定済みの帳票だけ**で、消えるのもその分だけ（まだ確定していない帳票はこのPCに残り、同じ画面で続きを読める） |
+| 一覧表 | `uploads/tables/<保存名>`、`TABLES_DIR/imports/<id>/`（rows.jsonl.gz・issues・控え・md・preview_md）、`table_imports` の行、`jobs`（`ref_type='table_import'`）、`ai_items`（`import_id` がこの取り込みの分）、どの `ai_items` からも参照されなくなった `llm_calls` | `GET /tables/imports/<id>/download.zip` を**送り終えたあと** |
 
-- **保存先フォルダへの保存も「渡した」とみなす**（2.8）：保存先フォルダに書いたものはアプリの外のファイルなので、ダウンロードと同じくアプリのデータを消す。
-  消すのは全ファイルを書き終えたあとだけ。1つでも書けなかったとき・同じ名前があって止めたときは、その回に書いたファイルを消して（上書きしたものは戻して）、データは残す。
-  ダウンロードと違って「受け取られる前に消える」ことは無い（書き終えたことをアプリ自身が確かめてから消す）。保存したファイルはアプリの管理の外で、消すのは利用者（LightRAG が取り込むと `__parsed__/` に移す）。
-  残るのは設定 `data/output_settings.yaml`（フォルダのパスと2つの選択。取り込んだデータは入らない）。
 
-- **残すもの**：帳票の種類（`patterns` 系）・一覧表の取り込み設定（`table_templates` 系）・AI接続の設定（`data/model_settings.yaml`・`data/prefs.yaml`）・保存先フォルダの設定（`data/output_settings.yaml`）。これらは設定であってデータではない。
+- **残すもの**：帳票の種類（`patterns` 系）・一覧表の取り込み設定（`table_templates` 系）・AI接続の設定（`data/model_settings.yaml`・`data/prefs.yaml`）。これらは設定であってデータではない。
 - **履歴は持たない**：何をいつ取り込んだかの1行も残さない。だから取り込み履歴の画面が無い（2.5）。
   番号の続き（`sqlite_sequence`。AUTOINCREMENT の表が「これまでに使った一番大きい番号」＝取り込んだ件数を覚えている）も、
   取り込みの表（`documents`・`table_imports`・`jobs`・`ai_items`）が空になったとき乱数（2^31〜2^52）に置き換える
@@ -205,6 +183,16 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
   書き換えたり消したりする。乱数にすると最初の番号（1〜）とも前回の番号とも重ならない（重なる確率は1回あたり
   件数 / 約4.5×10^15）ので、古い画面の操作は 404 になる。作業中の取り込みが残っている間は番号の続きはそのまま。
   新しいDBは 1 から始まる。
+- **途中のものは捨てる（2026-09-20）**：作業中の一覧もダウンロード待ちの一覧も持たない（0.1）ので、
+  閉じた画面の続きを開く入口が無い。残しておく意味が無いので捨てる。
+  - 起動時：ダウンロードしていない帳票・一覧表を**すべて**捨てる（`core/purge.purge_all_pending`、`app._purge_pending`）。
+  - 動いている間：`core.purge.STALE_HOURS`（24時間）さわられていないものを1時間ごとに捨てる
+    （`core/purge.sweep_stale`、`app._start_sweeper` の daemon スレッド）。
+    **動いているジョブ（待機中・実行中・一時停止中）が付いているものは捨てない**。大きな表の読み込みや AI整形は
+    24時間を超えることがあり、途中で消すとジョブが「もう無い行」を書きに行って失敗する。ジョブが終われば
+    `updated_at` がその時刻になるので、次の回以降に改めて対象になる。
+  - どちらも `purge_documents` / `purge_table_import` を通るので、消えるものは上の表のとおり。
+    設定（帳票の種類・一覧表の取り込み設定・AI接続）は捨てない。
 - **消し方**：`core/purge.py`（`purge_documents` / `purge_batch` / `purge_table_import`）。消す表は名前で決め打ちせず、その取り込みを指す列（`document_id` / `import_id`）を持つ表を `sqlite_master` から探す（表が増えても消し残さない）。
 - **欠けないダウンロード**：md も zip も全体をメモリに作ってから消す。作れなかったとき（未確定・失敗）は何も消さない。
   消すのは**本文を最後まで送り終えたあと**（`core/purge.purge_after_send`）。通信が切れた・ブラウザを閉じたなどで
@@ -233,12 +221,11 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
   （`tables/store.delete_template` → `core/purge.sweep_orphan_ai`。起動時の片付けでも同じ掃除をする）。
 - **控えを書き戻さない**：`tables/source_cache.ImportSource` はフォルダを `__init__` でだけ作る。消したあとに
   別のタブの画面処理が控えを書いても、`imports/<id>/` は復活しない。
-- **消し損ね**：起動時に、DBから参照されていないアップロードファイルと `imports/<id>/` フォルダ、もう無い取り込みを指す `ai_items`（と、それで参照されなくなった `llm_calls`）を片付ける（`app._cleanup_leftovers` → `core/files.remove_orphan_uploads` / `remove_orphan_import_dirs`、`core/purge.delete_orphan_ai_items`）。`purge_table_import` も同じ掃除をする。作業中のものは DB に行があるので消さない。`purge_table_import` で `imports/<id>/` を消し切れなかったとき（Windows で掴まれていた）は、残ったファイルの中身を 0 バイトに切り詰め（`remove_upload` と同じ。名前は残っても読み込んだ行・md は残さない）、ログに残し、次の起動時に片付く。アップロードのファイルや `imports/<id>/` を消し切れなかったことは `core/purge.purge_incomplete()` で分かり、保存先フォルダへの保存の結果の画面は「消しました」と言わずに「消し切れませんでした」と知らせる。帳票・一覧表の［削除］の案内も「一部のファイルは使用中で消し切れず、中身を空にしました。次の起動時に片付きます」にする。
+- **消し損ね**：起動時に、DBから参照されていないアップロードファイルと `imports/<id>/` フォルダ、もう無い取り込みを指す `ai_items`（と、それで参照されなくなった `llm_calls`）を片付ける（`app._cleanup_leftovers` → `core/files.remove_orphan_uploads` / `remove_orphan_import_dirs`、`core/purge.delete_orphan_ai_items`）。`purge_table_import` も同じ掃除をする。作業中のものは DB に行があるので消さない。`purge_table_import` で `imports/<id>/` を消し切れなかったとき（Windows で掴まれていた）は、残ったファイルの中身を 0 バイトに切り詰め（`remove_upload` と同じ。名前は残っても読み込んだ行・md は残さない）、ログに残し、次の起動時に片付く。アップロードのファイルや `imports/<id>/` を消し切れなかったことは `core/purge.purge_incomplete()` で分かる。帳票・一覧表の［削除］の案内も「一部のファイルは使用中で消し切れず、中身を空にしました。次の起動時に片付きます」にする。
 - **消したあとの AI整形**：動いている AI整形のジョブは、取り込みの行が消えたら新しい呼び出しを出さず、結果も書かずに止まる（`aiproc/runner._import_gone`。ジョブの行が消えたときは `JobContext` が中止扱いにする）。一覧表の削除・確定・zip のダウンロードは AI整形の実行中は受け付けない。
 - **他サイトからのダウンロード（＝削除）を断る**：消すダウンロード（`forms.download_md` / `forms.download_batch` / `tables.download_zip`）は GET でも、`Sec-Fetch-Site` が same-origin / none 以外、他サイトの `Origin`、（`Sec-Fetch-Site` が無いときは）他サイトの `Referer` なら 403（`views.PURGING_ENDPOINTS`）。
 - **読み取れないアップロード**：事前チェックや読み込みで思わぬ例外が出ても、アップロードしたファイルは消してから落とす（帳票・一覧表とも）。
 - **画面の知らせ**：ダウンロードのボタンには確認ダイアログ（`data-confirm`）、完了・確認画面には「ダウンロードするとこのPCから消える／もう一度ダウンロードできない」の一文を出す。
-  保存先フォルダが設定されているときは［保存先フォルダに保存］にも同じ意味の確認（`views.forms.save_confirm` / `batch_save_confirm`、`views.tables.SAVE_TO_FOLDER_CONFIRM`）を付け、完了・詳細画面とホームの案内に「保存したときも同じ」を足す。
   修正中（確定済みの版あり）の帳票は、確定し直していない変更が入らずに消えることを確認文の先頭に書く（確認・完了画面とホームの .md / zip ボタン。`views.forms.delete_confirm` / `batch_zip_confirm`）。
   消えないボタン（帳票の `download.json`・`original`）には「（消えません）」と書く。ホームではまとめ取り込みを1行にまとめ、
   1件だけダウンロードするとまとまりが崩れることを押す前に知らせる。
@@ -261,8 +248,8 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 | WP-pipe | `tables/spec.py`, `tables/normalize.py`, `tables/checks.py`, `tables/markdown.py`, `tables/summaries.py`, `tables/outputs.py`, `tables/pipeline.py`, `tables/store.py`, `tests/test_tables_pipe*.py` | 取り込み設定の仕様、正規化、チェック、md生成（記録・集計・データセット説明）、zip、全体の実行関数、DBアクセス（`tables/state.py` は 8.1 で外した） |
 | WP-log | `logproc/*.py`, `tests/test_logproc*.py` | 追記ログの分割、日時解決、記入者、識別子・数量・予定句、マスク、用語集、時系列の描画 |
 | WP-ai | `aiproc/*.py`, `services/llm.py`（ジョブ用呼び出し口の追加のみ。既存関数の挙動は変えない）, `tests/test_aiproc*.py`, `tests/fake_servers.py`（拡張のみ） | 構造化出力の方式判定、プロンプト生成、照合、キャッシュ、AIジョブ、custom 段 |
-| WP-forms | `excel/*`, `pattern/*`, `export/formats.py`, `services/ai_assist.py`, `tests/test_extraction.py`, `tests/test_forms_md.py` | 帳票の md 改善（タイトル・ファイル名・定型文削減・値の NFKC・単位・出さない項目）、種類定義の拡張、一覧表らしさ判定関数 |
-| WP-shell | `app.py`, `config.py`, `templates/base.html`, `templates/components/*`, `templates/home.html`, `templates/settings/*`, `templates/errors/*`, `static/style.css`, `static/app.js`, `views/__init__.py`, `views/home.py`, `views/settings.py`, `views/files.py`（削除し core/files へ移行）| レイアウト・デザイン・ナビ・ホーム（作業中／ダウンロード待ち）・設定（AI接続・名寄せ辞書・LightRAG案内・一覧表設定の一覧）・エラー画面、blueprint 登録 |
+| WP-forms | `excel/*`, `pattern/*`, `export/formats.py`, `tests/test_extraction.py`, `tests/test_forms_md.py` | 帳票の md 改善（タイトル・ファイル名・定型文削減・値の NFKC・単位・出さない項目）、種類定義の拡張、一覧表らしさ判定関数 |
+| WP-shell | `app.py`, `config.py`, `templates/base.html`, `templates/components/_ui.html`, `templates/errors/*`, `static/style.css`, `static/app.js`, `views/__init__.py` | レイアウト・デザイン・ヘッダー（3画面だけ）・段（`.step` と `ragSections`）・エラー画面、blueprint 登録。ホーム画面・設定画面・`views/home.py`・`views/settings.py`・`templates/home.html`・`templates/settings/*` は削除済み |
 | WP-formsui | `views/forms.py`, `views/form_types.py`, `templates/forms/*`, `templates/form_types/*`, `static/review.js`, `tests/test_forms_flow.py` | 帳票フロー画面と帳票の種類の管理画面 |
 | WP-tablesui | `views/tables.py`, `templates/tables/*`, `static/tables.js`, `tests/test_tables_flow.py` | 一覧表フロー画面・取り込み設定の編集画面・出力画面 |
 | WP-samples | `scripts/samples/*`（追記のみ）, `samples/`（生成物） | T1 に「対応内容」追記ログ列を追加（書き方の揺れを再現）など |
@@ -295,9 +282,7 @@ def forget_id_counters(db) -> int   # 空になった取り込みの表の sqlit
 
 # core/naming.py
 def safe_filename_part(text: str, max_len: int = 60) -> str   # NFKC、\ / : * ? " < > | 制御文字 空白 '[' ']' を _ に、'.[' を除去、前後の . _ を除去
-def md_filename(parts: list[str], hint: str | None = None) -> str   # "_".join(safe parts) + (f".[{hint}]" if hint) + ".md"
-def hint_chunk_tokens(hint: str | None = None) -> int   # ヒントの chunk_ts（記録の大きさの上限の元）
-LIGHTRAG_HINT_RECORDS = "legacy-R(chunk_ts=1500,chunk_ol=0)"
+def md_filename(parts: list[str]) -> str   # "_".join(safe parts) + ".md"（LightRAG のヒントは付けない）
 
 # core/mdtext.py
 def nfkc_value(text) -> str            # NFKC＋連続空白の畳み込み（改行は保持）。日本語文字間の半角空白は残す
@@ -386,9 +371,11 @@ def match_templates(headers: list[str], sheet_or_file_name: str, specs: list[Tab
     record: {key: [..], fallback_key: [occurred_at, equipment_id, "symptom:20"]}
     period: {grain: "month", date_column: "occurred_at"}
     log_stage: LogStageSpec | None; custom_stages: list[CustomStageSpec]
-    markdown: {file_prefix, group_by: "month" | "entity_month", max_records_per_file: 300, lightrag_hint: True, dataset_card: True,
-               records: True, dedupe_timeline: True, summaries: [SummarySpec], title_columns: [...], omit_person: True}
-    # lightrag_hint の既定はオン（新しい設定だけ。保存済みの設定は JSON の値をそのまま使う）。dedupe_timeline は 6.2 参照
+    markdown: {file_prefix, group_by: "month" | "entity_month", dataset_card: True, records: True,
+               summaries: [SummarySpec], title_columns: [...]}
+    # 2026-09-20 に外した項目（保存済みの JSON にあっても読み飛ばす。RETIRED_KEYS["markdown"]）:
+    #   lightrag_hint（ファイル名のヒントは付けない）、dedupe_timeline・omit_person（内容を削らない）、
+    #   max_records_per_file（記録ファイルは月ごと・件数では分けない）
     checks: {type_error_rate: {warn: 0.02, block: 0.10}}
 def spec_from_dict(d) -> TableSpec; def spec_to_dict(spec) -> dict; def spec_hash(spec) -> str; def validate_spec(spec) -> list[str]
 
@@ -407,6 +394,7 @@ def run_checks(records, spec, stats, period) -> list[Issue]
 # tables/markdown.py
 @dataclass class MdFile: name: str; text: str; kind: str  # dataset/records/summary
 def render_all(spec, records: list[dict], ai_results: dict[str, dict], meta: dict) -> list[MdFile]   # 決定的（同じ入力→同じバイト列）
+def record_blocks(record, spec, ai_results=None, people=None) -> list[list[str]]   # 1件分。大きければ「（続きn/m）」に分ける（6.2）
 # tables/summaries.py: entity_fiscal_year, month の集計（コードで計算）
 # tables/outputs.py（投入済みとの差分は持たない。8.1）
 def normalized_csv(spec, records) -> bytes; def issues_csv(issues) -> bytes; def report_csv(items) -> bytes
@@ -461,8 +449,8 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - **パイプ表は使わない**。`- 項目: 値`。
 - 値は NFKC＋空白の畳み込み。ただし**囲み文字（丸数字 ①、丸英字 Ⓐ、丸カナ ㋐ など）は原文どおり残す**（`core/mdtext.nfkc_keep_enclosed`。①→1 だと番号と本文の区切りが消える）。日付・数値の解析、NA 判定、コードの突き合わせなど**比較用の正規化は従来どおり NFKC のみ**。設備番号・設備名は名寄せ辞書で正式表記に。数値は単位付き（`停止時間: 95分`）。
 - 全ファイル共通の定型文を入れない。出典は末尾1行 `- 出典: 元ファイル名（識別番号）`。
-- 人名（person 役割・担当者）は既定で出さない（設定で出せる）。
-- ファイル名は `core/naming.md_filename`。論理文書に対して安定・一意。`.[` `]` は除去。LightRAG ヒント（`.[legacy-R(chunk_ts=1500,chunk_ol=0)]`）は一覧表の取り込み設定で付ける（**新しい設定の既定はオン**・画面では推奨と表示。保存済みの設定は値をそのまま使う。帳票には付けない）。
+- **入力の内容は削らない・書き換えない**（2026-09-20 の利用者の指示）。出す列・項目の中身はそのまま書く：人名（person 役割・担当者・押印欄）もコードの列（`- 状態コード: 9`）も出す。出さないのは、画面で「出さない」にした列・項目と、値が空欄だけの列だけ。組み替え（1行＝1レコード、`- 項目: 値`、長い追記ログを1語も落とさず時系列に分ける）と表記の正規化（和暦→西暦・単位・NFKC）は続ける。
+- ファイル名は `core/naming.md_filename`。論理文書に対して安定・一意。`.[` `]` は除去。**LightRAG のファイル名ヒント（`.[legacy-R(...)]`）は付けない**：ヒントはサーバー側の取り込み設定より優先され、そのサーバーが知らない書き方だと取り込みが HTTP 400 で断られる。チャンクへの耐性は本文の作り方（6.2 の記録の分割）だけで成り立たせる。
 - 推定トークン数（`core/mdtext.estimate_tokens`）は**実トークン以上**になる式（非ASCII 1文字=1.1、ASCII の記号 1文字=1、数字のまとまり1つ=1＋3桁ごとに1、ほかの ASCII 2文字=1。o200k_base は数字を3桁ずつ・記号を1文字ずつ区切るため、日時・品番の多い記録も実トークンを下回らない。まれな漢字（髙・﨑 など）だけは1文字あたり実トークンの方が多い）。記録の上限・見出しへの識別子付与の判定に使う。
 
 ### 6.1 帳票
@@ -501,7 +489,7 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
     Markdown は今までどおり1行1明細で、**その行の空でないセルの列見出しだけを書く**：`- 人: ①日常点検での見落とし／機械: 軸受の摩耗` の次の行が `- 方法: 点検手順に記載なし／環境: 室温の変動`。
     こうする理由：1行が「どの見出しの、どの値か」を自分の中に持つので、LightRAG が行の途中で切っても意味が通る（レコード自体で意味が通る・パイプ表を使わない、という6章の決まりを変えずに済む）。
     確認画面には組の数を出し、まとめた表をそのまま直せるようにする（行によって空の欄があることも書く）。
-  - 確認画面では表の形で修正できる（行の追加・削除）。AIで空欄を探す対象にはしない。承認欄（区分×作成/確認/承認）・なぜなぜ分析・5W2H は明細表にしない（項目として読む）。
+  - 読み取り結果では表の形で修正できる（行の追加・削除）。承認欄（区分×作成/確認/承認）・なぜなぜ分析・5W2H は明細表にしない（項目として読む）。
 - 1つの値の項目の探し方（`excel/extractor.py`）：ラベル候補に一致するセルを上→下・左→右に見て、その右、無ければ下の値を取る。順番は
   「候補どおりのラベル」→「表記だけ違うラベル」（末尾の括弧書き・「内容」「欄」「日時」の違い。例「発生原因（なぜ起きたか）」「応急処置内容」「復旧完了」。
   括弧書きどうしが違う「原因（推定）／原因（確定）」は別項目として扱い、表記違いの照合は塗りつぶし・太字・「ラベル：値」のセルだけ）、
@@ -509,7 +497,14 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
   - 値にしないもの：行が並ぶ明細表の列見出し（「設備No｜設備名」の下に3行以上）、表の連番の列見出し（No）、区切りの見出し（「▼ 回答欄」）、欄外の様式番号（「様式MT-031 Rev.1」）。
     押印欄（承認｜確認｜作成の下に印と日付の2行）は明細表とみなさず、今までどおり項目として読む。
   - 「対象設備／使用設備／設備」のように設備番号と設備名を1つのセルに書く欄（「CMP-108　STI-CMP 8号機」「ROB-821（ウェーハソーター 1号機）」）は、
-    番号と名前に分けて設備番号・設備名の項目に入れる（分けられない値ならその欄は使わない）。
+    番号と名前に分けて設備番号・設備名の項目に入れる（分けられない値ならその欄は使わない）。クリックでもこの欄は1回のクリックで
+    設備番号・設備名の2項目になる（`pattern/clicks.split_rows`。文字は消さず、同じセルの読む場所を分けるだけ）。
+  - **版によって書き方が変わる帳票**（同じ種類の帳票で、見出しの位置やセル内の書き方が違うもの）の読み方：
+    - 見本でクリックした向き（右・下）を先に見て、無ければもう一方も見る。どちらにも無く、見出しのセルが「設備番号　：IMP-603」のように
+      1つのセルに見出しと値を持つときは、そのセル内の値を読む（`excel/extractor._value_at`）。
+    - 見出しがどうしても見つからない帳票では、見本でクリックしたセルの**番地**を控えとして読む（`_extract_at_cell`）。ただし様式が違うと
+      同じ番地に別の欄が来るので、**その番地のセルが他の欄の見出しのとき（`stop_labels`）と、その型として読めないときは値にしない**。
+      読めないときは空のままにする（当て推量で埋めるより、空欄のほうが直しやすい）。見出しの無い「値だけ」の項目は、最初から番地で読む。
   - 「3時間40分」は項目の単位（分・時間）に換算する。単位が決まっていない項目では分にする。
 - **数値項目の単位（2026-09-19 の利用者の判断）**：単位は「帳票の種類の設定」→「書かれた値（「390分」「2.5h」「1,032分」）」の順に決める（`excel/text.numeric_unit`）。既定の単位は辞書に持たない（勝手に決めない）。
   - 両方から決まらない項目のうち、**単位で意味が変わると辞書が知っているもの**（時間・工数・金額・寸法・重量・温度・圧力・流量・電流電圧＝`pattern/dictionary.AMBIGUOUS_UNIT_HINTS`）は要確認にし、「単位が書かれていません（分か時間かで意味が変わります）。値に単位を付けて入力してください（例: 1456分）。これから読み取る帳票のためには「帳票の種類」の画面でこの項目の単位を決めてください（読み取り済みの帳票には反映されません）」と出す（種類の単位を変えても読み取り済みの帳票は読み直さないので、その場で直せる方法を先に書く）。
@@ -519,19 +514,20 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
   - 「2:45」や時刻・[h]:mm のセルは時:分の時間として項目の単位（分・時間。無ければ分）に換算する。範囲（「10～20分」）で単位が項目の単位と違うときは数値にしない。数値の部分だけを読んだ値・数値として読めない値は、手で入力した値でも要確認のままにする。
   - Excel のエラー値（「#REF!」「#N/A」「#DIV/0!」）は値にせず、空にして要確認にする（一覧表の側と同じ）。
   - 「390分」のように数値の後ろが単位だけのときは、単位として取り込むので「数値の部分だけを読み取りました」の警告は出さない。
-  - この判断は `excel/extractor.number_unit` 1か所で行い、読み取り（`_apply_number_unit`）と [AIで空欄を探す]（`services/ai_assist.fill_missing`）の両方から呼ぶ（経路で単位の付き方が変わらないようにするため）。
+  - この判断は `excel/extractor.number_unit` 1か所で行う（読み取り `_apply_number_unit` から呼ぶ。経路で単位の付き方が変わらないようにするため。
+    帳票の AI 補助＝[AIで空欄を探す]（`services/ai_assist.py`）は 2026-09-20 に削除したので、呼び口はこの1つだけになった）。
 - **年の無い日付（2026-09-19 の利用者の判断）**：「2/12 3時17分」のような年の無い日付は**年を補わない**。値は書かれたままの文字列で残し、要確認にして「年が書かれていません。元のファイルを確かめて、2026-02-12 のように年から書いてください」と出す（`excel/text.to_date`）。
 - **日付のあとの時刻・続く文字**：「2024年7月29日 13:41」「R5.11.16 12:11」「2023-07-10T23:08」「2023年7月10日 23時08分」の時刻は残す（年月日・和暦・曜日「(月)」のあとでも）。日付と時刻のあとに別の文字が続く（「2023/7/10～7/12」）ときは日付だけを読み、「日付のあとに「～7/12」が続いています」と要確認にする（範囲の終わりを黙って落とさない）。和暦は令和（R）と平成（H）を読む。
   同じ帳票の別の項目やファイル名から年を推すと、外れたときに Markdown に誤った日付を書くことになるため。「24/8/25」のような2桁の年は年の欄が空とは限らないので、今までどおり「日付として解釈できません」。
 
 ### 6.2 一覧表（記録ファイル）
-ファイル単位の既定：**発生年月ごと**（`{prefix}_{YYYY-MM}.md`）。1ファイル300件を超えたら `_part2`…（キー順で分割。分割位置は件数で決まる）。設定で「設備×月」も選択可（`{prefix}_{設備番号}_{YYYY-MM}.md`）。日付が空の行は `{prefix}_日付なし.md`。
+ファイル単位の既定：**発生年月ごと**（`{prefix}_{YYYY-MM}.md`）。**件数では分けない**（その月の記録は1ファイルに全件。LightRAG は1ファイルを丸ごと読んでからチャンクに分けるので、ファイルを分けても記録の切られ方は変わらない）。設定で「設備×月」も選択可（`{prefix}_{設備番号}_{YYYY-MM}.md`）。日付が空の行は `{prefix}_日付なし.md`。
 ```
-# トラブル対応一覧 2026年8月の記録（1/2）
+# トラブル対応一覧 2026年8月の記録
 
 - データ種別: トラブル対応一覧（1行＝1件）の記録
 - 対象期間: 2026-08-01〜2026-08-31
-- このファイルの記録: 300件（2026年8月の全 342件のうち 1〜300件目）
+- このファイルの記録: 342件（2026年8月の全件）
 
 ## 【TR-2026-00831】CMP研磨装置1号機（CMP-101）スラリー流量低下アラームで研磨停止｜2026-08-03
 - 管理No: TR-2026-00831
@@ -558,10 +554,11 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 ```
 - 見出しは `title_columns`（既定: record_no, entity_label(entity), symptom 先頭40字）＋日付。
 - 「対応の時系列」はルール出力（AI の種別があれば［］に付与）。「対応の要点」は AI 照合に通った項目のみ。
-- 時系列の本文から、**同じレコードの他の列（原因・処置内容・使用部品など text/string 列）と同じ文**（「。」「、」改行で区切り、番号・空白を除いて完全一致、6文字以上）を省く。全部が重複なら「（処置内容と同じ）」に縮める。記入が1件だけのログも同じ。比べる前に行頭の番号（「1.」「(1)」「①」など）と「・」を外す。見出しごとの形（「対応内容（見出しごと）」として出すもの）は時系列ではないので省かない。取り込み設定の `markdown.dedupe_timeline`（既定 True。画面は「対応の時系列から、他の列と同じ内容の文を省く」）で切り替えられる。
-- 1レコードの推定トークンの上限は、LightRAG ヒントの `chunk_ts` − 100 ＝ **1,400**（`tables/markdown.RECORD_TOKEN_BUDGET`）。超える場合は「対応の要点」も含めた合計で判定し、時系列を設定の件数（既定20件）→収まる件数まで切って「（以降N件は管理用の正規化CSVに収録）」と書く。
+- 時系列の文は1つも省かない（他の列と同じ文でも、件数が多くても、書かれたまま出す）。
+- **記録1件の上限は推定トークン 400**（`tables/markdown.RECORD_TOKEN_BUDGET`）。超えたら「（続きn/m）」に分ける（6.5 の実測で決めた値）。
+  - 見出しは1つ目が `## …（1/m）`、2つ目以降が `## …（続きn/m）`。2つ目以降には**管理No・設備・日付の行を書き直す**（切られてもその部分だけで身元が分かる）。
+  - 分け目は箇条書きの切れ目。1つの箇条書きが上限を超えるときは、複数行の値なら `- 対応の時系列（続き）:` と見出し行を繰り返し、1行の値なら「。」の後ろで切って `- 項目（続き）: …` にする。**文字は1つも消さない**（1行が丸ごと上限を超えるときは、その1行だけで1つの部分にする）。
 - 設備名の列がない code 型の entity 列では、「ETC-302(OXIDEエッチャ 2号機)」「CVD-203 W-CVD 3号機」を設備番号と名前に分けてから、集計・ファイル分け・表示に使う（番号は英字と数字を含むものだけ。名前の側も番号だけなら分けない）。
-- 見出しが「コード・区分・フラグ」を含み、値が英数字1〜4文字・種類20以下で、辞書にも取り込み設定にも無い列は、列の候補で既定 `md=omit` にする（`- 状態コード: 9` のような意味のない行を出さない。画面で戻せる）。
 
 ### 6.3 一覧表（集計・説明）
 - `{prefix}_00_データセット説明.md`：取り込み範囲、件数、ファイル構成、列の意味（description）、出していない列の名前、数値の注意（集計ファイルの単位でのみ確定）、答えられる/答えられない質問の例。
@@ -571,13 +568,27 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - 冒頭に「集計対象: 期間（取り込み範囲）」を必ず書く。数値はすべてコード計算（AI 不使用）。取り込み範囲・集計対象の期間は、最初と最後の月については記録の実際の最初・最後の日付で書く（「2026-08-03〜2026-08-20」。月の初日・末日に広げない）。記録ファイルの「対象期間」は月のまとまりを表すので月全体のまま。
 - 0件の月は、記録のある月どうしの間が12か月以内のときだけ埋める（`tables/summaries.MAX_EMPTY_GAP_MONTHS`）。それより離れている（「2052年」のような入力ミス）ときは間を埋めず、確認画面で、記録の年の中央値から5年を超えて離れた日付を行番号つきで知らせる（警告 `date_outlier`）。
 
-### 6.4 LightRAG 案内ページ（/settings/lightrag）の内容
-1. サーバーのバージョン確認（`GET /health`）。1.5.x は doc_id＝ファイル名の MD5、同名は 409 → 変更ファイルは**削除してから**再投入。1.4.x は doc_id＝内容の MD5。
-2. `.env` 推奨：`SUMMARY_LANGUAGE=Japanese`、`ENTITY_TYPE_PROMPT_FILE`（1.5.x。`ENTITY_TYPES` は起動失敗）＝アプリからダウンロードできる設備保全向け YAML、埋め込みモデルは最初に固定、数万件なら PostgreSQL 等。
-3. 分割：サーバー設定ごとの可否を表で示す。`LIGHTRAG_PARSER` 未設定（1,200トークン固定窓）では記録ファイルの 2〜6 割が途中で切れ文字化けも出るので**使えない**、`env.example` のまま（native-P 2,000）は可、サーバー全体の `legacy-R(chunk_ts=800)` は帳票が割れるので不可。一覧表の記録ファイルは**ヒントを付ける**（推奨）。ヒントの有無で doc_id は変わらないので入れ直す前に削除する。帳票にはヒントを付けない（短い帳票は1断片。明細表を読む帳票は 1,200トークンを超えて分かれることがあるが、長文項目の見出しに識別子が入る）。
-4. 件数・ランキング・推移は集計ファイルで答える。記録ファイルだけでは数えられない。
-5. 更新手順：このアプリは投入済みファイルとの差分を管理しない（8.1）。取り込みごとに、その取り込みの全ファイルを zip で渡す。完了画面で zip をダウンロード→同じファイル名のものが LightRAG に入っていれば LightRAG 側で先に削除（1.5.x は同名で 409）→idle を待つ→zip の `RAG投入用/` を投入（`管理用_RAGには入れない/` は入れない）。帳票は確定し直したものだけを「削除してから入れ直す」で更新する。
-6. 保存先フォルダを `INPUT_DIR` にする使い方（2.8）：LightRAG で同じ名前の文書を先に削除（このときは「アップロードされたファイルも削除」をオン＝`delete_file=true`。オフだと `__parsed__` に古いファイルが残り、アプリの「止める」で保存が止まる）→idle を待つ→アプリで［保存先フォルダに保存］→LightRAG で［スキャン］（`POST /documents/scan`）。保存の**あとで**削除するときは逆にオフにする（オンだと保存したファイルも消える）。スキャンは直下のファイルだけを読み、`_管理用_RAGには入れない/` は読まない。取り込み終えたファイルは `__parsed__/` に移る。
+### 6.4 LightRAG への入れ方（2026-09-20: 案内ページは廃止。2.9）
+このアプリは LightRAG に送信しない。利用者は完了画面で md／zip をダウンロードし、LightRAG の WebUI にドラッグして入れる。
+入れるのは zip の `RAG投入用/` の中身（.md）だけで、`管理用_RAGには入れない/` は入れない。
+利用者はサーバー設定を見ることも変えることもできないので、Markdown は**どのサーバー設定でも安全**に読めるよう本文の作り方（記録の分割）だけで成り立たせ、ファイル名の分割ヒントには頼らない（付けない）。
+
+### 6.5 記録の上限を決めた実測（2026-09-20、`scripts/eval/lightrag_offline_eval.py`）
+見本 T1・T2・T5（46,233件）の月ごと md を、LightRAG のチャンク分割に**オフラインで**かけた（LLM・API は呼ばない）。
+経路は **F1200/100**（`LIGHTRAG_PARSER` 未設定時の既定の固定窓）、**F600/50**（管理者が窓を狭めた場合の想定）、**P2000**（native パーサ＋段落）。
+「before」＝ 2026-09-19 版（人名・コードの列を落とし、時系列の重複を省き、ファイル名にヒントを付けていた版）。
+
+| 版（記録1件の上限） | 総トークン | ブロック数（1件あたり） | 途中切断 F1200/100 | 途中切断 F600/50 | 管理Noの無いチャンク（F600/50） | 設備・日付の無いチャンク（F600/50） |
+|---|---|---|---|---|---|---|
+| before（1,400・時系列を切る） | 21.4M | 46,233（1.0） | 32% | 61% | **2,950** | 1,932 |
+| 300 | 47.8M | 231,810（5.0） | 9% | 28% | 0 | 137 |
+| **400（採用）** | 39.3M | 151,603（3.3） | 14% | 37% | 4 | 138 |
+| 600 | 32.3M | 86,863（1.9） | 24% | 57% | 1 | 148 |
+
+- 一番効いたのは上限の値ではなく**分けた部分に管理No・設備・日付を書き直すこと**。狭い窓（600）でも身元の分からないチャンクが 2,950 → ほぼ0 になった。P2000 ではどの版も記録を途中で切らない。
+- 400 を選んだ理由：狭い窓の1チャンクに新しく入るのは 600−50＝550トークンなので、**1つの部分が必ず1チャンクに収まる大きさ**にする必要がある（600 だと収まらず、切断が 57% に増える）。推定式は実トークン以上に出るので、550 に対して 400 なら余裕がある。300 にすると切断は9ポイント減るが、トークンが 22%・ブロック数が 53% 増える（＝取り込み側の LLM 呼び出しが増える）。
+- ファイル数は月ごとのままで 321〜323／表（件数では分けない。分けても切られ方は変わらない）。ファイル名にヒント記法（`.[...]`）は0件。
+- 総トークンの内訳: before 21.4M → **27.7M**（内容を削らないようにした分。人名・コードの列・時系列の全文）→ **39.3M**（分けた部分に管理No・設備・日付を書き直す分。1つ増えるごとに約110トークン）。どちらも利用者の指示（入力を勝手に加工しない／どのサーバー設定でも安全）を優先した結果。
 
 ## 7. テスト方針
 - 既存テストは新ルートに合わせて書き換える（test_extraction は維持）。
@@ -695,7 +706,8 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
 
 **5巡目の不具合探しで変えた動き（2026-09-19）**
 - 帳票: 区画の名前は「欄」「内容」などの語尾を外し切るまで繰り返して作る（「■ 処置内容欄」「処置内容」「処置」はどれも「処置」。
-  学習・保存を通しても区画が変わらない）。確認画面で入力欄に Enter を押しても、［AIで空欄を探す］や［確定］は押されない。
+  学習・保存を通しても区画が変わらない）。読み取り結果で入力欄に Enter を押しても、［確定］は押されない
+  （当時あった［AIで空欄を探す］も押されなかった。この帳票の AI 補助は 2026-09-20 に削除した）。
   種類の項目が設備だけで識別子にならないときの「- 出典:」の行は、H1 と同じ項目（番号の項目、無ければ日付）を添える。
 - 帳票・帳票の見本のアップロードは、結合セルの面積の合計が 20万セル（`core/files.FORM_MAX_MERGED_CELLS`）を超えるブックを断る
   （行全体の結合 13個以上・列全体の結合など。一覧表は読み取り専用で開き結合を展開しないので、従来の 200万セルのまま）。
@@ -710,9 +722,6 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   なら次の行を使う。トークン数の見積もり（`core/mdtext.estimate_tokens`）は記号と数字を多めに数える（実測より少なく見積もらない）。
 - 利用者が設定で書いた正規表現（分割の目印・日付ではない書き方）は、選択肢（`|`）を含む繰り返しのグループも断り、照合には行の先頭
   200文字（`logproc/dates.USER_PATTERN_WINDOW`）だけを渡す。取り込み設定の JSON の確かめで思わぬ例外が出たときも「読み込めません」で断る。
-- 保存先フォルダ: 管理用ファイルを保存しない設定（既定）では、一覧表の保存の確認文（完了画面・ホーム）と結果の画面でそう知らせる。
-  `__parsed__`・`_管理用_RAGには入れない` の中や、アプリのデータのフォルダの別の書き方（`\\?\`・`\\localhost\C$`）は断る。
-  確定済みの分だけ保存したときは残った未確定の件数と［次の帳票へ］を出す。消し損ねたときは「消しました」と言わない。
 - 設定ファイル（`services/settings_store`）は UTF-16・CP932 でも読み、読めなければ空とみなす。読み書きは同じロックの中で行い、
   書けないときは画面に日本語で知らせる（ヘッダーのモデル選択も）。すべての応答に `X-Frame-Options: DENY` と
   `frame-ancestors 'none'` を付ける。
@@ -726,7 +735,6 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   その列に来るまで自分の列を持つ（右上の押印欄の見出しも同じく下の列を持つ。F1〜F5 の見本には無い形）。入れ子の区画（「暫定対策」の中の
   「回答」など）は `excel/tables.sections_of` で内側から外側まで返し、「探す区画」がどれかに当たればその区画の中とみなす。
   明細表の項目も「探す区画」の中を先に探す（無ければシート全体）。確認画面の「変更した項目」は単位だけの変更も出す。
-  まとまりの1件を保存先フォルダに保存したあとは、残りの未確定の件数と［次の帳票へ］を出す。
 - 一覧表: 手で決めた見出し行が先頭80行より下でも読む。行番号の入力（「1-3, 5」）は全角も含めてサーバーと画面で同じ規則で読む
   （範囲は10行まで）。役割「追記ログ」は1列だけに付ける。日付の役割が変わらなければ期間の日付列を保つ。キーの重複を断る。
   確定済みの取り込みでは試し実行をしない。読み込み直しが始まって渡せなかったときは 404 ではなく画面に戻して知らせる。
@@ -740,7 +748,6 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   再試行し、だめなら使わずに（書かずに）進む。ジョブの進捗・メッセージ・生存時刻の書き込みもロック中なら少し待ち、だめならその1回を見送る
   （`core/jobs.JobContext._soft_update`。状態の書き込みは見送らない）。
 - アップロード: ハイパーリンク・コメントの範囲の合計が5万セルを超えるブック、帳票では 20万行を超えるブックを開く前に断る（5.1）。
-  JSON の 404 にも「保存先フォルダに保存済み」を出す。帳票の取り込みの画面と一覧表の確認の画面にも、保存先フォルダに保存したときも消えることを出す。
 
 **6巡目の見直しで変えた動き（2026-09-20）**
 - 帳票: 値が「2024年7月28日 22:46」のように日付だけで書かれていれば、ラベルに日付の語が無くても（「発生」など）日付の項目にする

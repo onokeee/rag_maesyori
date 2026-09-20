@@ -3,48 +3,25 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=1280">
-  <title>{% block title %}ホーム{% endblock %}｜RAG用Markdown作成</title>
+  <title>{% block title %}帳票取り込み{% endblock %}｜RAG用Markdown作成</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   {% block head %}{% endblock %}
 </head>
 <body>
   <a class="skip-link" href="#main">本文へ移動</a>
+  {#- 画面は3つだけ。設定・履歴・作業中の一覧は無い（利用者の指示 2026-09-20）。
+      それぞれの画面は「1画面で全部できる」ので、ヘッダーの行き先は3つで足りる。 -#}
   {% set path = request.path %}
-  {% set settings_links = [
-      ("帳票の種類", url_for('form_types.index')),
-      ("一覧表の取り込み設定", url_for('settings.table_templates')),
-      ("AI接続", url_for('settings.ai')),
-      ("保存先フォルダ", url_for('settings.output')),
-      ("LightRAGへの入れ方", url_for('settings.lightrag')),
-  ] %}
   <header class="topbar">
-    <a class="brand" href="{{ url_for('home.index') }}">
+    <a class="brand" href="{{ url_for('forms.new') }}">
       <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9l5 5v13H5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 3v5h5M8 13h8M8 17h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       <span>RAG用Markdown作成</span>
     </a>
     <nav id="mainNav" class="mainnav" aria-label="メインメニュー">
-      <a href="{{ url_for('home.index') }}" {% if path == '/' %}class="active" aria-current="page"{% endif %}>ホーム</a>
-      <a href="{{ url_for('forms.new') }}" {% if path.startswith('/forms') %}class="active" aria-current="page"{% endif %}>帳票を取り込む</a>
-      <a href="{{ url_for('tables.new') }}" {% if path.startswith('/tables') %}class="active" aria-current="page"{% endif %}>一覧表を取り込む</a>
-      <details class="nav-dropdown" data-dropdown>
-        <summary {% if path.startswith('/settings') %}class="active"{% endif %}>設定<svg class="caret" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></summary>
-        <div class="dropdown-menu">
-          {% for label, href in settings_links %}
-            <a href="{{ href }}" {% if path.startswith(href.rstrip('/')) %}class="active" aria-current="page"{% endif %}>{{ label }}</a>
-          {% endfor %}
-        </div>
-      </details>
+      <a href="{{ url_for('forms.new') }}" {% if path.startswith('/forms') %}class="active" aria-current="page"{% endif %}>帳票取り込み</a>
+      <a href="{{ url_for('tables.new') }}" {% if path.startswith('/tables') %}class="active" aria-current="page"{% endif %}>表の取り込み</a>
+      <a href="{{ url_for('form_types.index') }}" {% if path.startswith('/form-types') %}class="active" aria-current="page"{% endif %}>帳票登録</a>
     </nav>
-    <div class="model-picker">
-      {% if model_picker.llm_ready %}
-        <label for="modelPick">AIモデル</label>
-        <select id="modelPick" title="使うモデルを選ぶ" data-current="{{ model_picker.current }}">
-          {% for m in model_picker.models %}<option value="{{ m }}" {{ 'selected' if m == model_picker.current }}>{{ m }}</option>{% endfor %}
-        </select>
-      {% else %}
-        <a href="{{ url_for('settings.ai') }}" class="ai-off">AI未設定</a>
-      {% endif %}
-    </div>
   </header>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 

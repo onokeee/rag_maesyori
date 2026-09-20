@@ -1,19 +1,19 @@
 """一覧表の Markdown 生成（記録ファイル・集計ファイル・データセット説明）。
 
 決まり（docs/design.md 6章）: 同じ入力から同じバイト列。生成日時・取込ID・行番号の一覧を本文に書かない。
-レコード内に空行を入れない。パイプ表を使わない。人名（person 役割）は既定で出さない。
+レコード内に空行を入れない。パイプ表を使わない。出す列の中身は1文字も削らない（人名・コードの列も出す）。
 追記ログ列は logproc のルール出力（対応の時系列）＋ AI 照合に通った要点だけを出す。
+大きい記録は「（続きn/m）」に分けて、どの部分にも管理No・設備・日付を書く（切られても身元が分かるように）。
 """
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
 
 from core.mdtext import escape_md_line, estimate_tokens, join_blocks, md_bullet
-from core.naming import LIGHTRAG_HINT_RECORDS, hint_chunk_tokens, md_filename
+from core.naming import md_filename
 from tables.spec import TableSpec, base_date_from
 from tables.summaries import (
     category_column, dataset_counts, entity_columns, entity_display, entity_fiscal_year_summaries, entity_value,
@@ -21,9 +21,10 @@ from tables.summaries import (
     unit_label,
 )
 
-# 記録1件の上限。LightRAG のヒントの chunk_ts から余裕（100トークン）を引く＝1件が1チャンクに収まる大きさ
-RECORD_TOKEN_MARGIN = 100
-RECORD_TOKEN_BUDGET = (hint_chunk_tokens() or 1500) - RECORD_TOKEN_MARGIN
+# 記録1件の上限（推定トークン）。これを超えたら「（続きn/m）」に分ける。
+# 取り込み側の設定は見えないので、狭い固定窓（600/overlap 50）でも記録が途中で切られない大きさにする。
+# オフライン評価（T1・T2・T5 × F1200/100・F600/50・P2000）で 300/400/600 を比べて 400 を選んだ（docs/design.md 6.5）。
+RECORD_TOKEN_BUDGET = 400
 TITLE_TEXT_CHARS = 40
 
 
@@ -181,9 +182,8 @@ def _entity_label_name(spec: TableSpec) -> str:
 
 
 def _is_hidden(col, spec: TableSpec) -> bool:
-    if col.md == "omit":
-        return True
-    return col.role == "person" and bool((spec.markdown or {}).get("omit_person", True))
+    """出さない列か。画面で「出さない」にした列だけ（人名・コードの列も既定では出す）。"""
+    return col.md == "omit"
 
 
 _BRACKETS = {"（": "）", "(": ")", "「": "」", "『": "』", "【": "】", "［": "］", "[": "]", "〔": "〕", "《": "》",
@@ -297,36 +297,45 @@ def record_title(values: dict, spec: TableSpec) -> str:
     return _one_line(title) or "（見出しなし）"
 
 
-def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None) -> list[str]:
-    """1件分の行（見出し＋箇条書き）。空行は入れない。
+def record_blocks(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None) -> list[list[str]]:
+    """1件分のブロック。推定トークンが RECORD_TOKEN_BUDGET を超えたら「（続きn/m）」に分ける。
 
-    推定トークンが RECORD_TOKEN_BUDGET を超える場合だけ、時系列を切って収める（要点と時系列の合計で判定する）。
+    分けても文字は1つも消さない。2つ目以降には管理No・設備・日付を書き直す（その部分だけで身元が分かるように）。
     """
-    lines, timeline_text = _record_lines(record, spec, ai_results, people, None)
-    if timeline_text:
-        joined = "\n".join(lines)
-        # 推定は1文字あたり最大1.1トークン。それでも上限以下なら数えずに済む（大半の記録。判定の結果は同じ）
-        if len(joined) * 11 > RECORD_TOKEN_BUDGET * 10:
-            total = estimate_tokens(joined)
-            if total > RECORD_TOKEN_BUDGET:
-                budget = RECORD_TOKEN_BUDGET - (total - estimate_tokens(timeline_text))
-                lines, _ = _record_lines(record, spec, ai_results, people, max(0, budget))
-    return lines
+    lines, repeat = _record_lines(record, spec, ai_results, people)
+    joined = "\n".join(lines)
+    # 推定は1文字あたり最大1.1トークン。それでも上限以下なら数えずに済む（大半の記録。判定の結果は同じ）
+    if len(joined) * 11 <= RECORD_TOKEN_BUDGET * 10 or estimate_tokens(joined) <= RECORD_TOKEN_BUDGET:
+        return [lines]
+    return _split_record(lines[0], lines[1:], repeat)
 
 
-def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people,
-                  timeline_budget: int | None) -> tuple[list[str], str]:
-    """1件分の行と、時系列の本文（改行つなぎ。時系列がなければ空）。"""
+def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None) -> list[str]:
+    """1件分の行（画面の下書き表示用）。分かれる記録は続きの見出しも含めて続けて返す。"""
+    return [line for block in record_blocks(record, spec, ai_results, people) for line in block]
+
+
+def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people) -> tuple[list[str], list[str]]:
+    """1件分の行と、分けたときに書き直す行（管理No・設備・日付）。"""
     values = record.get("values", {}) or {}
     key = record.get("key", "")
     lines = [f"## {record_title(values, spec)}"]
     entity, label = entity_columns(spec)
+    key_col = spec.first_role("key")
     time_col = _time_column(spec)
     date_key = spec.date_key
     log_key = spec.log_stage.column if spec.log_stage else None
     entity_done = False
-    timeline_text = ""
+    repeat: list[str] = []
     status, result = _ai_item(ai_results, key)
+
+    def add(col, bullet: list[str]) -> None:
+        """行を足す。管理No・設備・日付の行は、記録を分けたときに書き直すので控えておく。"""
+        lines.extend(bullet)
+        if col is not None and (col.key == date_key or (key_col is not None and col.key == key_col.key)
+                                or (entity is not None and col.key in (entity.key, label.key if label else ""))):
+            repeat.extend(bullet)
+
     for col in spec.columns:
         if _is_hidden(col, spec):
             continue
@@ -338,30 +347,29 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
             entity_done = True
             eid, name, display = entity_display(values, spec)
             if eid and name and not _is_hidden(entity, spec) and not _is_hidden(label, spec):
-                lines += md_bullet(_entity_label_name(spec), display)
+                add(entity, md_bullet(_entity_label_name(spec), display))
                 continue
             for c in (entity, label):
                 if not _is_hidden(c, spec):
-                    lines += md_bullet(c.display, format_value(c, values.get(c.key)))
+                    add(c, md_bullet(c.display, format_value(c, values.get(c.key))))
             continue
         if entity is not None and label is None and col.key == entity.key:
             # 設備名の列がない台帳。見出し・集計と同じ「設備名（設備番号）」の書き方にそろえる（列の名前はそのまま）
             _eid, name, display = entity_display(values, spec)
             if name and display:
-                lines += md_bullet(col.display, display)
+                add(col, md_bullet(col.display, display))
                 continue
         value = values.get(col.key)
         if col.key == log_key:
-            log, timeline_text = _log_lines(col, values, spec, status, result, people, timeline_budget)
-            lines += log
+            lines += _log_lines(col, values, spec, status, result, people)
             continue
         if value in (None, ""):
             continue
         if col.key == date_key:
             time_value = values.get(time_col.key) if time_col is not None else None
-            lines += md_bullet(col.display, _date_text(value, time_value))
+            add(col, md_bullet(col.display, _date_text(value, time_value)))
         else:
-            lines += md_bullet(col.display, format_value(col, value))
+            add(col, md_bullet(col.display, format_value(col, value)))
     if status == "ok":
         for stage in spec.custom_stages:
             item = (result.get("custom") or {}).get(stage.id) if isinstance(result.get("custom"), dict) else None
@@ -371,115 +379,97 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
                 lines += md_bullet(f"{target.display if target else stage.id}（AI分類）", _one_line(v))
     source = record.get("source", {}) or {}
     lines += md_bullet("出典", _source_text(values, spec, source))
-    return lines, timeline_text
+    return lines, repeat
 
 
-# ---- 時系列（他の列と重複する文を省く。取り込み設定の markdown.dedupe_timeline で切り替える） ----------
+# ---- 大きい記録を「（続きn/m）」に分ける（文字は1つも消さない） ------------------------------
 
-_SENTENCE_END = re.compile(r"(?<=[。、])")
-# 行頭の番号: 「1.」「1)」「(1)」「（1）」「①〜⑳」「⑴〜⒇」「⒈〜⒛」と、箇条書きの「・」
-_LEADING_NO = re.compile(r"^\s*(?:\d{1,3}\s*[.)．）、]|[(（]\s*\d{1,3}\s*[)）]|[①-⒛]|[・･])\s*")
-_DUPLICATE_MIN_CHARS = 6  # これより短い文は偶然一致しうるので省かない
+_MIN_PART_TOKENS = 80          # 見出し・書き直す行を引いても、これだけは中身に使う
+_BULLET_LABEL = re.compile(r"^- ([^:]{1,40}): ")
 
 
-def _norm_sentence(text: str) -> str:
-    """文の比較用。行頭の番号・空白・区切り記号を落として NFKC。"""
-    s = unicodedata.normalize("NFKC", _LEADING_NO.sub("", str(text or "")))
-    return "".join(s.split()).strip("。、.,:：;；")
+def _tokens(lines: list[str]) -> int:
+    return estimate_tokens("\n".join(lines)) if lines else 0
 
 
-def _column_sentences(values: dict, spec: TableSpec, log_key: str) -> dict[str, str]:
-    """同じ記録の他の列（原因・処置内容・使用部品など）にある文 → その列の表示名。"""
-    out: dict[str, str] = {}
-    for col in spec.columns:
-        if col.key == log_key or _is_hidden(col, spec) or col.type not in ("text", "string"):
-            continue
-        raw = values.get(col.key)
-        if raw in (None, ""):
-            continue
-        for piece in re.split(r"[。、\n]+", str(raw)):
-            key = _norm_sentence(piece)
-            if len(key) >= _DUPLICATE_MIN_CHARS:
-                out.setdefault(key, col.display)
+def _bullet_groups(body: list[str]) -> list[list[str]]:
+    """箇条書きのまとまり（`- 項目:` の行と、それに続く2字下げの行）に分ける。"""
+    groups: list[list[str]] = []
+    for line in body:
+        if line.startswith("- ") or not groups:
+            groups.append([line])
+        else:
+            groups[-1].append(line)
+    return groups
+
+
+def _split_group(group: list[str], budget: int) -> list[list[str]]:
+    """1つの箇条書きが budget に収まらないときに小分けにする（行も文も消さない）。"""
+    if _tokens(group) <= budget:
+        return [group]
+    head = group[0]
+    if len(group) > 1:
+        # 複数行の値（対応の時系列など）。見出しの行を「（続き）」で繰り返して2字下げの行を分ける
+        cont = f"{head[:-1]}（続き）:" if head.endswith(":") else head
+        out, cur = [], [head]
+        for line in group[1:]:
+            if len(cur) > 1 and _tokens(cur) + estimate_tokens(line) > budget:
+                out.append(cur)
+                cur = [cont]
+            cur.append(line)
+        return out + [cur]
+    m = _BULLET_LABEL.match(head)
+    if m is None:
+        return [group]  # 項目名が読めない1行。切らずにそのまま出す
+    # 1行の長い値。「。」の後ろで分け、項目名を「（続き）」で繰り返す
+    label, text = m.group(1), head[m.end():]
+    pieces = [p for p in re.split(r"(?<=。)", text) if p]
+    out, cur = [], ""
+    for piece in pieces:
+        if cur and estimate_tokens(f"- {label}（続き）: {cur}{piece}") > budget:
+            out.append([f"- {label}: {cur}" if not out else f"- {label}（続き）: {cur}"])
+            cur = ""
+        cur += piece
+    if cur:
+        out.append([f"- {label}: {cur}" if not out else f"- {label}（続き）: {cur}"])
+    return out or [group]
+
+
+def _split_record(title: str, body: list[str], repeat: list[str]) -> list[list[str]]:
+    """見出し・本文を、1つあたり RECORD_TOKEN_BUDGET に収まるブロックの並びにする。"""
+    # 2つ目以降は「見出し（続きn/m）」＋管理No・設備・日付を書き直すので、その分を引いた残りが中身に使える
+    overhead = estimate_tokens(f"{title}（続き00/00）") + _tokens(repeat)
+    budget = max(_MIN_PART_TOKENS, RECORD_TOKEN_BUDGET - overhead)
+    groups = [g for group in _bullet_groups(body) for g in _split_group(group, budget)]
+    parts: list[list[str]] = []
+    cur: list[str] = []
+    for g in groups:
+        if cur and _tokens(cur) + _tokens(g) > budget:
+            parts.append(cur)
+            cur = []
+        cur += g
+    if cur or not parts:
+        parts.append(cur)
+    if len(parts) == 1:
+        return [[title] + parts[0]]
+    total = len(parts)
+    out = []
+    for i, part in enumerate(parts, start=1):
+        head = f"{title}（{i}/{total}）" if i == 1 else f"{title}（続き{i}/{total}）"
+        again = [] if i == 1 else [ln for ln in repeat if ln not in part]
+        out.append([head] + again + part)
     return out
 
 
-def _dedupe_parse(parse, duplicates: dict[str, str]):
-    """時系列の本文から、同じ記録の他の列と同じ文を省く（全部同じなら「（処置内容と同じ）」に縮める）。"""
-    # 記入が1件だけのログ（single）も時系列として出すので同じように省く。見出しごとの形（header_cell）は
-    # 「対応の時系列」ではなく「（見出しごと）」として出すので対象にしない（design.md 6.2）
-    if not duplicates or parse.kind not in ("log", "single"):
-        return parse
-    changed = False
-    segments = []
-    for seg in parse.segments:
-        body = seg.body
-        if not body:
-            segments.append(seg)
-            continue
-        kept, hit = [], []
-        for piece in _SENTENCE_END.split(body):
-            name = duplicates.get(_norm_sentence(piece))
-            if name:
-                hit.append(name)
-                # 省いた文が「。」で終わっていたら、その「。」は残す（前後の文がつながって元にない1文になるため）
-                prev = kept[-1].rstrip() if kept else ""
-                if piece.rstrip().endswith("。") and prev and not prev.endswith("。"):
-                    kept[-1] = prev.rstrip("、") + "。"
-            else:
-                kept.append(piece)
-        if not hit:
-            segments.append(seg)
-            continue
-        text = "".join(kept).strip().strip("、")
-        segments.append(replace(seg, body=text or f"（{hit[0]}と同じ）"))
-        changed = True
-    return replace(parse, segments=segments) if changed else parse
+# ---- 追記ログ列の行 -------------------------------------------------------------------
 
 
-def _authors_as_written(parse):
-    """人名を出さない設定では、記入者をログに書かれたとおりにする（担当者の列から補ったフルネームは出さない）。
-
-    書かれていないセグメントの記入者は、直前に書かれた表記に（推定）を付ける。書かれた記入者が無ければ出さない。
-    """
-    from logproc.models import AuthorInfo
-
-    if parse.kind != "log":
-        return parse
-    segments, last_raw, changed = [], "", False
-    for seg in parse.segments:
-        a = seg.author
-        if a is None:
-            segments.append(seg)
-            continue
-        if a.raw:
-            last_raw = a.raw
-            new = AuthorInfo(a.raw, None, a.estimated, a.note)
-        else:
-            new = AuthorInfo(last_raw, None, True, a.note) if last_raw else None
-        segments.append(replace(seg, author=new))
-        changed = True
-    return replace(parse, segments=segments) if changed else parse
-
-
-def _fit_timeline(timeline: list[str], limit: int, budget: int) -> list[str]:
-    """時系列を、設定の件数と残りの推定トークンに収める（決定的）。1件は必ず残す。"""
-    costs = [estimate_tokens(line) + 1 for line in timeline]  # +1 は2字下げと改行の分
-    n = min(len(timeline), max(1, limit))
-    while n > 1 and sum(costs[:n]) + estimate_tokens(f"（以降{len(timeline) - n}件は管理用の正規化CSVに収録）") > budget:
-        n -= 1
-    if n >= len(timeline):
-        return timeline
-    return timeline[:n] + [f"（以降{len(timeline) - n}件は管理用の正規化CSVに収録）"]
-
-
-def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people,
-               timeline_budget: int | None) -> tuple[list[str], str]:
-    """ログ列の行と、時系列の本文（改行つなぎ。推定トークンは必要なときだけ record_block で数える）。"""
+def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people) -> list[str]:
+    """ログ列の行（対応の要点＋対応の時系列）。書かれた文は1つも省かない。"""
     stage = spec.log_stage
     parse = parse_log_cell(spec, values, people)
     if parse is None or parse.kind == "empty":
-        return [], ""
+        return []
     out: list[str] = []
     types: dict[str, list[str]] = {}
     if status == "ok" and result:
@@ -492,21 +482,15 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people,
     entity_label = entity_name or entity_text
     from logproc import render_timeline
 
-    if (spec.markdown or {}).get("dedupe_timeline", True):
-        parse = _dedupe_parse(parse, _column_sentences(values, spec, col.key))
-    if (spec.markdown or {}).get("omit_person", True):
-        parse = _authors_as_written(parse)
     timeline = render_timeline(parse, entity_label, types=types or None, glossary=stage.glossary or None)
     if parse.kind == "header_cell":
         out += md_bullet(f"{col.display}（見出しごと）", timeline)
-        return out, ""
+        return out
     if not timeline:
-        return out, ""
-    if timeline_budget is not None:
-        timeline = _fit_timeline(timeline, max(1, int(stage.max_timeline_entries or 20)), timeline_budget)
+        return out
     out.append("- 対応の時系列:")
     out += [f"  {line}" for line in timeline]
-    return out, "\n".join(timeline)
+    return out
 
 
 def _source_text(values: dict, spec: TableSpec, source: dict) -> str:
@@ -531,10 +515,6 @@ def _sort_key(record: dict, spec: TableSpec, time_col) -> tuple:
     return (0 if d else 1, d, t, str(record.get("key", "")))
 
 
-def _hint(spec: TableSpec) -> str | None:
-    return LIGHTRAG_HINT_RECORDS if (spec.markdown or {}).get("lightrag_hint") else None
-
-
 class _Names:
     """ファイル名の重複を避ける（安全化で同じ名前になった場合だけ _2 を付ける）。
 
@@ -545,11 +525,11 @@ class _Names:
     def __init__(self):
         self.used: set[str] = set()
 
-    def make(self, parts: list[str], hint: str | None = None) -> str:
-        name = md_filename(parts, hint)
+    def make(self, parts: list[str]) -> str:
+        name = md_filename(parts)
         n = 2
         while name.casefold() in self.used:
-            name = md_filename(parts + [str(n)], hint)
+            name = md_filename(parts + [str(n)])
             n += 1
         self.used.add(name.casefold())
         return name
@@ -613,9 +593,9 @@ def _period_text(start_month: str, end_month: str, coverage: dict) -> str:
 
 
 def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names: _Names) -> list[MdFile]:
+    """記録ファイル（月ごと、または設備×月ごとに1ファイル。件数では分けない）。"""
     md = spec.markdown or {}
     prefix = spec.file_prefix
-    per_file = max(1, int(md.get("max_records_per_file") or 300))
     by_entity = md.get("group_by") == "entity_month"
     entity, _label = entity_columns(spec)
     groups: dict[tuple, list[dict]] = defaultdict(list)
@@ -626,28 +606,21 @@ def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names:
         eid = entity_value(values, spec)[0] if (by_entity and entity is not None) else ""
         groups[(eid, month) if by_entity else ("", month)].append(rec)
     people = people_index_for(spec, ordered) if spec.log_stage else None
-    hint = _hint(spec)
     files: list[MdFile] = []
     for (eid, month) in sorted(groups, key=lambda g: (g[0], g[1] == "", g[1])):
         recs = groups[(eid, month)]
-        chunks = [recs[i:i + per_file] for i in range(0, len(recs), per_file)]
-        for n, chunk in enumerate(chunks, start=1):
-            parts = [prefix]
-            if by_entity:
-                parts.append(eid or "設備不明")
-            parts.append(month or "日付なし")
-            if n > 1:
-                parts.append(f"part{n}")
-            name = names.make(parts, hint)
-            start_no = (n - 1) * per_file + 1
-            header = _record_file_header(spec, recs, chunk, month, eid, n, len(chunks), start_no)
-            blocks = [header] + [record_block(r, spec, ai_results, people) for r in chunk]
-            files.append(MdFile(name, join_file(blocks), "records"))
+        parts = [prefix]
+        if by_entity:
+            parts.append(eid or "設備不明")
+        parts.append(month or "日付なし")
+        blocks: list[list[str]] = [_record_file_header(spec, recs, month, eid)]
+        for r in recs:
+            blocks += record_blocks(r, spec, ai_results, people)
+        files.append(MdFile(names.make(parts), join_file(blocks), "records"))
     return files
 
 
-def _record_file_header(spec: TableSpec, group: list[dict], chunk: list[dict], month: str, eid: str,
-                        part: int, parts: int, start_no: int) -> list[str]:
+def _record_file_header(spec: TableSpec, group: list[dict], month: str, eid: str) -> list[str]:
     name = spec.name
     scope_month = month_label(month) if month else "日付なし"
     entity_disp = ""
@@ -657,19 +630,13 @@ def _record_file_header(spec: TableSpec, group: list[dict], chunk: list[dict], m
     if entity_disp:
         title += f" {entity_disp}"
     title += f" {scope_month}の記録" if month else " 日付なしの記録"
-    if parts > 1:
-        title += f"（{part}/{parts}）"
     body = [f"- データ種別: {name}（1行＝1件）の記録"]
     if entity_disp:
         body += md_bullet(_entity_label_name(spec), entity_disp)
     if month:
         body.append(f"- 対象期間: {month_first_day(month)}〜{month_last_day(month)}")
     scope = f"{eid}の{scope_month}" if eid else scope_month
-    if parts > 1:
-        end_no = start_no + len(chunk) - 1
-        body.append(f"- このファイルの記録: {len(chunk):,}件（{scope}の全 {len(group):,}件のうち {start_no:,}〜{end_no:,}件目）")
-    else:
-        body.append(f"- このファイルの記録: {len(chunk):,}件（{scope}の全件）")
+    body.append(f"- このファイルの記録: {len(group):,}件（{scope}の全件）")
     return _Block(title, body)
 
 
@@ -722,13 +689,12 @@ def render_dataset_card(spec: TableSpec, records: list[dict], coverage: dict) ->
     structure = ["## 資料の構成"]
     md = spec.markdown or {}
     if md.get("records", True):
-        per_file = int(md.get("max_records_per_file") or 300)
         if md.get("group_by") == "entity_month":
             structure.append(f"- 記録（{entity_word}×月）: 1件ごとの内容。各ファイルには、その{entity_word}・その月の記録を全件載せています"
-                             f"（{per_file:,}件を超える場合は複数ファイルに分けています）。")
+                             "（長い記録は「（続きn/m）」に分かれていますが、内容は削っていません）。")
         else:
-            structure.append(f"- 記録（月ごと）: 1件ごとの内容。各ファイルには、その月の記録を全件載せています"
-                             f"（{per_file:,}件を超える月は複数ファイルに分けています）。")
+            structure.append("- 記録（月ごと）: 1件ごとの内容。各ファイルには、その月の記録を全件載せています"
+                             "（長い記録は「（続きn/m）」に分かれていますが、内容は削っていません）。")
     measure_words = "・".join(d for _k, d, _u in measures)
     for summary in spec.summaries():
         if summary.id == "month":
@@ -770,15 +736,11 @@ def render_dataset_card(spec: TableSpec, records: list[dict], coverage: dict) ->
         if col.unit and col.type == "number":
             text += f"（単位: {unit_label(col.unit)}）"
         columns += md_bullet(col.display, text)
-    # 出していない列も名前だけは書く（コードのままでは意味が分からない列を既定で外しているため）。理由が違うので人名の列は分ける
-    people_cols = [col.display for col in spec.columns if col.role == "person" and _is_hidden(col, spec)]
-    omitted = [col.display for col in spec.columns if col.md == "omit" and col.role != "person"]
+    # 画面で「出さない」にした列は名前だけ書く（出さない列があること自体は分かるように）
+    omitted = [col.display for col in spec.columns if col.md == "omit"]
     if omitted:
         columns.append(f"- 記録に出していない列: {'、'.join(omitted)}"
-                       "（意味の分からないコード値・管理用の列などのため。元の値は管理用の正規化CSVにあります）")
-    if people_cols:
-        columns.append(f"- 記録に出していない列（人名）: {'、'.join(people_cols)}"
-                       "（人名のため出していません。取り込み設定で出すようにできます。元の値は管理用の正規化CSVにあります）")
+                       "（取り込み設定で「出さない」にした列です。元の値は管理用の正規化CSVにあります）")
 
     questions = ["## 答えられる質問の例"]
     no_questions = ["## 答えられない質問の例"]
@@ -896,5 +858,5 @@ def _render_entity_fy(spec: TableSpec, item: dict, coverage: dict) -> str:
     return join_file([_Block(head, body), overview, months])
 
 
-__all__ = ["MdFile", "ai_point_lines", "parse_log_cell", "people_index_for", "record_block",
+__all__ = ["MdFile", "ai_point_lines", "parse_log_cell", "people_index_for", "record_block", "record_blocks",
            "record_title", "render_all", "render_dataset_card"]

@@ -1,0 +1,71 @@
+{#- AI接続（この段の中。設定画面は無い）。既定では閉じてある。
+    必要な変数: ai_status, ai_ready, save_url, test_url, models_url -#}
+{#- 既定では閉じてある（AIを使わない取り込みでは開かなくてよい）。 -#}
+<details class="sub-block" data-ai-connection
+         data-save-url="{{ save_url }}" data-test-url="{{ test_url }}" data-models-url="{{ models_url }}">
+  <summary class="sub-title">AI接続{% if ai_ready %}（設定済み・{{ ai_status.current }}）{% else %}（未設定。AIを使わなくても Markdown は作れます）{% endif %}</summary>
+
+  <dl class="meta">
+    <dt>APIキー</dt>
+    <dd>
+      {% if ai_status.api_key_source == 'screen' %}この画面で保存したキーを使用中です
+      {% elif ai_status.api_key_source == 'env' %}env ファイルのキーを使用中です
+      {% else %}<span class="warn">APIキーが設定されていません</span>{% endif %}
+    </dd>
+    <dt>保存先</dt><dd class="small"><code>{{ ai_status.settings_file }}</code>（env ファイルの値より優先。保存するとすぐ反映）</dd>
+  </dl>
+
+  <div class="btn-row">
+    <button type="button" class="btn" data-ai-test {{ 'disabled' if not ai_ready }}>接続をテストする</button>
+    <button type="button" class="btn" data-ai-models>APIからモデル一覧を取得</button>
+    <span class="hint">テストはモデル一覧の取得と、短いチャットを1回送ります。</span>
+  </div>
+  <ul class="list-plain list-rows" data-ai-test-result aria-live="polite" hidden></ul>
+
+  <div class="sub-block">
+    <h4 class="sub-title">選択できるモデル</h4>
+    {% if ai_status.from_env %}<p class="hint">現在は env の OPENAI_MODELS（または既定モデル）を候補にしています。保存すると画面の候補に切り替わります。</p>{% endif %}
+    <fieldset class="model-grid" style="border:0;padding:0;margin:0 0 .75rem" data-ai-model-list>
+      <legend class="sr-only">選択できるモデル</legend>
+      {% for m in ai_status.models %}
+        <label class="check">
+          <input type="checkbox" data-ai-model value="{{ m }}" checked>
+          <span class="mono">{{ m }}</span>
+        </label>
+      {% endfor %}
+    </fieldset>
+    <label class="stack-label">モデルを追加（1行に1つ）
+      <textarea rows="2" class="input mono" data-ai-field="add_models" placeholder="gpt-5.6-sol"></textarea>
+    </label>
+    <label class="stack-label">使うモデル（既定）
+      <select class="input" data-ai-field="default">
+        {% for m in ai_status.models %}<option value="{{ m }}" {{ 'selected' if m == ai_status.default }}>{{ m }}</option>{% endfor %}
+      </select>
+      <small class="muted">追加したモデルを既定にするときは、一度保存してから選び直してください。</small>
+    </label>
+  </div>
+
+  <div class="sub-block">
+    <h4 class="sub-title">接続先</h4>
+    <div class="stack">
+      <label>チャットのURL（…/chat/completions までのフルパス）
+        <input class="input mono" data-ai-field="chat_url" value="{{ ai_status.chat_url }}" placeholder="{{ ai_status.env_chat_url }}">
+        <small class="muted">{{ '画面で設定' if ai_status.chat_url_source == 'screen' else 'env の OPENAI_BASE_URL から' }}。空欄で保存すると env の値に戻ります。</small>
+      </label>
+      <label>モデル一覧のURL（…/models までのフルパス）
+        <input class="input mono" data-ai-field="models_url" value="{{ ai_status.models_url }}" placeholder="{{ ai_status.env_models_url }}">
+        <small class="muted">{{ '画面で設定' if ai_status.models_url_source == 'screen' else 'env の OPENAI_BASE_URL から' }}</small>
+      </label>
+      <label>APIキー
+        <input type="password" class="input mono" data-ai-field="api_key" autocomplete="new-password" placeholder="変更する場合だけ入力し、［AI接続を保存］で反映">
+      </label>
+      {% if ai_status.api_key_source == 'screen' %}
+        <label class="check"><input type="checkbox" data-ai-field="api_key_clear"> <span>envのキーに戻す（画面で保存したキーを削除）</span></label>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button type="button" class="btn primary" data-ai-save>AI接続を保存</button>
+  </div>
+</details>

@@ -13,7 +13,7 @@ from core import jobs, purge
 from models import database as db
 from tables import pipeline, store
 from tests.test_aiproc import ROWS, _make_import, ai_app, fake  # noqa: F401  (fixture)
-from tests.test_tables_flow import COLUMNS, CSV_TEXT, _preview_page, _wait_import_job
+from tests.tables_helpers import CSV_TEXT, confirmed as _confirm_table, upload_csv
 
 EXTRACTION = {
     "pattern": {"id": 1, "name": "設備修理報告書", "version": "v1"},
@@ -85,7 +85,7 @@ def test_downloading_a_form_removes_its_file_and_every_row(app, client):
     assert not path.exists()
     assert _uploaded_files(app) == []
     assert _rows_for(app, "documents", ("document_id",), doc_id) == {}
-    assert client.get(f"/forms/{doc_id}").status_code == 404
+    assert client.get(f"/forms/{doc_id}/review").status_code == 404
     assert client.get(f"/forms/{doc_id}/download.md").status_code == 404
 
 
@@ -101,8 +101,8 @@ def test_a_form_that_cannot_be_built_is_not_deleted(app, client):
 
 def test_deleting_a_form_by_hand_removes_the_file_too(app, client):
     doc_id, path = _add_confirmed_document(app, "消す.xlsx")
-    res = client.post(f"/forms/{doc_id}/delete", data={"next": "/"})
-    assert res.status_code == 302 and res.headers["Location"].endswith("/")
+    res = client.post(f"/forms/{doc_id}/delete")
+    assert res.status_code == 200 and res.get_json()["ok"] is True
     assert not path.exists() and _rows_for(app, "documents", ("document_id",), doc_id) == {}
 
 
@@ -125,52 +125,41 @@ def _upload_many(client, sample_dir, names):
     return client.post("/forms/upload", data={"file": files}, content_type="multipart/form-data")
 
 
+def _finish(client, ids, current=None) -> dict:
+    url = "/forms/finish?ids=" + ",".join(str(i) for i in ids) + (f"&current={current}" if current else "")
+    return client.get(url).get_json()
+
+
 def test_uploading_several_forms_makes_one_batch(app, client, sample_dir):
     res = _upload_many(client, sample_dir, ["standard.xlsx", "shifted.xlsx", "table.xlsx"])
-    assert res.status_code == 302 and "/type" in res.headers["Location"]
+    body = res.get_json()
+    assert res.status_code == 200 and len(body["docs"]) == 3 and body["batch_id"]
     with app.app_context():
-        rows = db.list_documents()
-        assert len(rows) == 3
+        rows = [db.get_document(d["id"]) for d in body["docs"]]
         batch_ids = {r["batch_id"] for r in rows}
         assert len(batch_ids) == 1 and "" not in batch_ids
-    # 先頭の帳票の画面に進み具合（1/3）と案内が出る
-    page = client.get(res.headers["Location"]).get_data(as_text=True)
-    assert "まとめ取り込み 1/3件目" in page and "zip" in page
+    # 同じ画面で1件ずつ読み取り、最後にまとめて zip にする
+    page = _finish(client, [d["id"] for d in body["docs"]])["html"]
+    assert "確定済み <strong>0</strong> / 3 件" in page and "zip" in page
 
 
 def test_a_single_file_upload_still_has_no_batch(app, client, sample_dir):
     res = client.post("/forms/upload", data={"file": (io.BytesIO((sample_dir / "standard.xlsx").read_bytes()),
                                                       "standard.xlsx")}, content_type="multipart/form-data")
-    assert res.status_code == 302 and "/type" in res.headers["Location"]
+    body = res.get_json()
+    assert res.status_code == 200 and len(body["docs"]) == 1 and body["batch_id"] == ""
     with app.app_context():
-        assert db.list_documents()[0]["batch_id"] == ""
-    assert "まとめ取り込み" not in client.get(res.headers["Location"]).get_data(as_text=True)
-
-
-def test_batch_zip_is_refused_until_every_form_is_confirmed(app, client):
-    doc_id, path = _add_confirmed_document(app, "1.xlsx", batch_id="B", order=0)
-    with app.app_context():
-        pending = db.create_document("2.xlsx", "0" * 64, "documents/2.xlsx", batch_id="B", batch_order=1)
-    # 完了画面では「次の帳票へ」を出し、まとめてのダウンロードはまだ出さない
-    page = client.get(f"/forms/{doc_id}/done").get_data(as_text=True)
-    assert "まとめ取り込み 1/2件目" in page and "確定済み 1/2" in page
-    assert "次の帳票へ（残り1件）" in page and f"/forms/{pending}/type" in page
-    assert "まとめてMarkdownをダウンロード（zip）" not in page
-
-    res = client.get("/forms/batches/B/download.zip")
-    assert res.status_code == 302 and f"/forms/{pending}/type" in res.headers["Location"]
-    assert path.exists()
-    with app.app_context():
-        assert db.get_document(doc_id) is not None
+        assert db.get_document(body["docs"][0]["id"])["batch_id"] == ""
+    assert "zip" not in _finish(client, [body["docs"][0]["id"]])["html"]
 
 
 def test_downloading_the_batch_zip_removes_the_whole_batch(app, client):
     first, path1 = _add_confirmed_document(app, "1.xlsx", value="EQ-001", batch_id="B", order=0)
     second, path2 = _add_confirmed_document(app, "2.xlsx", value="EQ-002", batch_id="B", order=1)
 
-    # すべて確定したら、完了画面から zip でまとめてダウンロードできる（押す前に消えることを知らせる）
-    page = client.get(f"/forms/{second}/done").get_data(as_text=True)
-    assert "まとめ取り込み 2/2件目" in page and "まとめてMarkdownをダウンロード（zip）" in page
+    # すべて確定したら zip でまとめてダウンロードできる（押す前に消えることを知らせる）
+    page = _finish(client, [first, second], current=second)["html"]
+    assert "確定済み <strong>2</strong> / 2 件" in page and "まとめて Markdown をダウンロード（zip）" in page
     assert "/forms/batches/B/download.zip" in page
     assert "もう一度ダウンロードすることはできません" in page
 
@@ -193,22 +182,7 @@ def test_downloading_the_batch_zip_removes_the_whole_batch(app, client):
 
 def _confirmed_import(app, client) -> int:
     """CSV を取り込んで確定まで進める（AI整形は使わない）。"""
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(CSV_TEXT.encode("cp932")), "トラブル一覧.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "cp932", "delimiter": ",", "template": "new", "new_template_name": "トラブル対応一覧"})
-    client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""})
-    payload = {"name": "トラブル対応一覧", "group_by": "month", "max_records_per_file": 300, "omit_person": True,
-               "columns": [{"index": i, "header": h, "use": True, "key": k, "display": h, "type": t, "role": r,
-                            "unit": "", "md": "attribute", "fill_down_blank": False, "ai": False, "description": ""}
-                           for i, (k, h, t, r) in enumerate(COLUMNS)]}
-    assert client.post(f"/tables/imports/{import_id}/columns", json=payload).status_code == 200
-    _wait_import_job(app, import_id)
-    _preview_page(app, client, import_id)
-    client.post(f"/tables/imports/{import_id}/confirm")
-    assert _wait_import_job(app, import_id)["status"] == "confirmed"
-    return import_id
+    return _confirm_table(app, client, "トラブル一覧.csv", "トラブル対応一覧")
 
 
 def test_downloading_the_table_zip_removes_everything(app, client):
@@ -245,9 +219,7 @@ def test_downloading_the_table_zip_removes_everything(app, client):
 
 def test_a_table_zip_that_cannot_be_built_deletes_nothing(app, client):
     """確定していない取り込みは zip を作れない。そのときデータも消さない。"""
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(CSV_TEXT.encode("cp932")), "途中.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
+    import_id = upload_csv(client, "途中.csv", CSV_TEXT)
     res = client.get(f"/tables/imports/{import_id}/download.zip")
     assert res.status_code == 302
     with app.app_context():
@@ -261,9 +233,7 @@ def test_startup_removes_orphan_import_folders_but_keeps_work_in_progress(app, c
     from app import create_app
     from tests.conftest import make_config
 
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(CSV_TEXT.encode("cp932")), "作業中.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
+    import_id = upload_csv(client, "作業中.csv", CSV_TEXT)
     with app.app_context():
         working = pipeline.import_dir(import_id)
         working.mkdir(parents=True, exist_ok=True)
@@ -359,11 +329,11 @@ def test_only_the_confirmed_forms_of_a_batch_can_be_downloaded(app, client):
     with app.app_context():
         pending = db.create_document("2.xlsx", "0" * 64, "documents/2.xlsx", batch_id="B", batch_order=1)
 
-    # 完了画面から「確定済みだけ」を選べる（未確定が残っていても作業が止まらない）
-    page = client.get(f"/forms/{first}/done").get_data(as_text=True)
+    # 未確定が残っていても、確定済みだけを渡せる（作業が止まらない）
+    page = _finish(client, [first, pending], current=first)["html"]
     assert "確定済み1件だけをダウンロード（zip）" in page
 
-    res = client.get("/forms/batches/B/download.zip?confirmed_only=1")
+    res = client.get("/forms/batches/B/download.zip")
     assert res.status_code == 200 and res.mimetype == "application/zip"
     assert len(zipfile.ZipFile(io.BytesIO(res.data)).namelist()) == 1
 
@@ -371,15 +341,7 @@ def test_only_the_confirmed_forms_of_a_batch_can_be_downloaded(app, client):
     with app.app_context():
         assert db.get_document(first) is None
         assert db.get_document(pending) is not None  # 未確定の帳票は残る
-
-
-def test_the_home_shows_a_batch_as_one_row_with_the_zip_button(app, client):
-    _add_confirmed_document(app, "1.xlsx", value="EQ-001", batch_id="B", order=0)
-    _add_confirmed_document(app, "2.xlsx", value="EQ-002", batch_id="B", order=1)
-    page = client.get("/").get_data(as_text=True)
-    assert "まとめ取り込み（2ファイル）" in page and "/forms/batches/B/download.zip" in page
-    # 1件だけ押すとまとまりが壊れることを、押す前に知らせる
-    assert "この帳票だけがまとまりから消えます" in page
+    assert client.get("/forms/batches/B/download.zip").status_code == 404
 
 
 # ---- 消えたあとの画面・ファイル名・メッセージ ------------------------------------------------------
@@ -400,11 +362,12 @@ def test_downloads_have_a_readable_ascii_file_name(app, client):
 
 
 def test_delete_messages_do_not_carry_the_file_name(app, client):
-    """flash はブラウザのセッションクッキーに残るので、ファイル名を載せない。"""
+    """消したあとの応答にファイル名を載せない（クッキーにも画面にも残さない）。"""
     doc_id, _path = _add_confirmed_document(app, "社外秘_取引先A.xlsx")
-    res = client.post(f"/forms/{doc_id}/delete", data={"next": "/"})
+    res = client.post(f"/forms/{doc_id}/delete")
+    assert res.get_json()["ok"] is True
     assert "社外秘" not in str(res.headers.get("Set-Cookie", ""))
-    assert "帳票を削除しました" in client.get("/").get_data(as_text=True)
+    assert "社外秘" not in res.get_data(as_text=True)
 
 
 # ---- AI整形の控え（取り込み単位で消す） ----------------------------------------------------
@@ -686,7 +649,7 @@ def test_same_origin_and_typed_downloads_still_work(app, client):
     """アプリ内のクリック（same-origin）とアドレス欄への入力（none）は、これまでどおりダウンロードして消す。"""
     doc_id, path = _add_confirmed_document(app, "同じサイト.xlsx")
     res = client.get(f"/forms/{doc_id}/download.md",
-                     headers={"Sec-Fetch-Site": "same-origin", "Referer": f"http://localhost/forms/{doc_id}/done"})
+                     headers={"Sec-Fetch-Site": "same-origin", "Referer": "http://localhost/forms/"})
     assert res.status_code == 200 and "EQ-001" in res.get_data(as_text=True)
     assert not path.exists()
 
@@ -697,7 +660,7 @@ def test_same_origin_and_typed_downloads_still_work(app, client):
 
 def test_other_cross_site_gets_are_still_allowed(app, client):
     """消さない GET（画面の表示）は他サイトからのリンクでも開ける。"""
-    assert client.get("/", headers=CROSS_SITE_IMG).status_code == 200
+    assert client.get("/forms/", headers=CROSS_SITE_IMG).status_code == 200
 
 
 # ---- 一部だけのダウンロード（Range）・削除の順番・取り込み設定の削除 -----------------------------------

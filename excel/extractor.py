@@ -137,6 +137,11 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
     if fd.data_type == "table":
         result.table_columns = [c for c in (fd.table_columns or []) if str(c).strip()]
         return _extract_table_field(info, fd, sheet_names, stop_labels, result)
+    if getattr(fd, "cell", "") and not any(str(c).strip() for c in fd.candidates):
+        # 見出しのない「値だけ」の項目: 見本でクリックしたセルの番地から読む
+        if not _extract_at_cell(info, fd, sheet_names, result):
+            result.warning = "値のセルが空です"
+        return result
     for name in sheet_names:
         grid = info.grids.get(name)
         if grid is None:
@@ -166,6 +171,9 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
                 text = f"{text}{values[0].fmt_unit}"
             _apply_number_unit(result, fd, text)
         return result
+    if getattr(fd, "cell", "") and _extract_at_cell(info, fd, sheet_names, result, stop_labels):
+        # 見出しが見つからない帳票では、見本でクリックしたセルの番地を控えとして読む
+        return result
     if not result.label_found:
         result.warning = "ラベルが見つかりません"
     elif _uncached_beside(info, *empty_label):
@@ -176,6 +184,38 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
 
 
 UNCACHED_FORMULA_WARNING = "数式の計算結果が保存されていません。Excelで開いて保存し直すか、値を入力してください"
+
+
+def _extract_at_cell(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], result: FieldResult,
+                     stop_labels: set[str] = frozenset()) -> bool:
+    """見本でクリックしたセルの番地から値を読む（見出しで見つからなかったときの控え）。
+
+    様式が違う帳票では同じ番地に別の欄が来るので、見出しらしいセル（他の欄の見出し）や、
+    その型として読めない文字は値にしない。読めないときは空のままにする（当て推量で埋めない）。
+    """
+    from pattern.clicks import cell_key  # pattern.clicks が excel を使うため
+
+    names = [n for n in (getattr(fd, "sheet_name", "") or "",) if n in info.grids]
+    names += [n for n in sheet_names if n not in names]
+    for name in names:
+        grid = info.grids.get(name)
+        if grid is None:
+            continue
+        key = cell_key(grid, fd.cell)
+        cell = grid.cells.get(key) if key else None
+        if cell is None or not cell.text.strip():
+            continue
+        if stop_labels and ({cell.norm, cell.alt_norm} - {""}) & stop_labels:
+            continue  # その番地には別の欄の見出しが来ている（様式が違う）
+        value, warning = _convert(fd.data_type, [cell], None, info.date1904, fd.unit)
+        if stop_labels and warning:
+            continue  # その型として読めない＝別の欄の値
+        result.sheet, result.value_cell = name, cell.coord
+        result.value, result.warning = value, warning
+        if fd.data_type == "number":
+            _apply_number_unit(result, fd, cell.text)
+        return True
+    return False
 
 
 def _uncached_beside(info: WorkbookInfo, sheet: str, label: Cell) -> bool:
@@ -385,22 +425,31 @@ def label_hits(grid: SheetGrid, fd: FieldDef, stop_labels: set[str]) -> list[Cel
 def _label_sets(grid: SheetGrid, fd: FieldDef) -> list[tuple[set[str], list[Cell]]]:
     """探すラベルの組と、それぞれに当たるセル。
 
-    候補どおりのラベル → 表記だけ違うラベル（「発生原因（なぜ起きたか）」「応急処置内容」）の順。
+    クリックした（＝見本で見た）見出し → 辞書が足した言い換えの見出し
+    → 表記だけ違うラベル（「発生原因（なぜ起きたか）」「応急処置内容」）の順。
     """
+    from excel.text import normalize_label
+
     norms = grid.resolve_labels(fd.label_norms())
     headers = table_header_keys(grid)
     lists = list_header_keys(grid)
-    label_sets = [norms, grid.label_variants(fd.label_norms()) - norms]
+    # 候補の1つ目は、画面でクリックした見出し（見本で実際に見た見出し）。辞書が足した言い換え
+    # （「担当者」に対する「報告者」「記入者」…）より先に探す。同じシートに両方が並ぶ帳票で、
+    # 先に出てくる言い換えの欄（「報告者」）の値を、クリックした欄（「担当者」）の値にしないため。
+    primary = {normalize_label(fd.search_labels()[0])} & norms
+    # (ラベルの組, 表記違いか) の順に見る。表記違いの組では区切りの見出しを使わない
+    label_sets = [(primary, False), (norms - primary, False),
+                  (grid.label_variants(fd.label_norms()) - norms, True)]
     if fd.field_name in COMBINED_EQUIPMENT_PARTS:
         # 設備番号・設備名: 最後に「対象設備：CMP-108　STI-CMP 8号機」のような番号と名前をまとめた欄も見る
-        label_sets.append(COMBINED_EQUIPMENT_NORMS - norms - label_sets[1])
+        label_sets.append((COMBINED_EQUIPMENT_NORMS - norms - label_sets[2][0], True))
     found_sets: list[tuple[set[str], list[Cell]]] = []
-    for n, label_set in enumerate(label_sets):
+    for label_set, variant in label_sets:
         # 行を足せる明細表の列見出し（「設備No｜設備名」の下に何行も並ぶ表）は、1つの値のラベルにしない。
         # 表記違いのラベルでは、区切りの見出し（「■ 承認欄」）も使わない
         # 明細表の連番の列見出し（No）も使わない（報告書の「No.」欄と取り違えない）
         cells = [c for c in grid.find_labels(label_set)
-                 if (c.row, c.col) not in lists and not (n and section_heading(c))
+                 if (c.row, c.col) not in lists and not (variant and section_heading(c))
                  and not ((c.row, c.col) in headers and seq_header(c))] if label_set else []
         found_sets.append((label_set, cells))
     return found_sets
@@ -437,10 +486,15 @@ def _value_at(grid: SheetGrid, fd: FieldDef, cell: Cell, norms: set[str], stop_l
             return None
         multi = fd.data_type == "text" and part is None
         values: list[Cell] = []
-        if fd.direction in ("auto", "right"):
+        # 見本でクリックした向き（右・下）は当てにする順で、見つからなければもう一方も見る。
+        # 同じ種類でも版によって値の位置が変わる帳票があるため（今までの「自動」は 右→下）
+        first_below = fd.direction == "below"
+        if not first_below:
             values = scan_right(grid, cell, stop_labels)
-        if not values and fd.direction in ("auto", "below"):
+        if not values:
             values = scan_below(grid, cell, stop_labels, multi=multi, allow_gap=allow_gap)
+        if not values and first_below:
+            values = scan_right(grid, cell, stop_labels)
         if values and (values[0].row, values[0].col) in headers:
             return None  # 明細表の見出し（「■ 暫定対策」の下の No｜処置内容…）を値にしない
         if values and _combined_equipment(fd, cell.label_keys):
@@ -452,7 +506,9 @@ def _value_at(grid: SheetGrid, fd: FieldDef, cell: Cell, norms: set[str], stop_l
                 return None
             values = [replace(values[0], value=pieces[part], text=pieces[part])]
         return (cell, values, None) if values else None
-    if not allow_gap and cell.inline is not None and cell.inline[0] in norms and fd.direction in ("auto", "same_cell"):
+    # 「設備番号　：IMP-603」のように1つのセルに見出しと値が入った版もある。見本で右・下をクリックして
+    # いても、その向きに値が無ければセル内の値を読む（版によって書き方が変わる帳票があるため）
+    if not allow_gap and cell.inline is not None and cell.inline[0] in norms:
         if _combined_equipment(fd, cell.inline[:1]):
             pieces = split_code_name(cell.inline[1])
             return (cell, [cell], pieces[COMBINED_EQUIPMENT_PARTS[fd.field_name]]) if pieces else None

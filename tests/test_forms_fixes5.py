@@ -1,22 +1,16 @@
 """帳票まわりの修正（5巡目の確認で見つかった不具合）の回帰テスト。"""
-import re
-
 from tests.test_forms_fixes import _confirmed_doc
 
 
-# ---- R5F-2: 確認画面の入力欄で Enter を押しても「AIで空欄を探す」や確定を送らない ----------------------
+# ---- R5F-2: 読み取り結果の入力欄で Enter を押しても、何も送信されない ----------------------------------
 
-def test_enter_in_the_review_form_does_not_press_the_ai_button(app, client, monkeypatch):
-    from services import llm
-
-    monkeypatch.setattr(llm, "is_configured", lambda: True)  # AIボタンが出る状態
+def test_enter_in_the_review_form_submits_nothing(app, client):
     doc_id = _confirmed_doc(app, "1.xlsx")
-    page = client.get(f"/forms/{doc_id}/review").get_data(as_text=True)
-    form = page[page.index('id="reviewForm"'):page.index("</form>", page.index('id="reviewForm"'))]
-    assert "AIで空欄を探す" in form
-    # 暗黙の送信（Enter）はフォームの最初の送信ボタンを押す。それが無効なら送信されない
-    first = re.search(r"<button\b[^>]*>", form).group(0)
-    assert 'type="submit"' in first and "disabled" in first and "formaction" not in first
+    html = client.get(f"/forms/{doc_id}/review").get_json()["html"]
+    form = html[html.index('id="reviewForm"'):html.index("</form>", html.index('id="reviewForm"'))]
+    # 暗黙の送信（Enter）を止める。送信ボタンも action も持たせない（値は途中保存で送る）
+    assert '<form id="reviewForm" onsubmit="return false">' in html
+    assert 'type="submit"' not in form and "formaction" not in form and "action=" not in form
 
 
 # ---- R5-MD-5: タイトル項目が設備だけのとき、出典にもタイトルに足した番号を書く ------------------------

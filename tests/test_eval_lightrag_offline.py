@@ -1,5 +1,5 @@
 """scripts/eval/lightrag_offline_eval.py の計測補助（LightRAG を使わない部分）。"""
-from core.naming import LIGHTRAG_HINT_RECORDS, md_filename
+from core.naming import md_filename
 from scripts.eval import lightrag_offline_eval as ev
 
 RECORDS_MD = (
@@ -51,9 +51,27 @@ def test_per_record_file_counts_as_one_record():
     assert res["records_total"] == 1 and res["records_cut"] == 1 and res["headings_only_chunks"] == 1
 
 
-def test_hint_regex_matches_app_hint_only():
-    hinted = md_filename(["トラブル対応一覧", "2024-05"], LIGHTRAG_HINT_RECORDS)
-    m = ev.HINT_RE.search(hinted)
-    assert m and m.group(1) == LIGHTRAG_HINT_RECORDS
+def test_app_filenames_never_look_like_a_parser_hint():
+    """ファイル名にヒント（.[...]）は付けない。元の値にヒントらしい書き方があっても名前には残さない。"""
+    name = md_filename(["トラブル対応一覧", "2024-05"])
+    assert not ev.HINT_RE.search(name) and not ev.FORBIDDEN.search(name)
     assert not ev.HINT_RE.search(md_filename(["報告書.[legacy-F]", "A"]))
-    assert not ev.FORBIDDEN.search(hinted)
+
+
+def test_split_records_keep_the_metadata_of_the_record_they_came_from():
+    """「（続きn/m）」に分かれた記録の各部分も、元の記録の管理No・日付で照合する。"""
+    from tables.markdown import record_title
+    from tables.spec import spec_from_dict
+
+    spec = spec_from_dict({"name": "x", "columns": [
+        {"key": "record_no", "display": "管理No", "type": "code", "role": "key"},
+        {"key": "occurred_at", "display": "発生日", "type": "date", "role": "date"}],
+        "record": {"key": ["record_no"]}, "period": {"date_column": "occurred_at"}})
+    recs = [{"values": {"record_no": "TR-001", "occurred_at": "2024-05-01"}},
+            {"values": {"record_no": "TR-002", "occurred_at": "2024-05-02"}}]
+    titles = [record_title(r["values"], spec) for r in recs]
+    text = (f"# 一覧\n\n## {titles[0]}（1/2）\n- 管理No: TR-001\n\n"
+            f"## {titles[0]}（続き2/2）\n- 管理No: TR-001\n\n## {titles[1]}\n- 管理No: TR-002\n")
+    files = [{"name": "a.md", "kind": "records", "text": text}]
+    ev._attach_table_meta(files, recs, spec)
+    assert [m["id"] for m in files[0]["records"]] == ["TR-001", "TR-001", "TR-002"]

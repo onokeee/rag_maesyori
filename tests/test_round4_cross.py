@@ -12,7 +12,6 @@ from excel.image_detector import detect_images
 from excel.tables import _is_total
 from excel.workbook import Cell
 from logproc import PeopleIndex, SplitOptions, parse_log
-from tables import store
 from tables.csv_source import CsvSource
 from tables.source import clean_text
 
@@ -32,17 +31,6 @@ def test_csv_cells_do_not_keep_invisible_characters(tmp_path):
     rows = list(CsvSource(path).rows())
     assert rows[1].text(1) == rows[2].text(1) == "EQ-01"
     assert rows[3].text(0) == rows[0].text(0) == "管理No"
-
-
-# ---- S4-1: 深く入れ子のJSONは500ではなく「取り込み設定のJSONではありません」 ----------------------
-
-def test_import_of_deeply_nested_json_is_refused_without_error(client):
-    body = b"[" * 200000 + b"]" * 200000
-    res = client.post("/settings/table-templates/import", data={"file": (io.BytesIO(body), "deep.json")},
-                      content_type="multipart/form-data")
-    assert res.status_code == 302
-    with client.application.app_context():
-        assert store.list_templates() == []
 
 
 # ---- S4-1: 検証より前に保存された、コンパイルできない正規表現で処理を止めない -----------------------

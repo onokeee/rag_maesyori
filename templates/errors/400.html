@@ -12,9 +12,9 @@
     <a class="btn primary" href="{{ home_url }}">{{ home_url }} を開く</a>
   </div>
   {% else %}
-  <p>このページは再読み込みや古いアドレスからは開けません。ホームから開き直してください。</p>
+  <p>このページは再読み込みや古いアドレスからは開けません。取り込みの画面から開き直してください。</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('home.index') }}">ホームへ</a>
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
   </div>
   {% endif %}
 </div>

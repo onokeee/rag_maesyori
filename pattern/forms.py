@@ -24,6 +24,9 @@ def pattern_to_rows(pattern: PatternDef) -> tuple[list[dict], list[dict]]:
             "rag_output": f.rag_output,
             "table_columns": "\n".join(f.table_columns),
             "section": f.section,
+            "sheet_name": getattr(f, "sheet_name", "") or "",
+            "label_cell": getattr(f, "label_cell", "") or "",
+            "cell": getattr(f, "cell", "") or "",
         }
         for f in pattern.fields
     ]
@@ -47,8 +50,6 @@ def parse_pattern_form(form) -> tuple[dict, list[dict], list[dict], list[str]]:
     """戻り値: (メタ情報, シート行, 項目行, エラー)
 
     タイトル項目は title_fields（複数値、またはカンマ・改行区切り）で受け取る。
-    「人名の項目を出さない」は md_omit_person_fields=on。チェックボックスが無い画面から送られた
-    場合（md_options_form も無い）は既定値（出さない）のままにする。
     """
     errors: list[str] = []
     meta = {
@@ -59,8 +60,6 @@ def parse_pattern_form(form) -> tuple[dict, list[dict], list[dict], list[str]]:
         "title_fields": _get_list(form, "title_fields"),
         "md_options": dict(DEFAULT_MD_OPTIONS),
     }
-    if "md_omit_person_fields" in form or form.get("md_options_form"):
-        meta["md_options"]["omit_person_fields"] = form.get("md_omit_person_fields") == "on"
     if not meta["name"]:
         errors.append("帳票の種類の名前を入力してください")
     if meta["image_processing"] not in IMAGE_PROCESSING:
@@ -124,7 +123,8 @@ def rows_to_pattern(pattern_id: int, meta: dict, sheet_rows: list[dict], field_r
         FieldDef(
             field_name=r["field_name"],
             display_name=r["display_name"],
-            candidates=r["candidates"].splitlines() or [r["display_name"]],
+            # 「値だけ」の項目（クリックで作った、見出しの無い項目）は探す見出しを持たない
+            candidates=r["candidates"].splitlines() or ([] if r.get("cell") else [r["display_name"]]),
             required=r["required"],
             data_type=r["data_type"],
             direction=r["direction"],
@@ -132,6 +132,9 @@ def rows_to_pattern(pattern_id: int, meta: dict, sheet_rows: list[dict], field_r
             rag_output=r.get("rag_output", "show") if r.get("rag_output") in RAG_OUTPUTS else "show",
             table_columns=(r.get("table_columns") or "").splitlines() if r["data_type"] == "table" else [],
             section=_section_value(r.get("section")),
+            sheet_name=r.get("sheet_name", "") or "",
+            label_cell=r.get("label_cell", "") or "",
+            cell=r.get("cell", "") or "",
         )
         for r in field_rows
         if r["use"]

@@ -5,12 +5,10 @@ from openpyxl.styles import Font, PatternFill
 from excel.extractor import extract_document
 from excel.tables import section_of, sections_of
 from excel.workbook import load_workbook_info
-from models import database as db
 from pattern.builder import suggest_rows
 from pattern.forms import _section_value
 from pattern.model import FieldDef, PatternDef, SheetDef
 from tests.test_forms_fixes import _confirmed_doc
-from tests.test_output_folder import _set_folder, out_dir  # noqa: F401  (fixture)
 
 FILL = PatternFill("solid", fgColor="DDDDDD")
 BOLD = Font(bold=True)
@@ -144,67 +142,29 @@ def test_a_table_found_by_its_columns_prefers_the_one_in_the_section(tmp_path):
     assert parts["value"]["rows"] == [["P-9", "回答側の部品", "5"]]
 
 
-# ---- R6F-3: 単位だけ直したときの「変更した項目」 --------------------------------------------------
-
-def test_a_unit_only_change_is_listed_as_a_changed_field():
-    from views.forms import _changed_fields
-
-    field = {"field_name": "work_hours", "display_name": "作業時間", "value": 2.5, "unit": ""}
-    confirmed = {"fields": [field]}
-    working = {"fields": [dict(field, unit="時間")]}
-    assert _changed_fields(confirmed, working) == ["作業時間"]
-    assert _changed_fields(confirmed, {"fields": [dict(field)]}) == []
-
-
-# ---- UX6-1: まとまりの1件だけを保存先フォルダに保存したとき ------------------------------------------
-
-def test_saving_one_batch_member_points_to_the_next_pending_form(app, client, out_dir):  # noqa: F811
-    _set_folder(client, out_dir)
-    first = _confirmed_doc(app, "1.xlsx", batch_id="B", order=0)
-    _confirmed_doc(app, "2.xlsx", batch_id="B", order=1)
-    with app.app_context():
-        pending = db.create_document("3.xlsx", "0" * 64, "documents/3.xlsx", batch_id="B", batch_order=2)
-    # 確認文は、この帳票だけがまとまりから消えることを伝える
-    page = client.get(f"/forms/{first}").get_data(as_text=True)
-    assert "この帳票だけがまとまりから消えます" in page
-    page = client.post(f"/forms/{first}/save-to-folder").get_data(as_text=True)
-    assert "未確定の1件は残っています" in page
-    assert f'class="btn primary" href="/forms/{pending}/' in page and "次の帳票へ" in page
-
-
-def test_saving_a_single_form_keeps_the_usual_result(app, client, out_dir):  # noqa: F811
-    _set_folder(client, out_dir)
-    doc_id = _confirmed_doc(app, "1.xlsx")
-    assert "この帳票だけがまとまりから消えます" not in client.get(f"/forms/{doc_id}").get_data(as_text=True)
-    page = client.post(f"/forms/{doc_id}/save-to-folder").get_data(as_text=True)
-    assert "このアプリからはデータを消しました" in page and "次の帳票へ" not in page
-
-
 # ---- R6-F2: 1件だけになったまとめ取り込み -------------------------------------------------------
 
-def test_a_batch_left_with_one_form_is_no_longer_a_batch(app, client, out_dir):  # noqa: F811
+def test_a_batch_left_with_one_form_is_no_longer_a_batch(app, client):
     """取り込み失敗・削除で帳票が1件だけになったまとまりは、1件の帳票として扱う。
 
-    「残りの帳票はまとまりに残ります」「zip は残りの帳票だけになります」はどれも嘘になるため。
+    「確定済みの分だけ zip にします」「残りの帳票は…」はどれも嘘になるため。
     """
     import html
 
-    _set_folder(client, out_dir)
     first = _confirmed_doc(app, "1.xlsx", batch_id="B9", order=0)
     second = _confirmed_doc(app, "2.xlsx", batch_id="B9", order=1)
-    page = html.unescape(client.get(f"/forms/{first}/done").get_data(as_text=True))
-    assert "残りの帳票はまとまりに残ります" in page and "zip" in page
+
+    def finish(ids):
+        url = "/forms/finish?ids=" + ",".join(str(i) for i in ids) + f"&current={first}"
+        return html.unescape(client.get(url).get_json()["html"])
+
+    page = finish([first, second])
+    assert "zip" in page and "/forms/batches/B9/download.zip" in page
 
     client.post(f"/forms/{second}/delete")
-    page = html.unescape(client.get(f"/forms/{first}/done").get_data(as_text=True))
-    assert "残りの帳票はまとまりに残ります" not in page
-    assert "まとめ取り込み" not in page and "zip" not in page
-    assert "保存先フォルダに保存すると、この帳票のデータはこのPCのアプリから消えます" in page
-
-    home = html.unescape(client.get("/").get_data(as_text=True))
-    assert "まとめ取り込み" not in home and "zip" not in home
-    assert "残りの帳票はまとまりに残ります" not in home
-    assert "まとまりから消えます" not in home
+    page = finish([first, second])
+    assert "zip" not in page and "/forms/batches/" not in page
+    assert "Markdown をダウンロード（.md）" in page and f"/forms/{first}/download.md" in page
 
 
 # ---- R6-B1: 見出しからは日付と分からない欄（「発生」）の型 ----------------------------------------

@@ -125,13 +125,13 @@ def test_typing_the_confirmed_value_back_returns_the_form_to_confirmed(app, clie
 
 
 def test_a_stale_review_page_cannot_save_or_confirm(app, client):
-    """別のタブ（戻るボタンの古い画面）から、見ていない内容を上書き・確定しない。"""
+    """別のタブ（開いたままの古い画面）から、見ていない内容を上書き・確定しない。"""
     doc_id = _confirmed_doc(app)
     with app.app_context():
         db.update_document(doc_id, confirmed_json=None)  # 確認中の帳票
-    page = client.get(f"/forms/{doc_id}/review").get_data(as_text=True)
-    old = re.search(r'data-version="([0-9a-f]+)"', page).group(1)
-    assert f'name="version" value="{old}"' in page
+    body = client.get(f"/forms/{doc_id}/review").get_json()
+    old = body["version"]
+    assert f'name="version" value="{old}"' in body["html"]
 
     # タブAの保存: 新しい版が返り、それを送れば続けて保存できる
     res = client.post(f"/forms/{doc_id}/draft", json={"values": {"equipment_name": "A"}, "version": old})
@@ -145,65 +145,47 @@ def test_a_stale_review_page_cannot_save_or_confirm(app, client):
     res = client.post(f"/forms/{doc_id}/draft", json={"values": {"equipment_name": "B"}, "version": old})
     assert res.status_code == 409 and "別の画面で内容が変わりました" in res.get_json()["error"]
     assert client.post(f"/forms/{doc_id}/preview", json={"values": {}, "version": old}).status_code == 409
-    res = client.post(f"/forms/{doc_id}/confirm", data={"value-equipment_name": "B", "version": old})
-    assert res.status_code == 302 and res.headers["Location"].endswith(f"/forms/{doc_id}/review")
+    res = client.post(f"/forms/{doc_id}/confirm", json={"values": {"equipment_name": "B"}, "version": old})
+    assert res.status_code == 409 and "別の画面で内容が変わりました" in res.get_json()["error"]
     with app.app_context():
         doc = db.get_document(doc_id)
         assert doc["state"] == "reviewing" and "A2" in doc["data_json"] and '"B"' not in doc["data_json"]
 
 
-def test_batch_zip_warns_that_a_modified_form_loses_its_unconfirmed_changes(app, client):
-    first = _confirmed_doc(app, "1.xlsx", batch_id="B", order=0)
-    second = _confirmed_doc(app, "2.xlsx", batch_id="B", order=1)
-    client.post(f"/forms/{first}/draft", json={"values": {"equipment_name": "直した名前"}})
-    assert _state(app, first) == "modified"
-
-    for url in (f"/forms/{second}/done", f"/forms/{first}/review"):
-        page = client.get(url).get_data(as_text=True)
-        confirm = re.search(r'href="/forms/batches/B/download.zip"\s+data-confirm="([^"]*)"', page).group(1)
-        assert "修正中の帳票が1件あります（1.xlsx 確定）" in confirm and "zip に入らず、消えます" in confirm
-        assert f"/forms/{first}/review" in page  # 修正中の帳票へ戻れる
-
-    # 1件ダウンロードの確認文も、修正中の変更が入らずに消えることを書く
-    page = client.get(f"/forms/{first}").get_data(as_text=True)
-    assert "この帳票は修正中です。確定し直していない変更は Markdown に入らず、消えます。" in page
+def _finish(client, ids, current=None) -> dict:
+    url = "/forms/finish?ids=" + ",".join(str(i) for i in ids) + (f"&current={current}" if current else "")
+    return client.get(url).get_json()
 
 
-def test_home_download_buttons_warn_about_modified_forms(app, client):
-    """ホームの .md / zip ボタンも、修正中の帳票の未確定の変更が入らずに消えることを確認文で伝える。"""
-    single = _confirmed_doc(app, "single.xlsx")
-    first = _confirmed_doc(app, "1.xlsx", batch_id="B", order=0)
-    _confirmed_doc(app, "2.xlsx", batch_id="B", order=1)
-    for doc_id in (single, first):
-        client.post(f"/forms/{doc_id}/draft", json={"values": {"equipment_name": "直した名前"}})
-        assert _state(app, doc_id) == "modified"
-    page = client.get("/").get_data(as_text=True)
-    md = re.search(rf'href="/forms/{single}/download.md"\s+data-confirm="([^"]*)"', page).group(1)
-    assert md.startswith("この帳票は修正中です。確定し直していない変更は Markdown に入らず、消えます。")
-    only = re.search(rf'href="/forms/{first}/download.md"\s+data-confirm="([^"]*)"', page).group(1)
-    assert only.startswith("この帳票は修正中です。")
-    zip_confirm = re.search(r'href="/forms/batches/B/download.zip"\s+data-confirm="([^"]*)"', page).group(1)
-    assert "修正中の帳票が1件あります（1.xlsx 確定）" in zip_confirm
-
-
-def test_partly_confirmed_batch_done_page_does_not_say_everything_is_deleted(app, client):
+def test_a_partly_confirmed_batch_does_not_say_everything_is_deleted(app, client):
     first = _confirmed_doc(app, "1.xlsx", batch_id="B", order=0)
     with app.app_context():
-        db.create_document("2.xlsx", "0" * 64, "documents/2.xlsx", batch_id="B", batch_order=1)
-    page = client.get(f"/forms/{first}/done").get_data(as_text=True)
+        pending = db.create_document("2.xlsx", "0" * 64, "documents/2.xlsx", batch_id="B", batch_order=1)
+    body = _finish(client, [first, pending], current=first)
+    assert body["confirmed"] == 1 and body["total"] == 2 and body["next_id"] == pending
+    page = body["html"]
     assert "このまとまりの帳票のデータはこのPCからすべて消えます" not in page
-    assert "確定済みの1件のデータがこのPCから消えます（未確定の分は残ります）" in page
+    assert "確定済みの1件だけを zip でダウンロードします" in page and "未確定の1件は残ります" in page
+    assert "確定済み1件だけをダウンロード（zip）" in page
+
+    # すべて確定すれば、まとめてのダウンロードだけになる
+    with app.app_context():
+        db.update_document(pending, data_json=_extraction(), confirmed_json=_extraction())
+    page = _finish(client, [first, pending], current=first)["html"]
+    assert "まとめて Markdown をダウンロード（zip）" in page and "確定済み1件だけ" not in page
+    assert "このまとまりの帳票のデータはこのPCからすべて消えます" in page
 
 
 def test_batch_upload_error_names_the_file_that_was_skipped(app, client, sample_dir):
     files = [(io.BytesIO((sample_dir / "standard.xlsx").read_bytes()), "standard.xlsx"),
              (io.BytesIO(b"this is not an excel file"), "broken.xlsx"),
              (io.BytesIO((sample_dir / "shifted.xlsx").read_bytes()), "shifted.xlsx")]
-    res = client.post("/forms/upload", data={"file": files}, content_type="multipart/form-data",
-                      follow_redirects=True)
-    page = res.get_data(as_text=True)
-    # どのファイルかは選んだ順の位置で示す（flash は Cookie に入るのでファイル名を入れない。design.md 3.3）
-    assert "2件目のファイル: " in page and "broken.xlsx" not in page and "2件の帳票を取り込みます" in page
+    res = client.post("/forms/upload", data={"file": files}, content_type="multipart/form-data")
+    body = res.get_json()
+    # どのファイルかは選んだ順の位置で示す（ファイル名そのものは画面の外に出さない。design.md 3.3）
+    assert res.status_code == 200 and len(body["docs"]) == 2 and body["batch_id"]
+    assert body["errors"] and body["errors"][0].startswith("2件目のファイル: ")
+    assert "broken.xlsx" not in " ".join(body["errors"])
 
 
 # ---- 時刻の範囲の「作業時間」（excel/text.py） ------------------------------------------------------
@@ -286,16 +268,14 @@ def test_a_person_name_used_as_a_label_is_not_written(tmp_path):
     _, rows = suggest_rows([load_workbook_info(path)])
     assert "斎藤" not in {r["display_name"] for r in rows}
 
-    # すでにそう作られた帳票の種類でも、人名を省く設定なら「- 斎藤: 森」を出さない
+    # すでにそう作られた帳票の種類（人名が見出しになったもの）は、読み取ったとおりに出す
     fields = [_md_field("subject", "件名", "搬送エラー"), _md_field("field_60", "作成", "斎藤"),
               _md_field("field_29", "斎藤", "森"), _md_field("field_61", "確認", "森")]
     ex = {"pattern": {"id": 2, "name": "トラブル報告書", "title_fields": [], "md_options": {}, "labels": []},
           "sheets": ["報告書"], "fields": fields, "attachments": []}
     refresh_summary(ex)
     md = build_markdown({"id": 1, "file_name": "t.xlsx", "file_hash": "0" * 64}, ex)
-    assert "斎藤" not in md and "森" not in md and "- 件名: 搬送エラー" in md
-    ex["pattern"]["md_options"] = {"omit_person_fields": False}
-    assert "- 斎藤: 森" in build_markdown({"id": 1, "file_name": "t.xlsx", "file_hash": "0" * 64}, ex)
+    assert "- 件名: 搬送エラー" in md and "- 作成: 斎藤" in md and "- 斎藤: 森" in md
 
 
 def test_upload_page_shows_the_batch_limits(client):
@@ -307,13 +287,15 @@ def test_upload_page_shows_the_batch_limits(client):
 
 def _read_standard(app, client, sample_dir) -> tuple[int, int]:
     """standard.xlsx を取り込んで読み取った帳票（確認中）を作る。戻り値: (帳票ID, 種類ID)"""
-    from excel.workbook import load_workbook_info
-    from tests.test_ai import _create_pattern, _upload
+    from tests.test_forms_flow import activate, add_field, create_type, read_form, upload_forms
 
-    pattern_id = _create_pattern(app, sample_dir, extra_field=False)
-    doc_id = _upload(client, sample_dir)
-    sheets = list(load_workbook_info(sample_dir / "standard.xlsx").grids)
-    client.post(f"/forms/{doc_id}/read", data={"pattern_id": pattern_id, "sheets": sheets[:1]})
+    path = sample_dir / "standard.xlsx"
+    pattern_id = create_type(client, path, "設備修理報告書")
+    for label_cell, value_cell in (("A3", "B3"), ("A4", "B4"), ("E4", "F4"), ("A7", "A8")):
+        add_field(client, pattern_id, "修理報告書", label_cell, value_cell)
+    activate(client, pattern_id)
+    doc_id, = upload_forms(client, path)
+    read_form(client, doc_id, pattern_id, ["修理報告書"])
     return doc_id, pattern_id
 
 
@@ -336,8 +318,8 @@ def test_editing_a_reread_confirmed_form_keeps_the_new_form_type_settings(app, c
             if fd.field_name == omitted["field_name"]:
                 fd.rag_output = "omit"
         db.save_pattern(pattern, "active")
-    client.post(f"/forms/{doc_id}/reread", data={"pattern_id": pattern_id, "sheets": ex["sheets"],
-                                                   "acknowledge": "on"})
+    client.post(f"/forms/{doc_id}/read", data={"pattern_id": pattern_id, "sheets": ex["sheets"],
+                                               "acknowledge": "on"})
     line = f"- {omitted['display_name']}: "
     assert line not in client.post(f"/forms/{doc_id}/preview", json={"values": {}}).get_json()["markdown"]
 
@@ -443,23 +425,28 @@ def test_hand_typed_date_without_a_year_stays_to_be_checked():
     assert not ex["fields"][0]["warning"] and not _field_status(ex["fields"][0])["issue"]
 
 
-def test_batch_done_card_says_all_confirmed(app, client):
+def test_batch_progress_counts_the_confirmed_forms(app, client):
     ids = [_confirmed_doc(app, f"{i}.xlsx", batch_id="b1", order=i) for i in range(2)]
-    page = client.get(f"/forms/{ids[0]}/done").get_data(as_text=True)
-    assert "すべて確定しました" in page and "すべて確定すると" not in page
+    body = _finish(client, ids, current=ids[0])
+    assert body["confirmed"] == 2 and body["next_id"] is None
+    assert "確定済み <strong>2</strong> / 2 件" in body["html"]
     with app.app_context():
         db.update_document(ids[1], confirmed_json=None)
-    page = client.get(f"/forms/{ids[0]}/done").get_data(as_text=True)
-    assert "すべて確定すると" in page
+    body = _finish(client, ids, current=ids[0])
+    assert body["confirmed"] == 1 and body["next_id"] == ids[1]
+    assert "確定済み <strong>1</strong> / 2 件" in body["html"] and "次の帳票へ（残り1件）" in body["html"]
 
 
 def test_upload_errors_do_not_put_the_file_name_in_the_session(app, client, sample_dir):
     files = [(io.BytesIO((sample_dir / "standard.xlsx").read_bytes()), "standard.xlsx"),
              (io.BytesIO(b"PK\x03\x04 broken"), "X社_社外秘.xlsx")]
-    client.post("/forms/upload", data={"file": files}, content_type="multipart/form-data")
+    res = client.post("/forms/upload", data={"file": files}, content_type="multipart/form-data")
+    errors = " ".join(res.get_json()["errors"])
+    assert "2件目のファイル" in errors and "社外秘" not in errors
+    # 画面を離れても残るところ（セッションのクッキー）にはファイル名を置かない
+    assert "社外秘" not in str(res.headers.get("Set-Cookie", ""))
     with client.session_transaction() as session:
-        flashes = " ".join(message for _, message in session.get("_flashes", []))
-    assert "2件目のファイル" in flashes and "社外秘" not in flashes
+        assert not session.get("_flashes")
 
 
 def _sheetless_workbook(sample_dir) -> bytes:
@@ -478,31 +465,12 @@ def _sheetless_workbook(sample_dir) -> bytes:
 
 def test_workbook_without_a_sheet_list_is_refused(app, client, sample_dir):
     res = client.post("/forms/upload", data={"file": (io.BytesIO(_sheetless_workbook(sample_dir)), "s.xlsx")},
-                      content_type="multipart/form-data", follow_redirects=True)
-    assert "シートがないブックです" in res.get_data(as_text=True)
+                      content_type="multipart/form-data")
+    assert res.status_code == 400 and "シートがないブックです" in res.get_json()["error"]
     with app.app_context():
         assert db.get_db().execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
     stored = Path(app.config["UPLOAD_DIR"]) / "documents"
     assert not stored.exists() or not any(stored.iterdir())
-
-
-def test_ai_fill_does_not_overwrite_an_edit_made_during_the_call(app, client, sample_dir, monkeypatch):
-    from services import ai_assist
-
-    doc_id, _ = _read_standard(app, client, sample_dir)
-    ex = _doc_extraction(app, doc_id)
-    target = next(f for f in ex["fields"] if f["data_type"] == "string" and f["value"])
-
-    def fill_during_edit(info, extraction):
-        # AIの応答を待つ間に、別のタブで途中保存された
-        app.test_client().post(f"/forms/{doc_id}/draft", json={"values": {target["field_name"]: "別タブの値"}})
-        return ["なにか"]
-
-    monkeypatch.setattr(ai_assist, "fill_missing", fill_during_edit)
-    page = client.post(f"/forms/{doc_id}/ai-fill", follow_redirects=True).get_data(as_text=True)
-    assert "別の画面で内容が変わりました" in page and "AIが1項目を入力しました" not in page
-    field = next(f for f in _doc_extraction(app, doc_id)["fields"] if f["field_name"] == target["field_name"])
-    assert field["value"] == "別タブの値"
 
 
 def test_workbook_with_too_many_cells_is_refused_before_reading(app, client, tmp_path):
@@ -512,11 +480,11 @@ def test_workbook_with_too_many_cells_is_refused_before_reading(app, client, tmp
     app.config["EXCEL_MAX_CELLS"] = 1000
     data = _xlsx_with_cells(tmp_path / "many.xlsx", 1001).read_bytes()
     res = client.post("/forms/upload", data={"file": (io.BytesIO(data), "many.xlsx")},
-                      content_type="multipart/form-data", follow_redirects=True)
-    assert "セル数が上限（1,000 セル）を超えています" in res.get_data(as_text=True)
-    res = client.post("/settings/form-types/new", data={"name": "多すぎ", "samples": (io.BytesIO(data), "many.xlsx")},
                       content_type="multipart/form-data")
-    assert res.status_code == 400 and "セル数が上限（1,000 セル）を超えています" in res.get_data(as_text=True)
+    assert res.status_code == 400 and "セル数が上限（1,000 セル）を超えています" in res.get_json()["error"]
+    res = client.post("/form-types/new", data={"name": "多すぎ", "samples": (io.BytesIO(data), "many.xlsx")},
+                      content_type="multipart/form-data")
+    assert res.status_code == 400 and "セル数が上限（1,000 セル）を超えています" in res.get_json()["error"]
     with app.app_context():
         assert db.get_db().execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []

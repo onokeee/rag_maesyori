@@ -15,17 +15,23 @@
   "required": ("要確認", "amber"),
 } %}
 
-{#- 手順の表示。items: 見出しの配列、current: 1始まりの現在位置 -#}
-{% macro steps(items, current) -%}
-<ol class="steps" aria-label="手順">
-  {%- for label in items %}
-  {%- set n = loop.index %}
-  <li class="{{ 'done' if n < current else ('current' if n == current else '') }}" {% if n == current %}aria-current="step"{% endif %}>
-    <span class="step-no" aria-hidden="true">{% if n < current %}&#10003;{% else %}{{ n }}{% endif %}</span>
-    <span class="step-label">{{ label }}</span>
-  </li>
-  {%- endfor %}
-</ol>
+{#- 1画面の中の「段」。①→②→③と画面を移らず、同じ画面に段が増えていく（利用者の指示 2026-09-20）。
+    使い方:
+      {% call ui.step("sheet", 2, "どのシートを使うか", open=false) %}…中身…{% endcall %}
+    開け閉ては static/app.js の window.ragSections（open / done / reset / body / working）が行う。
+    id は ragSections.open("sheet") のように呼ぶときの名前。 -#}
+{% macro step(id, no, title, open=False, done=False, summary="") -%}
+<section class="step{{ ' is-open' if open }}{{ ' is-done' if done }}" data-step="{{ id }}" id="step-{{ id }}">
+  <div class="step-head">
+    <span class="step-no" aria-hidden="true"><span class="step-no-text">{{ no }}</span></span>
+    <h2 class="step-title">{{ title }}</h2>
+    <p class="step-summary" data-step-summary title="{{ summary }}">{{ summary }}</p>
+    <span class="step-toggle" data-step-toggle {{ 'hidden' if not done }}>開く</span>
+  </div>
+  <div class="step-body">
+    {{ caller() if caller else "" }}
+  </div>
+</section>
 {%- endmacro %}
 
 {#- カード。{% call ui.card("見出し", actions=...) %}本文{% endcall %} -#}
@@ -80,35 +86,6 @@
   {%- if action_url %}<a class="btn primary" href="{{ action_url }}">{{ action_label }}</a>{% endif %}
   {{ caller() if caller else "" }}
 </div>
-{%- endmacro %}
-
-{#- 削除フォーム（送信前に確認ダイアログ）。message は「何が消えるか・元に戻せるか」を書く -#}
-{% macro confirm_delete_form(action, message, label="削除", next=None, small=True, fields=None) -%}
-<form method="post" action="{{ action }}" class="inline" data-confirm="{{ message }}" data-confirm-ok="{{ label }}">
-  {%- if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
-  {%- for k, v in (fields or {}).items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-  <button type="submit" class="btn danger-outline{{ ' small' if small }}">{{ label }}</button>
-</form>
-{%- endmacro %}
-
-{#- 一覧表の取り込みの［削除］。読み込み中・確定処理中は views 側で断られるので、画面ごとにずれないようボタン自体を出さない -#}
-{% macro table_import_delete_form(item, next=None, label="削除", small=True) -%}
-{%- if item.status not in ("reading", "confirming") -%}
-{{ confirm_delete_form(url_for('tables.delete_import', import_id=item.id),
-     "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。",
-     label=label, next=next, small=small) }}
-{%- endif -%}
-{%- endmacro %}
-
-{#- 保存先フォルダに保存するボタン（POST。送信前に確認ダイアログ）。message はダウンロードと同じく「消える」ことを書く。
-    保存先フォルダが設定されているとき（save_folder）だけ呼ぶ。folder は保存先（ボタンの説明に出す）、next は失敗・同名のときの戻り先、
-    attrs はフォームに付ける属性（data-batch-save など） -#}
-{% macro save_form(action, message, folder, next=None, label="保存先フォルダに保存", primary=True, small=False, fields=None, attrs="") -%}
-<form method="post" action="{{ action }}" class="inline" data-confirm="{{ message }}" data-confirm-ok="保存して消す" {{ attrs }}>
-  {%- if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
-  {%- for k, v in (fields or {}).items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-  <button type="submit" class="btn{{ ' primary' if primary }}{{ ' small' if small }}" title="保存先: {{ folder }}">{{ label }}</button>
-</form>
 {%- endmacro %}
 
 {#- ジョブの進捗。job: {"id","status","progress" or "progress_json", "message"}、url を渡すと app.js が自動で更新 -#}

@@ -368,3 +368,78 @@ def forget_id_counters(db) -> int:
         db.rollback()
         return 0
     return changed
+
+
+# ---- まとめて捨てる（作業中の表示を持たない） ----------------------------------------------
+# この アプリは「作業中の一覧」も「ダウンロード待ちの一覧」も持たない（利用者の指示 2026-09-20）。
+# 画面を閉じた時点で続きは開けないので、ダウンロードしていない取り込みは残さずに捨てる。
+#   - 起動時: ダウンロードしていない帳票・一覧表をすべて捨てる（purge_all_pending）
+#   - 動いている間: 24時間さわられていないものを捨てる（sweep_stale）
+# 残すのは「設定」（帳票の種類・一覧表の取り込み設定・AI接続）だけで、これは purge の対象ではない。
+
+STALE_HOURS = 24
+
+
+def _import_ids(db, where: str = "", args=()) -> list[int]:
+    return [row[0] for row in db.execute(f"SELECT id FROM table_imports {where}", args)]
+
+
+def _document_ids(db, where: str = "", args=()) -> list[int]:
+    return [row[0] for row in db.execute(f"SELECT id FROM documents {where}", args)]
+
+
+def purge_all_pending() -> tuple[int, int]:
+    """ダウンロードしていない帳票・一覧表をすべて捨てる。戻り値: (帳票の件数, 一覧表の件数)。
+
+    ダウンロードが終わったものはその時点で消えている（purge_after_send）ので、DB に残っている
+    帳票・取り込みは「途中のもの」か「確定したがダウンロードしていないもの」しかない。
+    続きを開く入口（作業中の一覧）を持たないので、起動時にまとめて捨てる。
+    """
+    db = database.get_db()
+    forms = purge_documents(_document_ids(db))
+    tables = 0
+    for import_id in _import_ids(db):
+        tables += purge_table_import(import_id)
+    return forms, tables
+
+
+def _stale_before(hours: float) -> str:
+    from datetime import datetime, timedelta
+
+    return (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")
+
+
+# 動いているジョブ（待機中・実行中・一時停止中）が指している取り込みは捨てない。
+# 大きな一覧表の読み込みや AI整形は24時間を超えることがあり、途中で消すとジョブが
+# 「もう無い行」を書きに行って失敗する（利用者から見れば、放っておいたら処理が消えた、になる）。
+# ジョブが終われば updated_at がその時刻になるので、次の回以降に改めて対象になる。
+_BUSY = ("SELECT ref_id FROM jobs WHERE ref_type = ? AND ref_id IS NOT NULL "
+         "AND status IN ('queued', 'running', 'paused')")
+
+
+def _busy_ids(db, ref_type: str) -> set[int]:
+    try:
+        return {row[0] for row in db.execute(_BUSY, (ref_type,))}
+    except sqlite3.Error:
+        return set()   # 確かめられないときは何も捨てない側に倒せないので、呼び出し元で空集合＝全部対象
+
+
+def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
+    """しばらくさわられていない帳票・一覧表を捨てる。戻り値: (帳票の件数, 一覧表の件数)。
+
+    帳票は updated_at を持たないので、確定した日時（無ければ取り込んだ日時）で見る。
+    動いているジョブが付いているものは、そのジョブが終わるまで残す。
+    """
+    db = database.get_db()
+    limit = _stale_before(hours)
+    busy_docs = _busy_ids(db, "document")
+    busy_imports = _busy_ids(db, "table_import")
+    forms = purge_documents([i for i in _document_ids(
+        db, "WHERE COALESCE(confirmed_at, created_at) < ?", (limit,)) if i not in busy_docs])
+    tables = 0
+    for import_id in _import_ids(
+            db, "WHERE COALESCE(confirmed_at, updated_at, created_at) < ?", (limit,)):
+        if import_id in busy_imports:
+            continue
+        tables += purge_table_import(import_id)
+    return forms, tables

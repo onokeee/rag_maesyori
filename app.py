@@ -1,17 +1,28 @@
 import os
 import secrets
 import sys
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, jsonify, render_template, request
+from flask import Blueprint, Flask, abort, jsonify, redirect, render_template, request, url_for
 
 from config import BASE_DIR, Config
 from models import database
-from services import llm
-from views import folder_save, form_types, forms, home, is_cross_site_write, settings, tables
+from views import form_types, forms, is_cross_site_write, tables
 
 _SECRET_FILE = BASE_DIR / ".flask_secret"
+
+# --- 「/」は帳票取り込みへ ------------------------------------------------------------
+# ホーム画面は無い。画面は「帳票取り込み」「表の取り込み」「帳票登録」の3つだけで、
+# 作業中の一覧もダウンロード待ちの一覧も持たない（利用者の指示 2026-09-20）。
+# ここに残るのは「/」を開いたときの転送だけ（古いブックマーク・開いたままの画面の戻り先も拾う）。
+home_bp = Blueprint("home", __name__)
+
+
+@home_bp.get("/", endpoint="index")
+def to_forms():
+    return redirect(url_for("forms.new"))
 
 
 def _secret_key() -> str:
@@ -80,7 +91,8 @@ def create_app(overrides: dict | None = None) -> Flask:
         app.config[key].mkdir(parents=True, exist_ok=True)
     database.init_app(app)
 
-    for module in (home, forms, form_types, tables, settings):
+    app.register_blueprint(home_bp)
+    for module in (forms, form_types, tables):
         app.register_blueprint(module.bp)
 
     @app.before_request
@@ -125,7 +137,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         # 画面からの JSON 送信（static/app.js の postJson）には JSON で返す。トーストに理由が出る。
         if request.accept_mimetypes.best == "application/json" or request.is_json:
             return jsonify(error="ほかのサイトのページから送られてきた操作に見えたため受け付けませんでした。"
-                                 "ホームからやり直してください"), 403
+                                 "取り込みの画面からやり直してください"), 403
         return render_template("errors/403.html"), 403
 
     @app.errorhandler(404)
@@ -134,8 +146,8 @@ def create_app(overrides: dict | None = None) -> Flask:
         # ダウンロード済みでデータが消えたあとに、開いたままの画面が途中保存・プレビューを送ると
         # ここに来る。HTML を返すとトーストに「通信に失敗しました」としか出ず、理由が伝わらない。
         if request.accept_mimetypes.best == "application/json" or request.is_json:
-            return jsonify(error="このデータはこのPCに残っていません（ダウンロード済みか保存先フォルダに保存済み、または削除されています）。"
-                                 "ホームからやり直してください"), 404
+            return jsonify(error="このデータはこのPCに残っていません（ダウンロード済みか、削除されています）。"
+                                 "取り込みの画面からやり直してください"), 404
         return render_template("errors/404.html"), 404
 
     @app.errorhandler(413)
@@ -152,7 +164,7 @@ def create_app(overrides: dict | None = None) -> Flask:
     def _bad_request(exc):
         # 送信専用の URL をアドレス欄から開いた（405）など。Werkzeug の英語の画面を出さない（design.md 2）
         if request.accept_mimetypes.best == "application/json" or request.is_json:
-            return jsonify(error="この操作は受け付けられませんでした。ホームから開き直してください"), exc.code
+            return jsonify(error="この操作は受け付けられませんでした。取り込みの画面から開き直してください"), exc.code
         return render_template("errors/400.html"), exc.code
 
     @app.errorhandler(500)
@@ -160,20 +172,54 @@ def create_app(overrides: dict | None = None) -> Flask:
         return render_template("errors/500.html"), 500
 
     _recover_jobs(app)
+    _purge_pending(app)
     _cleanup_leftovers(app)
-
-    @app.context_processor
-    def inject_model_picker():
-        # ヘッダーのモデル選択（全画面共通）
-        return {"model_picker": {"current": llm.current_model(), "models": llm.available(),
-                                 "llm_ready": llm.is_configured()}}
-
-    @app.context_processor
-    def inject_save_folder():
-        # 保存先フォルダ（設定 → 保存先フォルダ）。空でなければ、ダウンロードの横に［保存先フォルダに保存］を出す
-        return folder_save.folder_ctx()
-
+    _start_sweeper(app)
+    # ヘッダーは「帳票取り込み／表の取り込み／帳票登録」の3つだけ。使うAIモデルの選択は
+    # 「表の取り込み」画面の AI整形の段の中（AI接続）に移したので、共通の値は渡さない。
     return app
+
+
+# 途中で放り出されたものを捨てる間隔（design.md 3.3）。起動時に全部捨て、動いている間は
+# SWEEP_HOURS より古いものを SWEEP_INTERVAL ごとに捨てる（ブラウザを閉じたまま開きっぱなしのサーバ向け）。
+SWEEP_INTERVAL_SECONDS = 60 * 60
+
+
+def _purge_pending(app: Flask) -> None:
+    """起動時：ダウンロードしていない帳票・一覧表をすべて捨てる（作業中の一覧を持たないため）。"""
+    if app.config.get("TESTING"):
+        return
+    from core import purge
+
+    try:
+        with app.app_context():
+            forms_removed, tables_removed = purge.purge_all_pending()
+        if forms_removed or tables_removed:
+            print(f"[app] 途中だった取り込みを捨てました（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
+    except Exception as exc:  # 起動は止めない
+        print(f"[app] 途中だった取り込みの片付けに失敗しました（{exc.__class__.__name__}: {exc}）")
+
+
+def _start_sweeper(app: Flask) -> None:
+    """動いている間：しばらくさわられていない帳票・一覧表を捨て続ける（daemon スレッド）。"""
+    if app.config.get("TESTING"):
+        return
+    from core import purge
+
+    def loop() -> None:
+        while True:
+            _stop.wait(SWEEP_INTERVAL_SECONDS)
+            try:
+                with app.app_context():
+                    forms_removed, tables_removed = purge.sweep_stale(purge.STALE_HOURS)
+                if forms_removed or tables_removed:
+                    print(f"[app] {purge.STALE_HOURS}時間さわられていない取り込みを捨てました"
+                          f"（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
+            except Exception as exc:   # 次の回でやり直す
+                print(f"[app] 古い取り込みの片付けに失敗しました（{exc.__class__.__name__}: {exc}）")
+
+    _stop = threading.Event()
+    threading.Thread(target=loop, name="purge-sweeper", daemon=True).start()
 
 
 def _cleanup_leftovers(app: Flask) -> None:

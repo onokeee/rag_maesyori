@@ -169,11 +169,8 @@ def _working_doc(app):
 
 
 def test_a_beacon_from_the_same_page_is_not_refused_as_another_page(app, client):
-    import re
-
     doc_id = _working_doc(app)
-    page = client.get(f"/forms/{doc_id}/review").get_data(as_text=True)
-    old = re.search(r'data-version="([0-9a-f]+)"', page).group(1)
+    old = client.get(f"/forms/{doc_id}/review").get_json()["version"]
     first = client.post(f"/forms/{doc_id}/draft",
                         json={"values": {"equipment_name": "A"}, "version": old, "page_token": "page-1"})
     assert first.status_code == 204
@@ -191,11 +188,8 @@ def test_a_beacon_from_the_same_page_is_not_refused_as_another_page(app, client)
 
 
 def test_a_beacon_is_refused_after_another_page_saved(app, client):
-    import re
-
     doc_id = _working_doc(app)
-    page = client.get(f"/forms/{doc_id}/review").get_data(as_text=True)
-    old = re.search(r'data-version="([0-9a-f]+)"', page).group(1)
+    old = client.get(f"/forms/{doc_id}/review").get_json()["version"]
     res = client.post(f"/forms/{doc_id}/draft",
                       json={"values": {"equipment_name": "A"}, "version": old, "page_token": "page-a"})
     new = res.headers["X-Doc-Version"]
@@ -208,37 +202,12 @@ def test_a_beacon_is_refused_after_another_page_saved(app, client):
 
 def test_draft_page_marks_are_forgotten_when_the_form_is_purged(app, client):
     """消した帳票の途中保存の目印（id）をメモリに残さない（design.md 3.3 データを残さない）。"""
-    import re
-
     from views import forms
 
     doc_id = _working_doc(app)
-    page = client.get(f"/forms/{doc_id}/review").get_data(as_text=True)
-    old = re.search(r'data-version="([0-9a-f]+)"', page).group(1)
+    old = client.get(f"/forms/{doc_id}/review").get_json()["version"]
     assert client.post(f"/forms/{doc_id}/draft",
                        json={"values": {"equipment_name": "A"}, "version": old, "page_token": "page-1"}).status_code == 204
     assert doc_id in forms._DRAFT_TOKENS
-    assert client.post(f"/forms/{doc_id}/delete").status_code == 302
+    assert client.post(f"/forms/{doc_id}/delete").get_json()["ok"] is True
     assert doc_id not in forms._DRAFT_TOKENS
-
-
-# ---- ux3-4: 帳票の種類を削除したあとの作業中の帳票 -----------------------------------------------------
-
-def test_working_form_keeps_its_read_type_name_and_delete_confirm_counts_it(app, client):
-    from models import database as db
-
-    doc_id = _working_doc(app)
-    with app.app_context():
-        pattern_id = db.create_pattern("設備修理報告書")
-        db.update_document(doc_id, pattern_id=pattern_id)
-    with app.app_context():
-        rows = {p["id"]: p for p in db.list_patterns()}
-    assert rows[pattern_id]["working_count"] == 1
-    page = client.get("/settings/form-types/").get_data(as_text=True)
-    assert "作業中の帳票1件は読み取った内容のまま確定できます" in page
-    with app.app_context():
-        db.delete_pattern(pattern_id)
-        doc = db.list_documents()[0]
-    assert doc["pattern_name"] is None and doc["extraction_pattern_name"] == "設備修理報告書"
-    home = client.get("/").get_data(as_text=True)
-    assert "設備修理報告書" in home and "種類未選択" not in home

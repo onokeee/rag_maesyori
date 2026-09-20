@@ -19,7 +19,10 @@ from tables.mapping import suggest_columns
 from tables.normalize import parse_number_text, read_records
 from tables.source import UploadError, open_source
 from tables.spec import spec_from_dict, spec_from_suggestions
-from tests.test_tables_flow import COLUMNS, CSV_TEXT, _wait_import_job
+from tests.tables_helpers import (
+    columns_payload, confirmed, name_source, panel, preview_panel, save_columns, save_layout, upload, upload_csv,
+    wait_import_job,
+)
 from tests.test_tables_pipe import _rec, list_spec_dict
 
 
@@ -195,27 +198,7 @@ def test_placeholder_equipment_is_not_an_equipment():
 # ---- 画面（取り込み・削除・ダウンロード） -----------------------------------------------------------------
 
 def _confirmed_import(app, client) -> int:
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(CSV_TEXT.encode("cp932")), "トラブル一覧.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "cp932", "delimiter": ",", "template": "new", "new_template_name": "トラブル対応一覧"})
-    client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""})
-    payload = {"name": "トラブル対応一覧", "group_by": "month", "max_records_per_file": 300, "omit_person": True,
-               "columns": [{"index": i, "header": h, "use": True, "key": k, "display": h.split("(")[0], "type": t,
-                            "role": r, "unit": "分" if k == "downtime" else "", "md": "attribute",
-                            "fill_down_blank": False, "ai": False, "description": ""}
-                           for i, (k, h, t, r) in enumerate(COLUMNS)]}
-    assert client.post(f"/tables/imports/{import_id}/columns", json=payload).status_code == 200
-    _wait_import_job(app, import_id)
-    client.get(f"/tables/imports/{import_id}/preview")
-    with app.app_context():
-        job = jobs.latest_job("table_import", import_id, kind="table_preview")
-        if job is not None:
-            jobs.wait_job(job["id"], timeout=60)
-    client.post(f"/tables/imports/{import_id}/confirm")
-    assert _wait_import_job(app, import_id)["status"] == "confirmed"
-    return import_id
+    return confirmed(app, client, "トラブル一覧.csv", "トラブル対応一覧")
 
 
 def test_template_in_use_by_an_undownloaded_import_cannot_be_deleted(app, client):
@@ -223,14 +206,14 @@ def test_template_in_use_by_an_undownloaded_import_cannot_be_deleted(app, client
     with app.app_context():
         tid = store.get_import(import_id)["template_id"]
     res = client.post(f"/tables/templates/{tid}/delete")
-    assert res.status_code == 302
+    assert res.status_code == 400 and "ダウンロードしていない取り込み" in res.get_json()["error"]
     with app.app_context():
         assert store.get_template(tid) is not None
         assert store.get_import(import_id)["template_version_id"] is not None
     res = client.get(f"/tables/imports/{import_id}/download.zip")
     assert res.status_code == 200 and res.mimetype == "application/zip"
     # ダウンロードで取り込みが消えたあとは削除できる
-    assert client.post(f"/tables/templates/{tid}/delete").status_code == 302
+    assert client.post(f"/tables/templates/{tid}/delete").status_code == 200
     with app.app_context():
         assert store.get_template(tid) is None
 
@@ -246,29 +229,22 @@ def test_second_download_after_purge_is_404_not_500(app, client, monkeypatch):
 
 
 def test_delete_is_refused_while_the_preview_draft_is_being_made(app, client):
-    from tests.test_tables_flow import _queued_job, _uploaded_csv
+    from tests.test_tables_flow import _queued_job
 
-    import_id = _uploaded_csv(client)
+    import_id = upload_csv(client, "間違い.csv")
     _queued_job(app, import_id, "table_preview")
     res = client.post(f"/tables/imports/{import_id}/delete")
-    assert res.status_code == 302 and res.headers["Location"].endswith("/preview")
+    assert res.status_code == 400 and "Markdownの下書きを作っている間は削除できません" in res.get_json()["error"]
     with app.app_context():
         assert store.get_import(import_id) is not None
 
 
 def test_failed_preview_draft_can_be_made_again(app, client, monkeypatch):
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(CSV_TEXT.encode("cp932")), "t.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "cp932", "delimiter": ",", "template": "new", "new_template_name": "再作成テスト"})
-    client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""})
-    payload = {"name": "再作成テスト", "group_by": "month", "max_records_per_file": 300, "omit_person": True,
-               "columns": [{"index": i, "header": h, "use": True, "key": k, "display": h.split("(")[0], "type": t,
-                            "role": r, "unit": "", "md": "attribute", "fill_down_blank": False, "ai": False,
-                            "description": ""} for i, (k, h, t, r) in enumerate(COLUMNS)]}
-    client.post(f"/tables/imports/{import_id}/columns", json=payload)
-    _wait_import_job(app, import_id)
+    import_id = upload_csv(client, "t.csv")
+    name_source(client, import_id, "再作成テスト")
+    save_layout(client, import_id)
+    save_columns(client, import_id, columns_payload("再作成テスト"))
+    wait_import_job(app, import_id)
 
     real = pipeline.render_files
     calls = {"n": 0}
@@ -285,16 +261,16 @@ def test_failed_preview_draft_can_be_made_again(app, client, monkeypatch):
         with app.app_context():
             jobs.wait_job(jobs.latest_job("table_import", import_id, kind="table_preview")["id"], timeout=60)
 
-    client.get(f"/tables/imports/{import_id}/preview")
+    panel(client, import_id, "preview")
     wait_preview()
-    page = client.get(f"/tables/imports/{import_id}/preview").get_data(as_text=True)
-    assert "Markdownの下書きを作れませんでした" in page and "もう一度作る" in page
-    assert "表を読み込めませんでした" not in page
-    res = client.get(f"/tables/imports/{import_id}/preview?retry=1")
-    assert res.status_code == 302 and "retry" not in res.headers["Location"]
+    data = panel(client, import_id, "preview")
+    assert data["failed"] is True and "もう一度作る" in data["html"]
+    # 下書きの失敗を「表を読み込めませんでした」と取り違えない（読み込みは終わっている）
+    assert "表を読み込めませんでした" not in data["html"]
+    res = client.post(f"/tables/imports/{import_id}/preview")
+    assert res.status_code == 200 and res.get_json()["building"] is True
     wait_preview()
-    page = client.get(f"/tables/imports/{import_id}/preview").get_data(as_text=True)
-    assert "確定してMarkdownを作成" in page
+    assert "確定してMarkdownを作成" in panel(client, import_id, "preview")["html"]
 
 
 def test_import_status_is_written_before_the_job_can_finish(app, monkeypatch):
@@ -334,9 +310,8 @@ def test_format_only_far_cell_does_not_block_upload(app, client, tmp_path):
     path = tmp_path / "far.xlsx"
     wb.save(path)
     ExcelSource(path).close()
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(path.read_bytes()), "far.xlsx")},
-                      content_type="multipart/form-data")
-    assert res.status_code == 302 and res.headers["Location"].endswith("/source")
+    res = upload(client, path.read_bytes(), "far.xlsx")
+    assert res.status_code == 200 and res.get_json()["import_id"]
 
 
 def test_workbook_with_unreadable_values_is_refused_at_upload(app, client, tmp_path):
@@ -350,9 +325,8 @@ def test_workbook_with_unreadable_values_is_refused_at_upload(app, client, tmp_p
             if item.filename == "xl/worksheets/sheet1.xml":
                 data = re.sub(rb"<v>3</v>", b"<v>NaN</v>", data, count=1)
             z.writestr(item, data)
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(out.getvalue()), "nan.xlsx")},
-                      content_type="multipart/form-data")
-    assert res.status_code == 302 and res.headers["Location"].endswith("/tables/new")
+    res = upload(client, out.getvalue(), "nan.xlsx")
+    assert res.status_code == 400 and res.get_json()["error"]
     with app.app_context():
         assert store.list_imports(limit=10) == []
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
@@ -364,33 +338,21 @@ def test_retention_note_does_not_ask_for_the_csv_first():
     assert "より先" not in DELETE_ON_DOWNLOAD_NOTE and "管理用_RAGには入れない" in DELETE_ON_DOWNLOAD_NOTE
 
 
-def test_confirmed_import_can_be_deleted_from_home_and_done_page(app, client):
+def test_confirmed_import_can_be_deleted_without_downloading(app, client):
+    """ダウンロードせずに消す道を、確定したあとの段にも残す。"""
     import_id = _confirmed_import(app, client)
-    action = f'action="/tables/imports/{import_id}/delete"'
-    assert action in client.get("/").get_data(as_text=True)
-    assert action in client.get(f"/tables/imports/{import_id}/done").get_data(as_text=True)
-    res = client.post(f"/tables/imports/{import_id}/delete", data={"next": "/"})
-    assert res.status_code == 302
+    assert "data-import-delete" in panel(client, import_id, "done")["html"]
+    res = client.post(f"/tables/imports/{import_id}/delete")
+    assert res.status_code == 200 and res.get_json()["ok"] is True
     with app.app_context():
         assert store.get_import(import_id) is None
 
 
-def test_preview_headers_show_the_unit_and_template_list_label(app, client):
+def test_preview_headers_show_the_unit(app, client):
     import_id = _confirmed_import(app, client)
-    html = client.get(f"/tables/imports/{import_id}/preview").get_data(as_text=True)
-    assert "<th>停止時間（分）</th>" in html
-    listing = client.get("/settings/table-templates").get_data(as_text=True)
-    assert "まだダウンロードしていない取り込み（件）" in listing
-    assert "ダウンロード待ちの取り込み" not in listing
+    assert "<th>停止時間（分）</th>" in preview_panel(app, client, import_id)["html"]
 
 
-def test_404_for_a_missing_setting_does_not_blame_a_download(client):
-    for path, back in (("/settings/form-types/999", "/settings/form-types"),
-                       ("/tables/templates/999", "/settings/table-templates")):
-        res = client.get(path)
-        assert res.status_code == 404
-        html = res.get_data(as_text=True)
-        assert "この設定は見つかりません" in html and "ダウンロード済み" not in html
-        assert f'href="{back}' in html
-    html = client.get("/tables/imports/999/done").get_data(as_text=True)
-    assert "ダウンロード済み" in html and "この設定は見つかりません" not in html
+def test_a_panel_of_a_missing_import_is_404(client):
+    assert client.get("/tables/imports/999/panel/done").status_code == 404
+    assert client.get("/tables/imports/999/panel/unknown").status_code == 404

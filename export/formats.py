@@ -3,7 +3,7 @@
 Markdown は LightRAG 調査の指針（docs/design.md 6章）に従う。
   - 1帳票だけで意味が通るように、種類・識別番号・設備・日付をタイトルと本文に書く
   - 定型文・種類の版・DBの文書ID・セル座標は出さない（JSON側に残す）
-  - 値は NFKC＋空白の畳み込み、数値は単位付き。人名の項目と「出さない」項目は省く
+  - 値は NFKC＋空白の畳み込み、数値は単位付き。「出さない」にした項目だけ省く（人名の項目も出す）
   - 値が別の欄の見出し語そのもの（読み取り誤り。「- 数量: 単価」）の項目は出さない（JSON には残す）
   - 明細表は見出しの下に1行1明細で「- 品番: X／品名: Y／数量: 2」と書く（パイプ表は使わない）
   - 同じ入力からは同じバイト列になる（生成日時などを書かない）
@@ -17,8 +17,7 @@ from pathlib import Path
 
 from excel.tables import TOTAL_LABEL_RE, drop_seq_column, is_table_value, table_row_items
 from excel.text import nfkc_value as _excel_nfkc_value, normalize_label as _normalize_label
-from pattern.dictionary import is_person_field, is_person_label
-from pattern.model import DEFAULT_MD_OPTIONS, DEFAULT_TITLE_KEYS
+from pattern.model import DEFAULT_TITLE_KEYS
 
 try:  # WP-core の共通実装があればそれを使う
     from core import mdtext as _core_mdtext
@@ -106,7 +105,6 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     tail.append(f"- 出典: {_source_text(doc, title_fields, filled)}")
 
     long_fields = [f for f in filled if f["data_type"] in ("text", "table")]
-    omit_person = bool(_md_options(extraction).get("omit_person_fields", True))
 
     def render(with_identifier: bool) -> str:
         blocks = [head, basics]
@@ -115,7 +113,7 @@ def build_markdown(doc: dict, extraction: dict) -> str:
             if with_identifier and identifier:
                 heading += f"（{identifier}）"
             if f["data_type"] == "table":
-                lines = table_markdown_lines(f["value"], omit_person)
+                lines = table_markdown_lines(f["value"])
                 if f.get("ai_filled") and lines:
                     lines[-1] += AI_MARK
                 if not (with_identifier and identifier):
@@ -180,42 +178,14 @@ def markdown_filename(doc: dict, extraction: dict) -> str:
 
 # ---- 項目の選別・整形 ------------------------------------------------------------
 
-def _md_options(extraction: dict) -> dict:
-    return {**DEFAULT_MD_OPTIONS, **(extraction["pattern"].get("md_options") or {})}
-
-
 def _shown_fields(extraction: dict) -> list[dict]:
-    """Markdown に出す項目（「出さない」項目、設定により人名の項目、値が見出し語だけの項目を除く）。"""
-    omit_person = bool(_md_options(extraction).get("omit_person_fields", True))
-    labels = set(extraction["pattern"].get("labels") or ())
-    people = _person_values(extraction["fields"]) if omit_person else set()
-    return [
-        f for f in extraction["fields"]
-        if f.get("rag_output", "show") != "omit"
-        and not (omit_person and is_person_field(f["field_name"], f.get("display_name", "")))
-        and not _is_label_value(f, labels)
-        and not _is_person_name_field(f, people)
-    ]
+    """Markdown に出す項目（「出さない」にした項目と、値が見出し語だけの項目を除く）。
 
-
-def _person_values(fields: list[dict]) -> set[str]:
-    """人名の項目（作成・確認・承認・報告者…）に読み取った値（正規化したもの）。"""
-    return {_normalize_label(_one_line(f["value"])) for f in fields
-            if f["data_type"] == "string" and not _is_blank(f["value"])
-            and is_person_field(f["field_name"], f.get("display_name", ""))} - {""}
-
-
-def _is_person_name_field(f: dict, people: set[str]) -> bool:
-    """押印欄の人名（「斎藤」）を見出しにした項目か、値が人名の項目の値と同じ短い項目か。
-
-    帳票の種類を作るときに人名が見出しとして選ばれると、人名の項目を省いても「- 斎藤: 森」が出てしまう。
+    人名の項目も出す（読み取った内容は削らない。docs/design.md 6章）。
     """
-    if not people or f["data_type"] != "string" or is_person_field(f["field_name"], f.get("display_name", "")):
-        return False
-    if _normalize_label(f.get("display_name", "")) in people:
-        return True
-    text = _one_line(f["value"])
-    return bool(text) and len(text) <= MAX_LABEL_VALUE_CHARS and _normalize_label(text) in people
+    labels = set(extraction["pattern"].get("labels") or ())
+    return [f for f in extraction["fields"]
+            if f.get("rag_output", "show") != "omit" and not _is_label_value(f, labels)]
 
 
 def _is_label_value(f: dict, labels: set[str]) -> bool:
@@ -353,11 +323,8 @@ def _source_text(doc: dict, title_fields: list[dict], filled: list[dict] | None 
     return f"{file_name}（{_one_line(ident['display_name'])} {_plain_value(ident)}）"
 
 
-def table_markdown_lines(value, omit_person: bool = False) -> list[str]:
-    """明細表の1行を「- 品番: X／品名: Y」の1行にする。空のセルは書かない。合計行は「- 合計: 投入数: 50枚／…」。
-
-    omit_person: 人名の列見出し（担当・氏名など）の列を出さない（本文の人名の項目と同じ扱い）。
-    """
+def table_markdown_lines(value) -> list[str]:
+    """明細表の1行を「- 品番: X／品名: Y」の1行にする。空のセルは書かない。合計行は「- 合計: 投入数: 50枚／…」。"""
     lines = []
     if not is_table_value(value):
         return lines
@@ -366,8 +333,6 @@ def table_markdown_lines(value, omit_person: bool = False) -> list[str]:
     for row in value["rows"]:
         items = [(_one_line(k), _one_line(v)) for k, v in table_row_items(value, row)]
         items = [(k, v) for k, v in items if v]
-        if omit_person:
-            items = [(k, v) for k, v in items if not is_person_label(k)]
         if not items:
             continue
         if _TOTAL_LABEL.match(items[0][1]):
@@ -472,9 +437,8 @@ def _safe_filename_part(text: str, max_len: int = 60) -> str:
     return f"{s}_" if s.split(".")[0].upper() in _WINDOWS_RESERVED else s
 
 
-def _md_filename(parts: list[str], hint: str | None = None) -> str:
+def _md_filename(parts: list[str]) -> str:
     if _core_naming is not None and hasattr(_core_naming, "md_filename"):
-        return _core_naming.md_filename(parts, hint)
+        return _core_naming.md_filename(parts)
     safe = [p for p in (_safe_filename_part(part) for part in parts) if p]
-    name = "_".join(safe) or "無題"
-    return name + (f".[{hint}]" if hint else "") + ".md"
+    return ("_".join(safe) or "無題") + ".md"

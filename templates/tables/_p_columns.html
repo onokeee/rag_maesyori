@@ -1,0 +1,21 @@
+{#- 段4「列の対応づけ」の中身。表そのものは _column_editor.html。 -#}
+{% import "components/_ui.html" as ui %}
+<p class="hint">{% if is_new %}見出しと値から候補を入れました。確かめて取り込み設定を保存してください。
+  {% else %}取り込み設定「{{ settings.name }}」を変更します。{% endif %}</p>
+
+{% if changed %}
+<div class="notice" role="note">
+  <strong>前回の取り込み設定と見出しが変わっています。</strong>
+  {% if changed.missing %}見つからない列: {{ changed.missing | join('、') }}。{% endif %}
+  {% if changed.added %}新しい見出し: {{ changed.added | join('、') }}。{% endif %}
+  対応づけを確かめてから保存してください。
+  {% if absent %}今回のファイルにない列（設定には残します）: {{ absent | join('、') }}。{% endif %}
+</div>
+{% endif %}
+
+{% set show_stats = True %}
+{% include "tables/_column_editor.html" %}
+
+<div class="form-actions">
+  <button type="button" class="btn primary" data-editor-save>この対応づけで読み込む</button>
+</div>

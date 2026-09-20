@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% import "components/_ui.html" as ui %}
+{% block title %}帳票取り込み{% endblock %}
+{% block container_class %}wide{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>帳票取り込み</h1>
+    <p class="page-lead">1ファイル＝1件の報告書・記録票（例：設備修理報告書）を Markdown にします。
+      1行＝1件の表は<a href="{{ url_for('tables.new') }}">表の取り込み</a>から。</p>
+  </div>
+</div>
+
+<div id="formsPage"
+     data-upload-url="{{ url_for('forms.upload') }}"
+     data-finish-url="{{ url_for('forms.finish') }}"
+     data-max-files="{{ max_files }}">
+
+  {% call ui.step("file", 1, "ファイルを置く", open=True) %}
+      {% if active_pattern_count == 0 %}
+      <div class="notice" role="note">
+        {% if pattern_count == 0 %}
+          帳票の種類がまだありません。先に<a href="{{ url_for('form_types.index') }}">帳票登録</a>で、
+          見本の Excel から読み取る欄を決めてください。
+        {% else %}
+          使用中の帳票の種類がありません。<a href="{{ url_for('form_types.index') }}">帳票登録</a>で［使用開始］を押してください。
+        {% endif %}
+      </div>
+      {% endif %}
+      <form id="uploadForm" class="stack" enctype="multipart/form-data">
+        {{ ui.file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
+                        hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて置くと、この画面で1件ずつ読み取って最後に zip にまとめます（" ~ max_files ~ "ファイル・合計" ~ max_mb ~ "MBまで）", multiple=True) }}
+        <div class="form-actions">
+          <button type="submit" class="btn primary">読み取る</button>
+        </div>
+        <p class="hint">取り込んだデータはこのPCに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
+      </form>
+      <p class="work-line" data-work="upload" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
+  {% endcall %}
+
+  {% call ui.step("type", 2, "帳票の種類とシート") %}
+      <div class="doc-tabs" data-doc-tabs role="tablist" aria-label="取り込む帳票" hidden></div>
+      <div data-type-body></div>
+      <p class="work-line" data-work="read" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
+  {% endcall %}
+
+  {% call ui.step("review", 3, "読み取り結果") %}
+      <div data-review-body></div>
+  {% endcall %}
+
+  {% call ui.step("finish", 4, "確定してダウンロード") %}
+      <div data-finish-body></div>
+      <p class="work-line" data-work="confirm" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
+  {% endcall %}
+</div>
+{% endblock %}
+{% block scripts %}<script src="{{ url_for('static', filename='review.js') }}"></script>{% endblock %}

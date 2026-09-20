@@ -12,7 +12,7 @@ from waitress.server import create_server
 import app as app_module
 from core import purge
 from models import database as db
-from tests.test_retention import _add_confirmed_document
+from tests.conftest import add_confirmed_document, confirmed_import
 
 BIG = 1024 * 1024   # 溜められる上限（OUTBUF_HIGH_WATERMARK）より十分大きい本文
 
@@ -90,7 +90,7 @@ def _sequence(app, table: str):
 
 
 def test_the_id_counter_does_not_record_how_many_forms_were_taken_in(app, client):
-    ids = [_add_confirmed_document(app, f"報告書{i}.xlsx")[0] for i in range(3)]
+    ids = [add_confirmed_document(app, f"報告書{i}.xlsx")[0] for i in range(3)]
     assert _sequence(app, "documents") == max(ids)
     for doc_id in ids[:-1]:
         assert client.get(f"/forms/{doc_id}/download.md").status_code == 200
@@ -101,7 +101,7 @@ def test_the_id_counter_does_not_record_how_many_forms_were_taken_in(app, client
     assert purge._ID_BASE_MIN <= seq < purge._ID_BASE_MAX   # 空になったら乱数に置き換わる
 
     # 次の帳票は消した番号を使い回さないので、開いたままの古い画面は新しい帳票を指さない
-    new_id, _ = _add_confirmed_document(app, "次の報告書.xlsx")
+    new_id, _ = add_confirmed_document(app, "次の報告書.xlsx")
     assert new_id == seq + 1 and new_id not in ids
     for doc_id in ids:
         assert client.get(f"/forms/{doc_id}/review").status_code == 404
@@ -110,20 +110,19 @@ def test_the_id_counter_does_not_record_how_many_forms_were_taken_in(app, client
 
 
 def test_the_id_counter_of_table_imports_and_jobs_is_forgotten_too(app, client):
-    from tests.test_retention import _confirmed_import
-
-    import_id = _confirmed_import(app, client)
+    import_id = confirmed_import(app, client)
     assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
     for table in ("table_imports", "jobs"):
         seq = _sequence(app, table)
         assert purge._ID_BASE_MIN <= seq < purge._ID_BASE_MAX, table
-    assert client.get(f"/tables/imports/{import_id}").status_code == 404
+    # 開いたままの画面が段を取りに来ても、もう無い（ダウンロード済み）
+    assert client.get(f"/tables/imports/{import_id}/panel/preview").status_code == 404
 
 
 def test_the_counter_is_randomised_each_time_the_table_becomes_empty(app, client):
     seen = set()
     for i in range(3):
-        doc_id, _ = _add_confirmed_document(app, f"報告書{i}.xlsx")
+        doc_id, _ = add_confirmed_document(app, f"報告書{i}.xlsx")
         assert doc_id not in seen
         seen.add(doc_id)
         assert client.get(f"/forms/{doc_id}/download.md").status_code == 200
@@ -134,7 +133,7 @@ def test_the_counter_is_randomised_each_time_the_table_becomes_empty(app, client
 def test_a_new_database_still_starts_at_one(app):
     with app.app_context():
         purge.forget_id_counters(db.get_db())   # 一度も帳票を入れていない表には番号の続きが無く、そのまま
-    doc_id, _ = _add_confirmed_document(app, "最初.xlsx")
+    doc_id, _ = add_confirmed_document(app, "最初.xlsx")
     assert doc_id == 1
 
 
@@ -155,7 +154,7 @@ def test_startup_forgets_a_counter_left_by_an_older_version(tmp_path):
 
 
 def test_the_counter_is_kept_while_the_table_still_has_rows(app):
-    first, _ = _add_confirmed_document(app, "作業中.xlsx")
+    first, _ = add_confirmed_document(app, "作業中.xlsx")
     with app.app_context():
         purge.forget_id_counters(db.get_db())
     assert _sequence(app, "documents") == first

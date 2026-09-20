@@ -22,23 +22,26 @@ from tests.test_tables_pipe import FakeCtx, _new_import, _rec
 # ---- R6T-1: 設定の編集を何も変えずに保存しても、JSON で選んだ期間の列（2列目の日付）を置き換えない -------------
 
 def test_noop_save_keeps_the_period_date_column(app, client):
-    from tests.test_endpoints_settings import _json_only_spec
-    from tests.test_tables_fixes4 import _editor_body, _saved
     from tables.spec import ColumnSpec
+    from tests.tables_helpers import SPEC_CSV, json_only_spec
+    from tests.test_tables_fixes4 import _editor_body, _saved
 
-    spec = _json_only_spec()
+    spec = json_only_spec()
     spec.columns.append(ColumnSpec("completed_at", "完了日", headers=["完了日"], type="date", role="date"))
     spec.period["date_column"] = "completed_at"
     assert validate_spec(spec) == []
-    template_id, body = _editor_body(app, client, spec)
-    after = _saved(app, client, template_id, body)
+    # 完了日の列もある CSV（画面にその行が出るように）
+    text = "\r\n".join(line + ("完了日" if i == 0 else "2026-08-28") for i, line in
+                       enumerate(x + "," for x in SPEC_CSV.strip("\r\n").split("\r\n"))) + "\r\n"
+    import_id, template_id, body = _editor_body(app, client, spec, text=text)
+    after = _saved(app, client, import_id, template_id, body)
     assert after.period["date_column"] == "completed_at"
 
     # 日付の役割の列を変えたときは画面の役割から決め直す
     for r in body["columns"]:
         if r.get("key") == "completed_at":
             r["role"] = "attribute"
-    after = _saved(app, client, template_id, body)
+    after = _saved(app, client, import_id, template_id, body)
     assert after.period["date_column"] == "occurred_at"
 
 
@@ -75,11 +78,11 @@ def test_header_row_below_the_head_rows_is_read(tmp_path):
 
 # ---- R6T-3: 見出しが自動で見つからなくても、保存した取り込み設定を選べる ------------------------------------------
 
-def test_step2_lists_saved_settings_and_checks_the_imports_own(app, client, tmp_path):
+def test_the_source_panel_lists_saved_settings_and_checks_the_imports_own(app, client, tmp_path):
+    from tests.tables_helpers import panel_html, upload_bytes
+
     path = _deep_book(tmp_path / "deep40.xlsx", 41)
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(path.read_bytes()), "deep40.xlsx")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
+    import_id = upload_bytes(client, path.read_bytes(), "deep40.xlsx")
     spec_a = spec_from_dict({"name": "トラブル一覧", "columns": [
         {"key": "record_no", "display": "管理No", "headers": ["管理No"], "type": "code", "role": "key"}]})
     spec_b = spec_from_dict({"name": "別名", "columns": [
@@ -91,11 +94,11 @@ def test_step2_lists_saved_settings_and_checks_the_imports_own(app, client, tmp_
         src = dict(imp["source"] or {})
         src["header_rows"] = [41]
         store.update_import(import_id, source=src, template_id=t2, template_version_id=v2)
-    page = client.get(f"/tables/imports/{import_id}/source").get_data(as_text=True)
-    radios = re.findall(r'<input type="radio" name="template" value="([^"]+)"\s*(checked)?', page)
-    values = [v for v, _c in radios]
+    page = panel_html(client, import_id, "source")
+    radios = re.findall(r'<input type="radio" name="template" value="([^"]+)"([^>]*)>', page)
+    values = [v for v, _rest in radios]
     assert str(t2) in values and "new" in values and len(values) == 3
-    assert [v for v, c in radios if c] == [str(t2)]
+    assert [v for v, rest in radios if "checked" in rest] == [str(t2)]
     assert "管理No" in page   # 保存した見出し行（41行目）で見出しを読んでいる
 
 
@@ -120,8 +123,8 @@ def test_row_inputs_are_read_the_same_way_in_the_browser():
     from views.tables import _int_list, _row_no
 
     js = (Path(__file__).resolve().parents[1] / "static" / "tables.js").read_text(encoding="utf-8")
-    start = js.index("    const parseEnd = ")
-    end = js.index("    const apply = ")
+    start = js.index("  const parseEnd = ")
+    end = js.index("  function applyLayout(")
     script = js[start:end] + f"""
 const inputs = {json.dumps(_ROW_INPUTS, ensure_ascii=False)};
 process.stdout.write(JSON.stringify({{rows: inputs.map(parseRows), ends: inputs.map(parseEnd)}}));
@@ -147,21 +150,18 @@ def test_default_suggestions_tick_only_one_log_column():
     assert all(s.role == "text" and not s.log and s.md in ("body", "omit") for s in others)
 
 
-def test_untouched_columns_page_with_two_log_like_columns_can_be_saved(app, client):
-    from tests.test_endpoints_settings import _collect
+def test_untouched_columns_panel_with_two_log_like_columns_can_be_saved(app, client):
+    from tests.tables_helpers import editor_body, name_source, save_columns, save_layout, upload_csv
 
     log = "4/1 10:00 停止を確認。\n4/2 11:00 センサーを交換。\n4/3 復旧を確認した。"
     text = "管理No,発生日,対応内容,対応内容_2\r\n" + "".join(
         f"TR-{i},2026/08/{i + 1:02d},\"{log}\",\"{log}追記\"\r\n" for i in range(10))
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(text.encode("utf-8")), "log2.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "utf-8", "delimiter": ",", "template": "new", "new_template_name": "T"})
-    client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""})
-    body = _collect(client.get(f"/tables/imports/{import_id}/columns").get_data(as_text=True))
+    import_id = upload_csv(client, "log2.csv", text, encoding="utf-8")
+    name_source(client, import_id, "T", encoding="utf-8")
+    assert save_layout(client, import_id).status_code == 200
+    body = editor_body(client, import_id)
     assert sum(1 for r in body["columns"] if r.get("ai")) == 1
-    res = client.post(f"/tables/imports/{import_id}/columns", json=body)
+    res = save_columns(client, import_id, body)
     assert res.status_code == 200, res.get_json()
 
 
@@ -288,27 +288,6 @@ def test_full_width_formula_prefixes_are_guarded():
     assert report["ファイル名"] == "'＋1.xlsx" and report["シート"] == "'＝SUM(1,1)"
 
 
-# ---- UX6-3: 保存先フォルダがあるときの案内と、試し実行中の断りの文 --------------------------------------------------
-
-def test_preview_note_mentions_the_save_folder_and_busy_message_mentions_saving(app, client, monkeypatch):
-    from services import output_folder
-    from views import tables as tables_view
-
-    assert "保存" in tables_view.TRIAL_BUSY_MESSAGE
-    with app.app_context():
-        _template_id, import_id = _new_import(app)
-        pipeline.run_read(FakeCtx(), import_id)
-    monkeypatch.setattr(output_folder, "configured_folder", lambda: "D:\\LightRAG\\inputs")
-    page = client.get(f"/tables/imports/{import_id}/preview").get_data(as_text=True)
-    if "files" not in page or "保存先フォルダに保存したときも同じです" not in page:
-        # プレビューのジョブを待ってからもう一度開く
-        with app.app_context():
-            from core import jobs
-            job = jobs.latest_job("table_import", import_id, kind="table_preview")
-            if job is not None:
-                jobs.wait_job(job["id"], timeout=60)
-        page = client.get(f"/tables/imports/{import_id}/preview").get_data(as_text=True)
-    assert "保存先フォルダに保存したときも同じです" in page
 
 
 # ---- FUZZ: 手で作った Excel（大きな非表示列・上限を超える行・列が多すぎる表） ---------------------------------------
@@ -410,11 +389,8 @@ def test_trial_is_refused_after_confirm(app, client):
 
 @pytest.mark.parametrize("method, url, builder", [
     ("get", "download.zip", "build_download"),
-    ("post", "save-to-folder", "build_download_files"),
 ])
 def test_reread_during_hand_out_goes_back_to_the_preview(app, client, monkeypatch, tmp_path, method, url, builder):
-    from services import output_folder
-
     with app.app_context():
         _template_id, import_id = _new_import(app)
         pipeline.run_read(FakeCtx(), import_id)
@@ -425,9 +401,11 @@ def test_reread_during_hand_out_goes_back_to_the_preview(app, client, monkeypatc
         raise FileNotFoundError("md")
 
     monkeypatch.setattr(pipeline, builder, reread_started)
-    monkeypatch.setattr(output_folder, "configured_folder", lambda: str(tmp_path))
     res = getattr(client, method)(f"/tables/imports/{import_id}/{url}")
-    assert res.status_code == 302 and res.headers["Location"].endswith(f"/tables/imports/{import_id}/preview")
+    # 404「ダウンロード済み」ではなく、画面に戻して読み込み直しが始まったことを知らせる
+    assert res.status_code == 302 and res.headers["Location"].endswith("/tables/new")
+    with client.session_transaction() as session:
+        assert any("読み込み直しが始まった" in text for _level, text in session["_flashes"])
     with app.app_context():
         assert store.get_import(import_id) is not None
 
@@ -458,13 +436,13 @@ def test_duplicate_typed_key_is_refused_and_does_not_carry_another_columns_setti
 
 
 def test_duplicate_typed_key_is_refused_by_the_editor(app, client):
-    from tests.test_endpoints_settings import _json_only_spec
+    from tests.tables_helpers import json_only_spec, save_columns
     from tests.test_tables_fixes4 import _editor_body
 
-    template_id, body = _editor_body(app, client, _json_only_spec())
+    import_id, _template_id, body = _editor_body(app, client, json_only_spec())
     keys = [r["key"] for r in body["columns"] if r.get("use")]
     body["columns"][1]["key"] = keys[0]
-    res = client.post(f"/tables/templates/{template_id}", json=body)
+    res = save_columns(client, import_id, body)
     assert res.status_code == 400
     assert f"キー「{keys[0]}」が重複しています" in json.dumps(res.get_json(), ensure_ascii=False)
 
@@ -472,13 +450,13 @@ def test_duplicate_typed_key_is_refused_by_the_editor(app, client):
 # ---- R6B-2: md のパスが Windows の上限を超えるときは分かる言葉で止める --------------------------------------------------
 
 def test_too_long_md_path_gives_a_clear_message(tmp_path, monkeypatch):
-    from services import output_folder
+    from core import files as core_files
     from tables.markdown import MdFile
 
-    monkeypatch.setattr(output_folder, "_long_paths_enabled", lambda: False)
+    monkeypatch.setattr(core_files, "_long_paths_enabled", lambda: False)
     target = tmp_path / "md"
     tmp_path.mkdir(exist_ok=True)
-    name = "あ" * (output_folder.MAX_PATH_CHARS - len(str(target)) + 10) + ".md"
+    name = "あ" * (core_files.MAX_PATH_CHARS - len(str(target)) + 10) + ".md"
     files = [MdFile(name=name, text="x", kind="records")]
     with pytest.raises(pipeline.PipelineError, match="ファイル名が長すぎ"):
         pipeline._write_md_dir(target, files)
@@ -587,30 +565,36 @@ def test_settings_that_never_changed_the_reading_are_dropped():
 # ---- ux6-2: データの行が無いときは、見出し行ではなくデータの範囲のことを言う ----------------------------------------
 
 def _csv_import(client, name: str, text: str) -> int:
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(text.encode("utf-8")), name)},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "utf-8", "delimiter": ",", "template": "new", "new_template_name": name})
+    from tests.tables_helpers import name_source, upload_csv
+
+    import_id = upload_csv(client, name, text, encoding="utf-8")
+    name_source(client, import_id, name, encoding="utf-8")
     return import_id
 
 
 def test_a_table_with_no_data_rows_does_not_blame_the_header_row(client):
+    from tests.tables_helpers import save_layout
+
     import_id = _csv_import(client, "empty.csv", "管理No,発生日,設備番号,現象,対応内容\r\n")
-    page = client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""},
-                       follow_redirects=True).get_data(as_text=True)
-    assert "データの行が1行もありません" in page
-    assert "見出し行の番号を指定してください" not in page
+    res = save_layout(client, import_id)
+    assert res.status_code == 400
+    error = res.get_json()["error"]
+    assert "データの行が1行もありません" in error
+    assert "見出し行の番号を指定してください" not in error
 
 
 def test_a_data_end_above_the_header_is_echoed_back_with_its_own_message(client):
+    from tests.tables_helpers import panel_html, save_layout
+
     text = "管理No,発生日,現象\r\n" + "".join(f"TR-{i},2026/08/{i + 1:02d},停止\r\n" for i in range(10))
     import_id = _csv_import(client, "rows.csv", text)
-    page = client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": "1"},
-                       follow_redirects=True).get_data(as_text=True)
-    assert "データの終わりに1行目を指定すると、データの行が1行もありません" in page
-    assert "見出し行の番号を指定してください" not in page
-    assert 'name="data_end_row" class="input" value="1"' in page   # 入力した値は消さない
+    res = save_layout(client, import_id, data_end_row="1")
+    assert res.status_code == 400
+    error = res.get_json()["error"]
+    assert "データの終わりに1行目を指定すると、データの行が1行もありません" in error
+    assert "見出し行の番号を指定してください" not in error
+    # 断られた入力は保存しないので、段を開き直しても自動判定のまま（画面は入力した値をそのまま残す）
+    assert 'name="data_end_row" class="input" value=""' in panel_html(client, import_id, "layout")
 
 
 # ---- r6-c1: 成功して終わったばかりの読み込みを［中止］が巻き戻さない --------------------------------------------
@@ -642,7 +626,7 @@ def test_cancel_does_not_undo_a_read_that_just_finished(app, client, monkeypatch
 
     monkeypatch.setattr(jobs, "request_cancel", cancel_after_the_job_finished)
     res = client.post(f"/tables/imports/{import_id}/cancel")
-    assert res.status_code == 302
+    assert res.status_code == 200 and res.get_json()["ok"] is True
     with app.app_context():
         assert store.get_import(import_id)["status"] == "preview"
 

@@ -8,7 +8,7 @@
   <p>1回に送れるのは合計 {{ limit }} までです。いま選んだファイルは合計でこれを超えたため、受け付けませんでした（何も保存していません）。</p>
   <p>帳票をまとめて取り込むときは、ファイルを何回かに分けて選んでください。画像の多いブックは、不要な画像を消して保存し直すと小さくなります。</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('home.index') }}">ホームへ</a>
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
   </div>
 </div>
 {% endblock %}

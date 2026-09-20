@@ -1,47 +1,25 @@
-{% extends "base.html" %}
+{#- 読み取り結果の欄（HTML の断片）。左に元のシート、右に読み取った値（その場で直せる） -#}
 {% import "components/_ui.html" as ui %}
-{% block title %}読み取り結果の確認・修正{% endblock %}
-{% block container_class %}wide{% endblock %}
-{% block content %}
 {% set SOURCE_LABELS = {"auto": ("自動で読み取り", "blue"), "ai": ("AIが入力（要確認）", "violet"), "manual": ("手で修正", "teal"), "blank": ("空欄", "gray")} %}
-{{ ui.steps(steps, 3) }}
-<div class="page-head">
-  <div>
-    <h1>読み取り結果の確認・修正</h1>
-    <p class="page-lead">{{ doc.file_name }} ／ 帳票の種類: {{ extraction.pattern.name }} ／ シート: {{ extraction.sheets | join('、') }} <span data-doc-state>{{ ui.badge(doc.state) }}</span></p>
-  </div>
-  <div class="btn-row">
-    <a class="btn ghost" href="{{ url_for('home.index') }}">ホームに戻る（作業内容は保存されています）</a>
-  </div>
-</div>
-
-{% include "forms/_batch_bar.html" %}
-
-{% if doc.state == 'modified' %}
-<div class="notice" role="note">
-  確定済みの帳票を修正中です。ダウンロードされる Markdown は、確定し直すまで確定済みの版のままです。
-  <form method="post" action="{{ url_for('forms.discard_changes', doc_id=doc.id) }}" class="inline" data-confirm="修正中の変更を破棄し、確定済みの版に戻します。よろしいですか？" data-confirm-ok="変更を破棄する">
-    <button type="submit" class="btn small">変更を破棄して確定済みの版に戻す</button>
-  </form>
-</div>
-{% endif %}
 
 <div class="review-toolbar cluster">
   <ul class="chips" aria-label="項目の状態">
     <li><button type="button" class="chip chip-warn{{ ' is-zero' if not summary.counts.issue }}" data-next-issue title="押すと次の要確認の項目へ移動します">要確認 <strong data-count="issue">{{ summary.counts.issue }}</strong></button></li>
-    <li><span class="chip chip-ai{{ ' is-zero' if not summary.counts.ai }}">AIが入力 <strong data-count="ai">{{ summary.counts.ai }}</strong></span></li>
     <li><span class="chip chip-manual{{ ' is-zero' if not summary.counts.manual }}">手で修正 <strong data-count="manual">{{ summary.counts.manual }}</strong></span></li>
+    <li><span class="chip chip-plain{{ ' is-zero' if not summary.counts.blank }}">空欄 <strong data-count="blank">{{ summary.counts.blank }}</strong></span></li>
   </ul>
-  <span class="muted small" data-save-status aria-live="polite"></span>
+  <span class="muted small">帳票の種類: {{ extraction.pattern.name }} ／ シート: {{ extraction.sheets | join('、') }}</span>
   <span class="spacer"></span>
-  <a class="btn small ghost" href="{{ url_for('forms.type_select', doc_id=doc.id) }}">種類・シートを選び直す</a>
   <a class="btn small ghost" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード（消えません）</a>
 </div>
 
-<div class="split" id="review" data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}" data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}" data-version="{{ version }}">
+<div class="split" id="review" data-doc="{{ doc.id }}"
+     data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}"
+     data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}"
+     data-version="{{ version }}">
   <section class="split-pane sticky" aria-label="元のシート">
     <div class="split-pane-head">
-      <h2>元のシート</h2>
+      <h3>元のシート</h3>
       {% if grids | length > 1 %}
       <div class="tabs" role="tablist" data-sheet-tabs>
         {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
@@ -74,18 +52,15 @@
     </div>
   </section>
 
-  <section class="split-pane" aria-label="項目">
+  <section class="split-pane" aria-label="読み取った値">
     <div class="split-pane-head">
       <div class="tabs" role="tablist">
-        <button type="button" role="tab" data-pane-tab="fields" aria-selected="true">項目</button>
-        <button type="button" role="tab" data-pane-tab="markdown" aria-selected="false">Markdownプレビュー</button>
+        <button type="button" role="tab" data-pane-tab="fields" aria-selected="true">読み取った値</button>
+        <button type="button" role="tab" data-pane-tab="markdown" aria-selected="false">Markdownの下書き</button>
       </div>
     </div>
     <div class="split-pane-body">
-      <form method="post" action="{{ url_for('forms.confirm', doc_id=doc.id) }}" id="reviewForm">
-        {# 入力欄で Enter を押しても送らない（既定のボタンが無効だとブラウザは送信しない）。
-           無いと最初の「AIで空欄を探す」が押されたことになり、シートの内容がAIへ送られる #}
-        <button type="submit" disabled hidden aria-hidden="true" tabindex="-1" data-no-implicit-submit></button>
+      <form id="reviewForm" onsubmit="return false">
         <input type="hidden" name="version" value="{{ version }}" data-version-input>
         <div data-pane="fields">
           {% for f in extraction.fields %}
@@ -96,19 +71,17 @@
             <div class="cluster">
               <label class="field-label" for="value-{{ f.field_name }}">{{ f.display_name }}{% if f.required %}<span class="req" title="必須">*</span>{% endif %}{% if f.unit %} <small class="muted">（{{ f.unit }}）</small>{% endif %}</label>
               <span class="badge badge-{{ src[1] }}" data-source-badge>{{ src[0] }}</span>
-              {% if f.rag_output == 'omit' %}<small class="muted">Markdownには出さない項目</small>{% endif %}
               {% if f.value_cell %}<small class="muted">{{ f.sheet }}!{{ f.value_cell }}</small>{% endif %}
             </div>
             {% set text = '' if f.value is none else f.value %}
             {% if f.data_type == 'table' %}
-              {# 値が空でも、帳票の種類で覚えた列見出しがあれば空の表を出す（人が行を入れ直せるように） #}
               {% set tcolumns = f.value.columns if f.value else (f.table_columns or []) %}
               {% set trows = f.value.rows if f.value else [] %}
               <input type="hidden" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}" value="{{ f.value | table_json }}" data-table-value>
               {% if tcolumns %}
               <p class="hint">1行＝1明細として Markdown に出します。余分な行は［行を削除］で外してください。{% if not trows %}元のファイルから読み取れなかったので、［行を追加］で入力してください。{% endif %}</p>
               {% if f.table_blocks and f.table_blocks > 1 %}
-              <p class="hint">同じ形の列見出しが{{ f.table_blocks }}組、縦に積み重なっていました。すべての組を1つの表にまとめています（組ごとに列見出しが変わるため、行によって空の欄があります）。</p>
+              <p class="hint">同じ形の列見出しが{{ f.table_blocks }}組、縦に積み重なっていました。すべての組を1つの表にまとめています。</p>
               {% endif %}
               <div class="table-wrap">
                 <table class="table compact table-editor" data-table-editor aria-label="{{ f.display_name }}（1行＝1明細）">
@@ -123,7 +96,7 @@
               </div>
               <button type="button" class="btn small" data-add-table-row>行を追加</button>
               {% else %}
-              <p class="muted small">明細表が見つかりませんでした。元のファイルを確認し、見つからない場合は［種類・シートを選び直す］か、帳票の種類の「探す見出し」「明細表の列見出し」を直してください。</p>
+              <p class="muted small">明細表が見つかりませんでした。元のファイルを確かめ、見つからないときは上で帳票の種類・シートを選び直してください。</p>
               {% endif %}
             {% elif f.data_type == 'text' or (text is string and '\n' in text) %}
               <textarea class="input" rows="{{ [3, (text | string).count('\n') + 2] | max }}" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}">{{ text }}</textarea>
@@ -142,25 +115,7 @@
           <p class="hint">入力中の値から作った Markdown です（ファイル名: <code data-md-name>{{ summary.file_name }}</code>）。</p>
           <pre class="code md-preview" data-md-preview>{{ summary.markdown }}</pre>
         </div>
-
-        <div class="card" id="confirm">
-          {% if llm_ready %}
-          <p>
-            <button type="submit" class="btn" formaction="{{ url_for('forms.ai_fill', doc_id=doc.id) }}" formnovalidate>AIで空欄を探す</button>
-            <small class="muted">シートのセル内容をAIに送ります。AIが入れた値は「AIが入力（要確認）」になります。</small>
-          </p>
-          {% endif %}
-          <div data-missing-box {% if not summary.missing_required %}hidden{% endif %}>
-            <p class="notice">必須の項目が空欄です: <span data-missing-list>{{ summary.missing_required | join('、') }}</span></p>
-            <label class="check"><input type="checkbox" name="allow_missing"> 空欄のまま確定する</label>
-          </div>
-          <div class="form-actions">
-            <button type="submit" class="btn primary">確定してMarkdownを作成</button>
-          </div>
-        </div>
       </form>
     </div>
   </section>
 </div>
-{% endblock %}
-{% block scripts %}<script src="{{ url_for('static', filename='review.js') }}"></script>{% endblock %}

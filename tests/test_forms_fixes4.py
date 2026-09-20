@@ -1,6 +1,7 @@
 """帳票まわりの修正（4巡目の確認で見つかった不具合）の回帰テスト。"""
+import io
 import json
-import re
+import zipfile
 from types import SimpleNamespace
 
 from excel.extractor import apply_manual_values
@@ -22,32 +23,6 @@ def test_instrument_names_ending_in_kei_are_not_total_rows():
     assert "- 部品費計: 数量: 12000" in lines and "- 合計: 数量: 3" in lines
     # 数字の無い合計行は今までどおり出さない
     assert table_markdown_lines({"columns": ["品名"], "rows": [["ノギス"], ["小計"]]}) == ["- 品名: ノギス"]
-
-
-# ---- F4-2: 見本の差し替えで、自動の名前（field_N）が同じだけの別の項目にまとめない -----------------------
-
-def _row(name, label):
-    return {"field_name": name, "display_name": label, "candidates": label, "data_type": "string",
-            "examples": "", "seen": "1/1", "unit": "", "section": "", "use": True}
-
-
-def test_new_label_with_a_colliding_auto_name_gets_its_own_row():
-    from pattern.builder import merge_with_existing
-    from pattern.model import FieldDef, PatternDef
-
-    existing = PatternDef(name="異常報告", fields=[
-        FieldDef("report_id", "報告番号", ["報告番号"]), FieldDef("field_1", "担当ライン", ["担当ライン"]),
-        FieldDef("field_2", "異常区分", ["異常区分"])])
-    # 見本を差し替えると、自動の名前は新しい見本の順で振り直される
-    found = [_row("report_id", "報告番号"), _row("field_1", "品質判定"), _row("field_2", "担当ライン"),
-             _row("field_3", "異常区分")]
-    _, rows = merge_with_existing(existing, [], found)
-    by_label = {r["display_name"]: r for r in rows}
-    assert by_label["担当ライン"]["field_name"] == "field_1" and by_label["担当ライン"]["candidates"] == "担当ライン"
-    assert by_label["異常区分"]["candidates"] == "異常区分"
-    new = by_label["品質判定"]
-    assert new["field_name"] not in ("report_id", "field_1", "field_2") and new["use"] is False
-    assert len({r["field_name"] for r in rows}) == len(rows) == 4
 
 
 # ---- F4-3: AIが入れた値を手で消すと、確定済みの状態に戻る -----------------------------------------------
@@ -73,30 +48,22 @@ def _reviewing_doc(app, name, order):
     return doc_id
 
 
-def test_next_form_link_opens_the_review_page_of_a_reviewing_form(app, client):
+def test_the_next_form_of_a_batch_is_the_one_that_is_not_confirmed_yet(app, client):
     first = _confirmed_doc(app, "1.xlsx", batch_id="B", order=0)
     second = _reviewing_doc(app, "2.xlsx", 1)
     assert _state(app, second) == "reviewing"
-    page = client.get(f"/forms/{first}/done").get_data(as_text=True)
-    assert re.search(rf'href="/forms/{second}/review">次の帳票へ', page)
-    assert f'href="/forms/{second}/type">次の帳票へ' not in page
+    body = client.get(f"/forms/finish?ids={first},{second}&current={first}").get_json()
+    assert body["next_id"] == second and body["confirmed"] == 1
+    assert f'data-open-doc="{second}">次の帳票へ（残り1件）' in body["html"]
+
+    # まだ確定していない帳票は zip に入らない（確定済みの分だけを渡す）
     res = client.get("/forms/batches/B/download.zip")
-    assert res.status_code == 302 and res.headers["Location"].endswith(f"/forms/{second}/review")
-
-
-def test_preview_of_a_batch_form_returns_the_current_zip_confirm(app, client):
-    first = _confirmed_doc(app, "1.xlsx", batch_id="B", order=0)
-    _confirmed_doc(app, "2.xlsx", batch_id="B", order=1)
-    page = client.get(f"/forms/{first}/review").get_data(as_text=True)
-    assert "data-batch-modified hidden" in page and "data-batch-zip" in page
-    client.post(f"/forms/{first}/draft", json={"values": {"equipment_name": "直した名前"}})
-    assert _state(app, first) == "modified"
-    summary = client.post(f"/forms/{first}/preview", json={"values": {}}).get_json()
-    assert "修正中の帳票が1件あります" in summary["batch"]["zip_confirm"]
-    assert summary["batch"]["modified"] == [{"name": "1.xlsx 確定", "href": f"/forms/{first}/review"}]
-    # まとまりに属さない帳票には付けない
-    single = _confirmed_doc(app, "single.xlsx")
-    assert "batch" not in client.post(f"/forms/{single}/preview", json={"values": {}}).get_json()
+    assert res.status_code == 200 and res.mimetype == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(res.data)) as zf:
+        assert len(zf.namelist()) == 1
+    with app.app_context():
+        assert db.get_document(first) is None and db.get_document(second) is not None
+    assert client.get("/forms/batches/B/download.zip").status_code == 404   # 確定済みが無ければ渡さない
 
 
 # ---- R4-MD-2: 明細表の「〃」は上の行の値にする ---------------------------------------------------------
@@ -147,13 +114,10 @@ def test_same_value_without_warning_is_still_not_an_edit():
 
 # ---- ux4-4: 読み取りテストの単位不明の警告は、種類での直し方にする ------------------------------------
 
-def test_form_type_test_page_explains_how_to_set_the_unit(app, client, tmp_path):
-    import io
-
+def test_form_type_panel_explains_how_to_set_the_unit(app, client, tmp_path):
     from openpyxl import Workbook
 
-    from excel.workbook import load_workbook_info
-    from pattern.builder import suggest_rows
+    from tests.test_forms_flow import add_field, create_type
 
     wb = Workbook()
     ws = wb.active
@@ -161,22 +125,13 @@ def test_form_type_test_page_explains_how_to_set_the_unit(app, client, tmp_path)
     ws["A1"], ws["B1"], ws["A2"], ws["B2"] = "報告番号", "R-001", "作業時間", 2.5
     path = tmp_path / "unit.xlsx"
     wb.save(path)
-    res = client.post("/settings/form-types/new", data={"name": "単位なし", "samples": (io.BytesIO(path.read_bytes()), "unit.xlsx")},
-                      content_type="multipart/form-data")
-    pattern_id = int(re.search(r"/settings/form-types/(\d+)/review", res.headers["Location"]).group(1))
-    _, rows = suggest_rows([load_workbook_info(path)])
-    form = {"name": "単位なし", "version": "v1", "mode": "review", "md_options_form": "1", "image_processing": "none"}
-    for i, r in enumerate(rows):
-        for key in ("field_name", "display_name", "candidates", "data_type", "direction", "rag_output"):
-            form[f"fields-{i}-{key}"] = r[key]
-        form[f"fields-{i}-unit"] = ""
-        if r["display_name"] == "作業時間":
-            form[f"fields-{i}-data_type"] = "number"
-        form[f"fields-{i}-use"] = "on"
-    assert client.post(f"/settings/form-types/{pattern_id}/save", data=form).status_code == 302
-    page = client.get(f"/settings/form-types/{pattern_id}/test").get_data(as_text=True)
-    assert "［項目を直す］でこの項目の単位" in page
-    assert "値に単位を付けて入力" not in page
+    pattern_id = create_type(client, path, "単位なし")
+    add_field(client, pattern_id, "報告書", "A1", "B1")
+    add_field(client, pattern_id, "報告書", "A2", "B2")
+    with app.app_context():
+        assert next(f for f in db.load_pattern(pattern_id).fields if f.display_name == "作業時間").data_type == "number"
+    panel = client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
+    assert "帳票に単位が書かれていません" in panel and "値に単位（分・時間など）を付けて入力できます" in panel
 
 
 # ---- R4-FUZZ-3: 見えない文字（ゼロ幅スペース・BOM）を消す -------------------------------------------------

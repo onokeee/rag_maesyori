@@ -88,20 +88,20 @@ STANDARD_COLUMNS: list[StdColumn] = [
     _c("downtime", "停止時間", "number", "measure", ["停止時間", "ダウンタイム", "設備停止時間", "ライン停止時間"], unit="分"),
     _c("work_hours", "作業工数", "number", "measure", ["作業工数", "工数", "作業時間", "時間"], unit="h"),
     _c("scrap_qty", "廃棄枚数", "number", "measure", ["廃棄枚数", "廃棄数", "不良数"]),
-    _c("attachments", "添付数", "number", "attribute", ["添付数", "添付"], md="omit"),
+    _c("attachments", "添付数", "number", "attribute", ["添付数", "添付"]),
     # 人・組織
     _c("worker", "担当者", "string", "person",
-       ["担当者", "担当", "作業者", "実施者", "対応者", "担当者社員番号", "保全担当"], md="omit"),
-    _c("reporter", "報告者", "string", "person", ["報告者", "起票者", "報告者社員番号", "連絡者"], md="omit"),
-    _c("approver", "承認者", "string", "person", ["承認者", "確認者"], md="omit"),
+       ["担当者", "担当", "作業者", "実施者", "対応者", "担当者社員番号", "保全担当"]),
+    _c("reporter", "報告者", "string", "person", ["報告者", "起票者", "報告者社員番号", "連絡者"]),
+    _c("approver", "承認者", "string", "person", ["承認者", "確認者"]),
     _c("department", "部署", "string", "attribute", ["部署", "担当部署", "起票部署", "部門", "部門コード", "担当部門コード", "報告者部門コード"]),
     # 関連・管理用
     _c("related_no", "関連番号", "code", "attribute", ["関連管理番号", "関連トラブルNo", "関連No", "関連番号"]),
     _c("lot", "対象ロット", "string", "attribute", ["対象ロット", "ロット", "ロットNo"]),
-    _c("internal_code", "内部コード", "code", "attribute", ["内部コード"], md="omit"),
-    _c("registered_at", "登録日時", "datetime", "attribute", ["登録日時", "作成日時"], md="omit"),
-    _c("updated_at", "更新日時", "datetime", "attribute", ["更新日時", "最終更新日時"], md="omit"),
-    _c("registered_by", "登録者", "string", "attribute", ["登録者ID", "登録者", "更新者ID", "更新者"], md="omit"),
+    _c("internal_code", "内部コード", "code", "attribute", ["内部コード"]),
+    _c("registered_at", "登録日時", "datetime", "attribute", ["登録日時", "作成日時"]),
+    _c("updated_at", "更新日時", "datetime", "attribute", ["更新日時", "最終更新日時"]),
+    _c("registered_by", "登録者", "string", "attribute", ["登録者ID", "登録者", "更新者ID", "更新者"]),
 ]
 
 BY_KEY: dict[str, StdColumn] = {c.key: c for c in STANDARD_COLUMNS}

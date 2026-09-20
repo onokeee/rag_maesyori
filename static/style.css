@@ -104,33 +104,12 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 .brand:hover { text-decoration: none; }
 .brand-mark { width: 22px; height: 22px; color: #8fc1ff; }
 .mainnav { display: flex; align-items: center; gap: 2px; }
-.mainnav > a, .nav-dropdown > summary {
+.mainnav > a {
   color: var(--nav-text); padding: .45rem .8rem; border-radius: 6px; white-space: nowrap; cursor: pointer;
 }
-.mainnav > a:hover, .nav-dropdown > summary:hover { background: var(--nav-hover); color: #fff; text-decoration: none; }
-.mainnav > a.active, .nav-dropdown > summary.active { color: #fff; background: var(--nav-active); }
-.mainnav a:focus-visible, .nav-dropdown summary:focus-visible { outline-color: #8fc1ff; }
-.nav-dropdown { position: relative; }
-.nav-dropdown > summary { list-style: none; display: flex; align-items: center; gap: .3rem; }
-.nav-dropdown > summary::-webkit-details-marker { display: none; }
-.caret { width: 12px; height: 12px; transition: transform .15s; }
-.nav-dropdown[open] .caret { transform: rotate(180deg); }
-.dropdown-menu {
-  position: absolute; top: calc(100% + 6px); left: 0; min-width: 220px; z-index: 30;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-lg);
-  padding: .35rem; display: flex; flex-direction: column;
-}
-.dropdown-menu a { color: var(--text); padding: .5rem .75rem; border-radius: 6px; white-space: nowrap; }
-.dropdown-menu a:hover { background: var(--surface-3); text-decoration: none; }
-.dropdown-menu a.active { background: var(--primary-soft); color: var(--primary-dark); font-weight: 600; }
-
-.model-picker { margin-left: auto; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: var(--nav-text); }
-.model-picker select {
-  background: var(--nav-hover); color: #fff; border: 1px solid #3d5570; border-radius: 6px;
-  padding: .3rem .45rem; font: inherit; max-width: 220px;
-}
-.model-picker .ai-off { color: #f5c26b; }
-
+.mainnav > a:hover { background: var(--nav-hover); color: #fff; text-decoration: none; }
+.mainnav > a.active { color: #fff; background: var(--nav-active); }
+.mainnav a:focus-visible { outline-color: #8fc1ff; }
 /* ===== レイアウト ===== */
 .container { max-width: 1200px; margin: var(--sp-5) auto; padding: 0 var(--sp-4) 4rem; }
 .container.wide { max-width: 1600px; }
@@ -169,32 +148,6 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 .card-head h1, .card-head h2, .card-head h3, .card-title { margin: 0; }
 .card-subtitle { color: var(--muted); margin: .15rem 0 0; font-size: .88rem; }
 .danger-zone { border-color: var(--danger-line); }
-
-/* 入口カード（ホーム） */
-.entry-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr)); gap: var(--sp-4); margin-bottom: var(--sp-5); }
-.entry-card {
-  display: grid; grid-template-columns: 132px 1fr; gap: var(--sp-4); align-items: center;
-  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  padding: var(--sp-5); color: var(--text); box-shadow: var(--shadow-sm);
-  transition: border-color .15s, box-shadow .15s, transform .15s;
-}
-.entry-card:hover { text-decoration: none; border-color: var(--primary-line); box-shadow: var(--shadow); transform: translateY(-1px); }
-.entry-card:focus-visible { outline-offset: 3px; }
-.entry-card svg { width: 132px; height: 104px; }
-.entry-card h2 { margin: 0 0 .25rem; font-size: 1.2rem; color: var(--primary-dark); }
-.entry-card p { margin: 0 0 var(--sp-3); color: var(--text-2); }
-.entry-card .entry-go { color: var(--primary); font-weight: 600; }
-
-/* はじめに */
-.guide { background: linear-gradient(180deg, var(--primary-soft), var(--surface)); border-color: var(--primary-line); }
-.guide-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: var(--sp-3); counter-reset: guide; }
-.guide-steps li { counter-increment: guide; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); }
-.guide-steps li::before {
-  content: counter(guide); display: inline-grid; place-items: center; width: 1.6rem; height: 1.6rem; margin-right: .4rem;
-  border-radius: 50%; background: var(--primary); color: #fff; font-weight: 700; font-size: .85rem;
-}
-.guide-steps strong { display: inline; }
-.guide-steps p { margin: .35rem 0 0; color: var(--text-2); font-size: .9rem; }
 
 /* ===== ボタン ===== */
 .btn {
@@ -347,19 +300,99 @@ td.empty-value { color: var(--muted); }
 .swatch.row-hidden { background-color: #fff; }
 
 /* ===== 手順 ===== */
-.steps { display: flex; list-style: none; padding: 0; margin: 0 0 var(--sp-4); gap: var(--sp-2); flex-wrap: wrap; }
-.steps li {
-  display: flex; align-items: center; gap: .4rem; color: var(--muted); padding: .25rem .8rem .25rem .3rem;
-  border-radius: 999px; background: var(--surface-3); font-size: .85rem;
+/* ===== 1画面の中の「段」（.step） =====
+   ①→②→③と画面を移らず、1つの画面に段を積んでいく（利用者の指示 2026-09-20）。
+   段は3つの見た目を持つ:
+     .step              まだ開いていない（灰色・操作できない）
+     .step.is-open      いま作業する段（開いている）
+     .step.is-done      済んだ段（見出しに ✓ と要約が出る。畳んでも開き直せる）
+   開け閉ては static/app.js の window.ragSections が行う。 */
+.step {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: var(--sp-4); box-shadow: var(--shadow-sm); overflow: hidden;
 }
+.step > .step-head {
+  display: flex; align-items: center; gap: var(--sp-3); width: 100%; text-align: left;
+  padding: var(--sp-3) var(--sp-4); background: var(--surface-2); border: 0; border-bottom: 1px solid transparent;
+  font: inherit; color: var(--muted); cursor: default;
+}
+.step > .step-head > .step-title { font-size: 1.05rem; font-weight: 700; margin: 0; }
+.step > .step-head > .step-summary { color: var(--muted); font-size: .88rem; margin: 0; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step > .step-head > .step-toggle { margin-left: auto; color: var(--primary); font-size: .85rem; }
+/* 段の番号（見出しの左の丸） */
+.step > .step-head > .step-no,
 .step-no {
-  display: inline-grid; place-items: center; width: 1.4rem; height: 1.4rem; border-radius: 50%;
-  background: var(--surface); border: 1px solid var(--border-strong); font-size: .75rem; font-weight: 700;
+  display: inline-grid; place-items: center; flex: none; width: 1.7rem; height: 1.7rem; border-radius: 50%;
+  background: var(--surface); border: 1px solid var(--border-strong); color: var(--muted);
+  font-size: .8rem; font-weight: 700;
 }
-.steps li.done { background: var(--ok-soft); color: var(--ok); }
-.steps li.done .step-no { background: var(--ok); border-color: var(--ok); color: #fff; }
-.steps li.current { background: var(--primary); color: #fff; font-weight: 600; }
-.steps li.current .step-no { background: #fff; color: var(--primary); border-color: #fff; }
+.step > .step-body { padding: var(--sp-4) var(--sp-5) var(--sp-5); }
+
+/* まだ開いていない段: 灰色にして中身を隠す */
+.step:not(.is-open):not(.is-done) { background: var(--surface-2); box-shadow: none; }
+.step:not(.is-open):not(.is-done) > .step-head { color: var(--muted); }
+.step:not(.is-open) > .step-body { display: none; }
+
+/* いま作業する段 */
+.step.is-open { border-color: var(--primary-line); box-shadow: var(--shadow); }
+.step.is-open > .step-head { background: var(--primary-soft); color: var(--primary-dark); border-bottom-color: var(--primary-line); }
+.step.is-open > .step-head > .step-no { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+/* 済んだ段（畳んでいても、もう一度開ける） */
+.step.is-done > .step-head { color: var(--text); cursor: pointer; }
+.step.is-done > .step-head:hover { background: var(--surface-3); }
+.step.is-done > .step-head > .step-no { background: var(--ok); border-color: var(--ok); color: #fff; }
+.step.is-done > .step-head > .step-no::after { content: "✓"; }
+.step.is-done > .step-head > .step-no > .step-no-text { display: none; }
+.step.is-done.is-open > .step-head { background: var(--primary-soft); }
+
+/* 段の中の小見出し付きのかたまり（読み取り方・AI整形・確認の段で使う） */
+.sub-block { margin-top: var(--sp-4); padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.sub-block:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.sub-title { font-size: .95rem; font-weight: 700; color: var(--text); margin: 0 0 var(--sp-2); }
+details.sub-block > summary.sub-title { cursor: pointer; padding: var(--sp-2) 0; color: var(--primary-dark); }
+details.sub-block > summary.sub-title:hover { color: var(--primary); }
+details.sub-block[open] > summary.sub-title { margin-bottom: var(--sp-3); }
+
+/* 折りたたみ（確定の前の注意書き・見本ファイルなど） */
+.fold { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-2); margin: var(--sp-3) 0; }
+.fold > summary { cursor: pointer; font-weight: 600; color: var(--text-2); }
+.fold[open] > summary { margin-bottom: var(--sp-3); }
+
+/* 段の中に出す「いま動いています」の1行（閉じたら消えてよい表示） */
+.work-line { display: flex; align-items: center; gap: var(--sp-2); color: var(--muted); font-size: .9rem;
+  margin: var(--sp-3) 0 0; }
+.work-line[hidden] { display: none; }
+
+/* まとめて置いた帳票の切り替え（1件ずつ同じ画面で読み取る） */
+.doc-tabs { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.doc-tabs[hidden] { display: none; }
+.doc-tab {
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-2); border-radius: 999px;
+  padding: .2rem .8rem; font: inherit; font-size: .85rem; cursor: pointer; max-width: 22rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.doc-tab:hover { border-color: var(--primary-line); }
+.doc-tab.is-current { background: var(--primary-soft); border-color: var(--primary-line); color: var(--primary-dark); font-weight: 700; }
+.doc-tab.is-done { background: var(--ok-soft); border-color: var(--ok-line); color: var(--ok); }
+.doc-tab.is-done.is-current { box-shadow: inset 0 0 0 1px var(--ok); }
+
+/* 帳票の種類とシートを横に並べる */
+.type-sheet-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--sp-4); }
+@media (max-width: 900px) { .type-sheet-grid { grid-template-columns: 1fr; } }
+.type-sheet-grid fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
+fieldset.plain { border: 0; padding: 0; margin: 0; min-width: 0; }
+fieldset.plain > legend { font-size: .95rem; font-weight: 700; color: var(--text); padding: 0; margin-bottom: var(--sp-2); }
+
+/* 帳票登録の上の行（名前・状態・ボタン） */
+.build-top { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-4); }
+.build-top .input { min-width: 16rem; }
+
+/* 段の中で動いている処理の進み具合（同じ画面に出す。別画面には移らない） */
+.step-working { display: flex; align-items: center; gap: var(--sp-2); color: var(--muted); font-size: .9rem; }
+.step-working[hidden] { display: none; }
 
 /* ===== 状態タグ・チップ ===== */
 .badge {
@@ -514,6 +547,12 @@ details summary { cursor: pointer; color: var(--primary); }
 .file-list tr.is-current { background: var(--primary-soft); }
 .trial-card { border: 1px solid var(--border); border-radius: 6px; padding: .6rem .75rem; margin-top: .6rem; background: var(--surface); }
 
-/* 保存先フォルダへの保存の結果: ファイル名の一覧（件数が多くても画面が伸びないように） */
-.scroll-list { max-height: 16rem; overflow: auto; border: 1px solid var(--border); border-radius: var(--radius); padding: .4rem .7rem; margin: .5rem 0; background: var(--surface); font-size: .85rem; }
-.scroll-list li { padding: .1rem 0; word-break: break-all; }
+
+/* 段の中の「処理中」の回るしるし（大きな表の読み込み・Markdown作成のあいだ出す） */
+.spinner {
+  display: inline-block; width: 1rem; height: 1rem; flex: none;
+  border: 2px solid var(--primary-line); border-top-color: var(--primary); border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }

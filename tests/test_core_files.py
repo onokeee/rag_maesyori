@@ -251,12 +251,17 @@ def test_precheck_counts_each_merge_once(tmp_path, monkeypatch):
     precheck_excel(_xlsx_with_merge(tmp_path / "exact.xlsx", "A1:J10"))   # ちょうど100セルは通す
 
 
+def upload_error(client, url: str, data: bytes, name: str) -> str:
+    """ファイルを置いたときの断りの文（画面は fetch で受け取って、そのまま出す）。"""
+    res = client.post(url, data={"file": (io.BytesIO(data), name)}, content_type="multipart/form-data")
+    assert res.status_code == 400, (url, res.status_code)
+    return res.get_json()["error"]
+
+
 def test_uploads_with_a_whole_sheet_merge_are_refused_in_japanese(app, client, tmp_path):
     path = _xlsx_with_merge(tmp_path / "merge_full.xlsx", "A1:XFD1048576")
     for url in ("/forms/upload", "/tables/upload"):
-        res = client.post(url, data={"file": (io.BytesIO(path.read_bytes()), "結合.xlsx")},
-                          content_type="multipart/form-data", follow_redirects=True)
-        assert "結合セルの範囲が大きすぎます" in res.get_data(as_text=True), url
+        assert "結合セルの範囲が大きすぎます" in upload_error(client, url, path.read_bytes(), "結合.xlsx"), url
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
 
 
@@ -293,9 +298,7 @@ def test_sheetless_workbook_is_refused_for_both_flows(app, client, tmp_path):
         precheck_excel(sheetless)
     precheck_excel(path)   # ふつうのブックは通る
     for url in ("/forms/upload", "/tables/upload"):
-        res = client.post(url, data={"file": (io.BytesIO(out.getvalue()), "シートなし.xlsx")},
-                          content_type="multipart/form-data", follow_redirects=True)
-        assert "シートがないブックです" in res.get_data(as_text=True), url
+        assert "シートがないブックです" in upload_error(client, url, out.getvalue(), "シートなし.xlsx"), url
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
 
 

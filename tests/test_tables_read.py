@@ -479,7 +479,7 @@ def test_dictionary_lookup():
                 "severity", "symptom", "cause", "action", "response_log", "downtime", "work_hours", "cost", "status",
                 "worker", "part_name", "quantity", "unit_price"):
         assert key in BY_KEY, key
-    assert BY_KEY["worker"].md == "omit" and BY_KEY["action"].log_candidate
+    assert BY_KEY["worker"].md != "omit" and BY_KEY["action"].log_candidate
 
 
 def test_suggest_columns_types_rates_and_log():
@@ -504,7 +504,7 @@ def test_suggest_columns_types_rates_and_log():
     assert result["対応内容"].role == "log" and result["対応内容"].log and result["対応内容"].md == "body"
     assert result["区分"].key == "failure_category" and result["区分"].inferred_type == "enum"
     assert result["メモ欄"].blank_rate == 1.0 and result["メモ欄"].md == "omit"
-    assert result["担当者"].key == "worker" and result["担当者"].md == "omit"
+    assert result["担当者"].key == "worker" and result["担当者"].md != "omit"
     assert result["担当"].key == "worker_2"  # 同じ標準キーは後の列に番号を付ける
     assert result["管理No"].examples == ["TR-000", "TR-001", "TR-002"]
 
@@ -580,7 +580,7 @@ def test_sample_t1_clean_list():
     assert "停止時間(分)" in layout.headers
     cols = {s.header: s for s in suggest_columns(layout.headers, sample_data_rows(src, "トラブル一覧", layout))}
     assert cols["停止時間(分)"].key == "downtime" and cols["停止時間(分)"].unit == "分"
-    assert cols["処置内容"].key == "action" and cols["担当者"].md == "omit"
+    assert cols["処置内容"].key == "action" and cols["担当者"].md != "omit"
     assert looks_like_list(src, "トラブル一覧")
 
 

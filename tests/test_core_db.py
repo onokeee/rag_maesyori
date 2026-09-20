@@ -131,7 +131,7 @@ def test_new_db_document_states_and_filters(core_app):
         assert json.loads(doc["data_json"])["values"]["report_id"] == "R2026-00123"
         assert db.discard_changes(d2) is False
 
-        # ホームの一覧（状態で絞る。取り込み履歴は無いので検索・絞り込みは持たない）
+        # 状態で絞って数える（画面に一覧は無いが、片付け・重複の判定がこの絞り込みを使う）
         assert [r["id"] for r in db.list_documents()] == [d2, d1]
         rows = db.list_documents(state="confirmed")
         assert len(rows) == 1 and rows[0]["pattern_name"] == "設備修理報告書" and rows[0]["state"] == "confirmed"
@@ -156,13 +156,13 @@ def test_save_pattern_new_fields_and_version_no(core_app):
         fd.rag_output = "omit"
         pattern = PatternDef(name="設備修理報告書", id=pid, sheets=[SheetDef("修理報告書")], fields=[fd])
         pattern.title_fields = ["report_id", "equipment"]
-        pattern.md_options = {"omit_person_fields": True}
+        pattern.md_options = {"domain_context_fields": ["equipment"]}
         db.save_pattern(pattern, "active")
         assert pattern.version_no == 2
 
         loaded = db.load_pattern(pid)
         assert loaded.title_fields == ["report_id", "equipment"]
-        assert loaded.md_options == {"omit_person_fields": True}
+        assert loaded.md_options == {"domain_context_fields": ["equipment"]}
         assert loaded.version_no == 2 and loaded.status == "active"
         assert loaded.fields[0].unit == "時間" and loaded.fields[0].rag_output == "omit"
 

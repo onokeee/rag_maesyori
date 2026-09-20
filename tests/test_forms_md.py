@@ -125,11 +125,9 @@ def test_units_and_ai_mark(standard):
     assert "- 作業時間: 3時間くらい（AI入力）" in build_markdown(_doc(info), extraction)
 
 
-def test_person_fields_are_omitted_by_default(standard):
+def test_person_fields_are_written(standard):
+    """人名の項目も出す（読み取った内容は削らない。2026-09-20 の利用者の指示）。"""
     info, _, extraction = standard
-    md = build_markdown(_doc(info), extraction)
-    assert "報告者" not in md and "山田" not in md
-    extraction["pattern"]["md_options"] = {"omit_person_fields": False}
     assert "- 報告者: 山田 太郎" in build_markdown(_doc(info), extraction)
 
 
@@ -194,7 +192,6 @@ def test_local_fallback_matches_core_helpers(standard, monkeypatch):
     info, _, extraction = standard
     _field(extraction, "cause")["value"] = "# 見出し\n1. 手順\n- 箇条\n---\n> 引用"
     _field(extraction, "report_id")["value"] = "R/2026 [改].[x]"
-    extraction["pattern"]["md_options"] = {"omit_person_fields": False}
     with_core = (build_markdown(_doc(info), extraction), markdown_filename(_doc(info), extraction))
     monkeypatch.setattr(formats, "_core_mdtext", None)
     monkeypatch.setattr(formats, "_core_naming", None)
@@ -281,15 +278,14 @@ def test_title_adds_the_source_file_name_when_it_has_no_identifier(standard):
     assert build_markdown(_doc(info), extraction).startswith("# 設備修理報告書 EQ-001｜2026-09-14\n")
 
 
-def test_person_columns_and_empty_total_rows_are_not_written():
-    """人名の列（担当・氏名）は出さない。数字のない合計行は記録にならないので書かない（design.md 6.1）。"""
+def test_person_columns_are_written_and_empty_total_rows_are_not():
+    """明細表の人名の列（担当・氏名）も出す。数字のない合計行は記録にならないので書かない（design.md 6.1）。"""
     from export.formats import table_markdown_lines
     from pattern.dictionary import is_person_field, is_person_label
 
     value = {"columns": ["日時", "対応内容", "担当"],
              "rows": [["9:10", "電極を交換", "中村"], ["合計", "", ""]]}
     assert table_markdown_lines(value) == ["- 日時: 9:10／対応内容: 電極を交換／担当: 中村"]
-    assert table_markdown_lines(value, omit_person=True) == ["- 日時: 9:10／対応内容: 電極を交換"]
     # 数字のある合計行はこれまでどおり「- 合計: …」で書く
     assert table_markdown_lines({"columns": ["ロットNo.", "投入数"], "rows": [["合計", "50"]]}) == ["- 合計: 投入数: 50"]
 

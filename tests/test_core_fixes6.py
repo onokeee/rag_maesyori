@@ -2,10 +2,8 @@
 
 - R6-FUZZ-1: シート全体を指すハイパーリンク・コメントの範囲は、openpyxl で開く前に断る
 - R6-SEC-2: 書式だけの空の行（<row ht customHeight/>）が大量にあるブックは、帳票では開く前に断る
-- R6-2: imports/<id>/ を消し切れなかったときは中身を 0 バイトにし、保存の結果の画面で「消しました」と言わない
-- UX6-2: JSON の 404 にも「保存先フォルダに保存済み」を出す
+- R6-2: imports/<id>/ を消し切れなかったときは中身を 0 バイトにする
 """
-import io
 import re
 import zipfile
 from pathlib import Path
@@ -16,8 +14,8 @@ from openpyxl.comments import Comment
 
 from core import purge
 from core.files import FORM_MAX_MERGED_CELLS, UploadError, precheck_excel
-from tests.test_output_folder import _set_folder, out_dir  # noqa: F401
-from tests.test_retention import _add_confirmed_document, _confirmed_import
+from tests.conftest import confirmed_import
+from tests.test_core_files import upload_error
 
 
 def _rewrite(src: Path, dest: Path, edit) -> Path:
@@ -84,9 +82,7 @@ def test_a_link_or_comment_over_the_whole_sheet_is_refused_before_opening(tmp_pa
 @pytest.mark.parametrize("make", [_with_hyperlink, _with_comment])
 def test_both_upload_routes_refuse_a_whole_sheet_link_or_comment(app, client, tmp_path, url, make):
     data = make(tmp_path, "A1:XFD1048576").read_bytes()
-    res = client.post(url, data={"file": (io.BytesIO(data), "リンク.xlsx")},
-                      content_type="multipart/form-data", follow_redirects=True)
-    assert "ハイパーリンクまたはコメントの範囲が大きすぎます" in res.get_data(as_text=True)
+    assert "ハイパーリンクまたはコメントの範囲が大きすぎます" in upload_error(client, url, data, "リンク.xlsx")
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
 
 
@@ -109,9 +105,7 @@ def test_row_limit_counts_every_row_exactly(tmp_path):
 
 def test_forms_upload_refuses_many_empty_formatted_rows(app, client, tmp_path):
     data = _with_empty_rows(tmp_path, FORM_MAX_MERGED_CELLS + 1).read_bytes()
-    res = client.post("/forms/upload", data={"file": (io.BytesIO(data), "行だらけ.xlsx")},
-                      content_type="multipart/form-data", follow_redirects=True)
-    assert "行数が上限" in res.get_data(as_text=True)
+    assert "行数が上限" in upload_error(client, "/forms/upload", data, "行だらけ.xlsx")
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
 
 
@@ -123,7 +117,7 @@ def _leave_files(monkeypatch):
 
 
 def test_leftover_import_files_are_emptied_and_flagged(app, client, monkeypatch):
-    import_id = _confirmed_import(app, client)
+    import_id = confirmed_import(app, client)
     _leave_files(monkeypatch)
     with app.test_request_context("/"):
         folder = purge.import_dir(import_id)
@@ -136,45 +130,8 @@ def test_leftover_import_files_are_emptied_and_flagged(app, client, monkeypatch)
 
 
 def test_a_clean_purge_is_not_flagged(app, client):
-    import_id = _confirmed_import(app, client)
+    import_id = confirmed_import(app, client)
     with app.test_request_context("/"):
         purge.purge_table_import(import_id)
         assert not purge.import_dir(import_id).exists()
         assert not purge.purge_incomplete()
-
-
-def test_folder_save_does_not_claim_removal_when_import_files_were_left(app, client, out_dir, monkeypatch):  # noqa: F811
-    import_id = _confirmed_import(app, client)
-    _set_folder(client, out_dir)
-    _leave_files(monkeypatch)
-    page = client.post(f"/tables/imports/{import_id}/save-to-folder").get_data(as_text=True)
-    assert "消し切れませんでした" in page
-    assert "このアプリからはデータを消しました" not in page
-    with app.app_context():
-        leftovers = [p for p in purge.import_dir(import_id).rglob("*") if p.is_file()]
-    assert leftovers and all(p.stat().st_size == 0 for p in leftovers)
-
-
-def test_folder_save_flags_an_upload_that_could_not_be_removed(app, client, out_dir, monkeypatch):  # noqa: F811
-    _set_folder(client, out_dir)
-    doc_id, _path = _add_confirmed_document(app, "報告書.xlsx")
-    monkeypatch.setattr(purge, "remove_upload", lambda _p: False)
-    page = client.post(f"/forms/{doc_id}/save-to-folder").get_data(as_text=True)
-    assert "消し切れませんでした" in page and "このアプリからはデータを消しました" not in page
-
-
-def test_folder_save_still_says_removed_normally(app, client, out_dir):  # noqa: F811
-    import_id = _confirmed_import(app, client)
-    _set_folder(client, out_dir)
-    page = client.post(f"/tables/imports/{import_id}/save-to-folder").get_data(as_text=True)
-    assert "このアプリからはデータを消しました" in page and "消し切れませんでした" not in page
-
-
-# ---- UX6-2 -----------------------------------------------------------------------------
-
-def test_json_404_mentions_the_save_folder(client):
-    res = client.post("/forms/987654321/draft", json={}, headers={"Accept": "application/json"})
-    assert res.status_code == 404
-    error = res.get_json()["error"]
-    assert "保存先フォルダに保存済み" in error and "ダウンロード済み" in error and "削除" in error
-

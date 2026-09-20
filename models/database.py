@@ -469,6 +469,10 @@ def _field_def(row: dict) -> FieldDef:
     fd.table_columns = list(rule.get("columns") or [])
     # 探す区画（発行側・回答側など、同じラベルが並ぶ帳票でどちらを読むか）
     fd.section = rule.get("section") or ""
+    # クリックで作った項目の控え（見本でのシート名とセル番地）
+    fd.sheet_name = rule.get("sheet_name") or ""
+    fd.label_cell = rule.get("label_cell") or ""
+    fd.cell = rule.get("cell") or ""
     return fd
 
 
@@ -481,6 +485,10 @@ def _extraction_rule(f: FieldDef) -> dict:
     section = getattr(f, "section", "") or ""
     if section:
         rule["section"] = section
+    for key in ("sheet_name", "label_cell", "cell"):
+        value = getattr(f, key, "") or ""
+        if value:
+            rule[key] = value
     return rule
 
 

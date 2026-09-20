@@ -472,3 +472,28 @@ def remove_orphan_uploads(base, known_paths) -> int:
                 continue
             removed += 1
     return removed
+
+
+# ---- Windows のパスの長さ ------------------------------------------------------------
+# 長いパスが有効でない Windows では、パス全体が 260 文字を超えるファイルを書けない。
+# 置き場所（DATA_DIR 配下）に md を書く前に確かめるために使う（tables/pipeline.py）。
+
+MAX_PATH_CHARS = 259
+
+
+def _long_paths_enabled() -> bool:
+    import os
+    if os.name != "nt":
+        return True
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            value, _kind = winreg.QueryValueEx(key, "LongPathsEnabled")
+        return bool(value)
+    except OSError:
+        return False
+
+
+def path_limit() -> int | None:
+    """書けるファイルのパスの長さの上限（上限が無ければ None）。"""
+    return None if _long_paths_enabled() else MAX_PATH_CHARS

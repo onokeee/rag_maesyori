@@ -34,7 +34,8 @@ RAG_OUTPUTS = {
 # タイトル項目が未設定のときに使う「識別らしい項目」（この順で並べる）
 DEFAULT_TITLE_KEYS = ("report_id", "equipment_id", "equipment_name", "occurred_date")
 
-DEFAULT_MD_OPTIONS = {"omit_person_fields": True}
+# Markdown の作り方の追加設定。入力を削る設定は置かない（人名の項目も必ず出す）。
+DEFAULT_MD_OPTIONS: dict = {}
 
 
 @dataclass
@@ -59,6 +60,11 @@ class FieldDef:
     # 発行側と回答側で同じ意味の欄が並ぶ帳票で、どちら側の欄を読むかを決める。シートにその区画があり、
     # その中に探す見出しがあるときだけ区画の中で探す（区画の無い版・区画の中に見出しの無い版は全体で探す）
     section: str = ""
+    # クリックで作った項目の控え: 見本でクリックしたシート名・見出しセル・値セルの番地。
+    # 見出しで探して見つからなかったときだけ、この番地のセルを読む（見出しのない「値だけ」の項目もここで読む）
+    sheet_name: str = ""
+    label_cell: str = ""
+    cell: str = ""
 
     def search_labels(self) -> list[str]:
         labels = [c.strip() for c in self.candidates if c.strip()] or [self.display_name]

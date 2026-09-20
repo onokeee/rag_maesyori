@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 import re
-import sqlite3
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from flask import request, url_for
-
-from models import database
+from flask import request
 
 
 def safe_next(default: str) -> str:
@@ -80,46 +77,3 @@ def is_cross_site_write(req=None) -> bool:
         referer = (req.headers.get("Referer") or "").strip()
         return bool(referer) and _origin_of(referer) != host
     return False
-
-
-# ---- DB の読み取り（ホームの一覧用の直接照会。表が無ければ空） ------------
-
-def query_all(sql: str, args=()) -> list[dict]:
-    try:
-        return [dict(r) for r in database.get_db().execute(sql, args).fetchall()]
-    except sqlite3.OperationalError:
-        return []
-
-
-def query_value(sql: str, args=(), default=0):
-    try:
-        row = database.get_db().execute(sql, args).fetchone()
-    except sqlite3.OperationalError:
-        return default
-    return row[0] if row else default
-
-
-# ---- 帳票の状態 --------------------------------------------------------------------
-# models/database.py の導出値: unread / reviewing / modified / confirmed
-
-def form_link(doc: dict) -> str:
-    """帳票の状態に応じた「続き」の行き先（design.md 2.3 のルート）。"""
-    state, doc_id = doc.get("state"), doc["id"]
-    if state == "unread":
-        return url_for("forms.type_select", doc_id=doc_id)
-    if state in ("reviewing", "modified"):
-        return url_for("forms.review", doc_id=doc_id)
-    return url_for("forms.detail", doc_id=doc_id)
-
-
-# ---- 一覧表の取り込みの状態 ------------------------------------------------------------
-
-# 状態: uploaded=読み込み前 / reading=読み込み中 / preview=確認中 / confirming=確定処理中 / confirmed=確定済み / failed=失敗
-TABLE_IMPORT_ACTIVE = ("uploaded", "reading", "preview", "confirming", "failed")
-
-
-def table_import_link(item: dict) -> str:
-    status, import_id = item.get("status"), item["id"]
-    step = {"uploaded": "source", "reading": "preview", "preview": "preview", "failed": "preview",
-            "confirming": "done", "confirmed": "done"}.get(status, "source")
-    return url_for(f"tables.{step}", import_id=import_id)

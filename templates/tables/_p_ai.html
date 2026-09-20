@@ -1,0 +1,104 @@
+{#- 段5「AI整形（任意）」の中身。mdファイルを作るときに、追記ログ列の文章を組み立てる部分だけ AI を使う。 -#}
+{% import "components/_ui.html" as ui %}
+<div data-ai-page
+     data-split-url="{{ url_for('tables.ai_split_preview', import_id=imp.id) }}"
+     data-trial-url="{{ url_for('tables.ai_trial', import_id=imp.id) }}"
+     data-estimate-url="{{ url_for('tables.ai_estimate', import_id=imp.id) }}"
+     data-run-url="{{ url_for('tables.ai_run', import_id=imp.id) }}"
+     data-pause-url="{{ url_for('tables.ai_control', import_id=imp.id, action='pause') }}"
+     data-resume-url="{{ url_for('tables.ai_control', import_id=imp.id, action='resume') }}"
+     data-cancel-url="{{ url_for('tables.ai_control', import_id=imp.id, action='cancel') }}"
+     data-trial-keys='{{ trial_keys | tojson }}'
+     data-external="{{ '1' if external else '0' }}">
+
+  <p class="hint">列「{{ log_display }}」の追記ログを、ルールで日付・記入者ごとに分けます（AIなしでも Markdown に出ます）。
+    AI整形をすると、原文と照合できた「対応の要点」と記録の種別を追加します。しなくても先へ進めます。</p>
+
+  <div class="sub-block">
+    <h3 class="sub-title">1. 分割プレビュー（AIなし）</h3>
+    {% if row_choices %}
+    <div class="filter-bar">
+      <label>行
+        <select class="input" data-split-row>
+          {% for key, label in row_choices %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="button" class="btn" data-split-run>分割を表示</button>
+    </div>
+    <div data-split-result aria-live="polite"></div>
+    {% else %}
+    <p class="muted">この列に文章が入っている行がありません。</p>
+    {% endif %}
+  </div>
+
+  {% if ai_ready %}
+  <div class="sub-block">
+    <h3 class="sub-title">2. 試し実行（10行）</h3>
+    <p class="hint">先頭の10行を1行ずつAIに送り、抜き出した項目と Markdown を確かめます。結果は保存され、全件実行でも使われます。<br>
+      モデル: {{ model }}{% if external %}（外部のAIサービス）{% else %}（このPC・社内のサーバー）{% endif %}</p>
+    {% if external %}<label class="check"><input type="checkbox" data-trial-external> 試し実行の10行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
+    <div class="btn-row"><button type="button" class="btn" data-trial-run {{ 'disabled' if not trial_keys }}>10行を試す</button></div>
+    <p class="progress-text" data-trial-status aria-live="polite"></p>
+    <div data-trial-result></div>
+  </div>
+  {% endif %}
+
+  {# AI接続が外れていても、動いているジョブがある間は進み具合と［中止］を出す（中止できないと取り込みが詰む） #}
+  {% if ai_ready or job %}
+  <div class="sub-block">
+    <h3 class="sub-title">3. 全件実行</h3>
+    {% if counts %}
+    <p class="hint">これまでの結果: {% for status, n in counts.items() %}{{ item_labels.get(status, status) }} {{ n }}件{% if not loop.last %}／{% endif %}{% endfor %}</p>
+    {% endif %}
+    {% if job %}
+      {{ ui.progress(job, url=(job_url if job_active else None), label="AI整形の進み具合") }}
+      <p class="hint" data-ai-detail>{% if job.progress %}OK {{ job.progress.ok or 0 }}／要確認 {{ job.progress.flagged or 0 }}／エラー {{ job.progress.error or 0 }}／ルールのみ {{ job.progress.rule_only or 0 }}{% endif %}</p>
+      {% if job.status == 'failed' and job.message %}<div class="flash flash-error" role="alert">{{ job.message }}</div>{% endif %}
+      {% if job_active %}
+      {% if not ai_ready %}<p class="hint">AI接続が外れているため実行・再開はできません。中止してから進んでください。</p>{% endif %}
+      <div class="btn-row">
+        {% if ai_ready %}
+        {% if job.status == 'paused' or job.pause_requested %}
+        {# 一時停止を頼んだ直後は、送信中の呼び出しを待つ間まだ「実行中」。そのときも再開を出す #}
+        <button type="button" class="btn" data-ai-control="resume">再開</button>
+        {% if job.status != 'paused' %}<span class="hint">一時停止中…（送信中の呼び出しが終わると止まります）</span>{% endif %}
+        {% else %}
+        <button type="button" class="btn" data-ai-control="pause">一時停止</button>
+        {% endif %}
+        {% endif %}
+        <button type="button" class="btn danger-outline" data-ai-control="cancel"
+                data-confirm="AI整形を中止します。保存済みの行の結果は残ります。" data-confirm-ok="中止する">中止</button>
+      </div>
+      {% endif %}
+    {% endif %}
+    {% if ai_ready and not job_active %}
+    <div class="grid-3">
+      <label>範囲
+        <select class="input" data-run-scope>
+          {% for value, label in scopes.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>同時実行数
+        <input type="number" class="input" min="1" max="16" value="{{ 4 if external else 1 }}" data-run-concurrency>
+      </label>
+      <div class="field"><span>見積もり</span><span data-estimate class="muted">[見積もる] を押すと、呼び出し回数と時間の目安を出します。</span></div>
+    </div>
+    {% if external %}<label class="check"><input type="checkbox" data-run-external> 対象の行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
+    <div class="btn-row">
+      <button type="button" class="btn" data-estimate-run>見積もる</button>
+      <button type="button" class="btn" data-ai-run>AI整形を実行する</button>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% include "tables/_ai_connection.html" %}
+
+  <div class="form-actions">
+    {% if job_active %}
+    <span class="hint">AI整形が動いている間（一時停止中を含む）は確認に進めません。再開して終わらせるか、中止してください。</span>
+    {% else %}
+    <button type="button" class="btn primary" data-ai-next>内容の確認へ</button>
+    {% endif %}
+  </div>
+</div>

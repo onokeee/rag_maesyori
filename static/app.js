@@ -1,4 +1,5 @@
-// 全画面共通: トースト、fetch、モデル選択、ファイルのドロップ、確認ダイアログ、ジョブ進捗
+// 全画面共通: トースト、fetch（ragFetch）、1画面の中の段（ragSections）、
+// ファイルのドロップ、確認ダイアログ、ジョブ進捗
 "use strict";
 
 // ---- トースト -------------------------------------------------------------------
@@ -112,38 +113,6 @@ function bindProgressBox(box) {
     }
   });
 }
-
-// ---- ヘッダー: 使うAIモデルの切り替え ------------------------------------------------------
-document.getElementById("modelPick")?.addEventListener("change", async (event) => {
-  const select = event.target;
-  const previous = select.dataset.current;
-  try {
-    const info = await postJson("/api/models", { model: select.value });
-    select.dataset.current = info.current;
-    toast(`AIモデルを ${info.current} にしました。`);
-  } catch (e) {
-    toast(e.message, "err");
-    if (previous) select.value = previous;
-  }
-});
-
-// ---- ナビ: 設定のドロップダウン ------------------------------------------------------
-function closeDropdowns(except) {
-  document.querySelectorAll("details[data-dropdown][open]").forEach((d) => {
-    if (d !== except) d.removeAttribute("open");
-  });
-}
-document.addEventListener("click", (event) => {
-  closeDropdowns(event.target.closest("details[data-dropdown]"));
-});
-document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  const open = document.querySelector("details[data-dropdown][open]");
-  if (open) {
-    open.removeAttribute("open");
-    open.querySelector("summary")?.focus();
-  }
-});
 
 // ---- ファイルのドロップ ---------------------------------------------------------------
 function acceptsFile(input, file) {
@@ -271,9 +240,176 @@ document.addEventListener("change", (event) => {
 });
 document.addEventListener("selection:change", updateSelectionCounts);
 
+// ---- ragFetch: 画面を移らずにサーバへ送る -------------------------------------------------
+// 1画面で全部やるので、送信はすべてここを通る（利用者の指示 2026-09-20）。
+// 使い方:
+//   await ragFetch("/tables/12/read")                        … GET
+//   await ragFetch(url, { json: {...} })                     … JSON を POST（既定は POST）
+//   await ragFetch(url, { form: formElementOrFormData })     … フォーム（ファイルもそのまま送れる）
+//   await ragFetch(url, { html: true })                      … 画面の一部の HTML を受け取る
+// 戻り値: サーバが JSON を返せばそのオブジェクト、HTML を返せば { html: "…" }。
+// 失敗（HTTP エラー・通信できない）は、ここでトーストに出してから例外を投げる。
+// 呼び出し側で自分でメッセージを出すときは { quiet: true }。
+async function ragFetch(url, options = {}) {
+  const { json, form, html, quiet = false, method, ...rest } = options;
+  const init = { headers: { Accept: html ? "text/html" : "application/json" }, ...rest };
+  if (json !== undefined) {
+    init.method = method || "POST";
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(json || {});
+  } else if (form !== undefined) {
+    init.method = method || "POST";
+    // FormData のときは Content-Type を付けない（境界文字列はブラウザが付ける）
+    init.body = form instanceof FormData ? form : new FormData(form);
+  } else {
+    init.method = method || "GET";
+  }
+
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (e) {
+    const error = new Error("このPCのアプリにつながりませんでした。アプリが動いているか確かめてください");
+    error.status = 0;
+    if (!quiet) toast(error.message, "err");
+    throw error;
+  }
+
+  const type = (res.headers.get("Content-Type") || "").toLowerCase();
+  let data = {};
+  let text = "";
+  if (type.includes("application/json")) {
+    data = await res.json().catch(() => ({}));
+  } else {
+    text = await res.text().catch(() => "");
+    data = { html: text };
+  }
+  if (!res.ok) {
+    // 問題が複数あるとき（列の対応づけの保存など）は errors に全部入っている。1件だけ見せて残りを隠さない
+    const error = new Error(data.error || `うまくいきませんでした（HTTP ${res.status}）`);
+    error.status = res.status;
+    error.errors = Array.isArray(data.errors) ? data.errors : null;
+    error.data = data;
+    if (!quiet) toast(error.errors ? error.errors.slice(0, 3).join(" / ") : error.message, "err");
+    throw error;
+  }
+  return data;
+}
+
+// ---- ragSections: 1画面の中の「段」の開け閉め -------------------------------------------
+// 画面を移らず、下に段が増えていく形にする（利用者の指示 2026-09-20）。
+// 段の書き方（templates 側）:
+//   <section class="step" data-step="sheet">
+//     <div class="step-head">
+//       <span class="step-no"><span class="step-no-text">2</span></span>
+//       <h2 class="step-title">どのシートを使うか</h2>
+//       <p class="step-summary" data-step-summary></p>
+//       <span class="step-toggle" data-step-toggle hidden>開く</span>
+//     </div>
+//     <div class="step-body"> … </div>
+//   </section>
+// 最初の段だけ class="step is-open" にしておけば、あとは JS が進める。
+const ragSections = (() => {
+  const el = (id) => (id instanceof Element ? id : document.querySelector(`.step[data-step="${id}"]`));
+  const list = () => Array.from(document.querySelectorAll(".step[data-step]"));
+
+  function setToggle(section) {
+    const toggle = section.querySelector("[data-step-toggle]");
+    if (!toggle) return;
+    const done = section.classList.contains("is-done");
+    toggle.hidden = !done;
+    toggle.textContent = section.classList.contains("is-open") ? "閉じる" : "開く";
+  }
+
+  /** その段を開く（他の開いている段は、済んだものだけ畳む）。 */
+  function open(id, { scroll = true } = {}) {
+    const section = el(id);
+    if (!section) return null;
+    list().forEach((s) => {
+      if (s !== section && s.classList.contains("is-done")) s.classList.remove("is-open");
+      setToggle(s);
+    });
+    section.classList.add("is-open");
+    setToggle(section);
+    section.dispatchEvent(new CustomEvent("step:open", { bubbles: true }));
+    if (scroll) section.scrollIntoView({ behavior: "smooth", block: "start" });
+    return section;
+  }
+
+  /** その段を「済み」にして畳み、要約を見出しに出す。next を渡すとその段を開く。 */
+  function done(id, summary, next) {
+    const section = el(id);
+    if (!section) return null;
+    section.classList.add("is-done");
+    section.classList.remove("is-open");
+    const label = section.querySelector("[data-step-summary]");
+    if (label && summary !== undefined && summary !== null) {
+      label.textContent = String(summary);
+      label.title = String(summary);
+    }
+    setToggle(section);
+    section.dispatchEvent(new CustomEvent("step:done", { bubbles: true }));
+    if (next) open(next);
+    return section;
+  }
+
+  /** その段を開き直し、後ろの段を「まだ」に戻す（やり直すとき）。 */
+  function reset(id) {
+    const all = list();
+    const index = all.indexOf(el(id));
+    if (index < 0) return null;
+    all.slice(index + 1).forEach((s) => {
+      s.classList.remove("is-open", "is-done");
+      const label = s.querySelector("[data-step-summary]");
+      if (label) label.textContent = "";
+      setToggle(s);
+      s.dispatchEvent(new CustomEvent("step:reset", { bubbles: true }));
+    });
+    return open(all[index]);
+  }
+
+  /** 段の中身の要素（ここに受け取った HTML を入れる）。 */
+  const body = (id) => el(id)?.querySelector(".step-body") || null;
+
+  /** 段の中に「処理中」を出す（text が空なら消す）。画面は移らない。 */
+  function working(id, text) {
+    const section = el(id);
+    if (!section) return;
+    let box = section.querySelector("[data-step-working]");
+    if (!box) {
+      box = document.createElement("p");
+      box.className = "step-working";
+      box.setAttribute("data-step-working", "");
+      box.setAttribute("role", "status");
+      box.innerHTML = '<span class="spinner" aria-hidden="true"></span><span data-step-working-text></span>';
+      (body(id) || section).prepend(box);
+    }
+    box.querySelector("[data-step-working-text]").textContent = text || "";
+    box.hidden = !text;
+  }
+
+  // 済んだ段の見出しをクリックすると開き直せる
+  document.addEventListener("click", (event) => {
+    const head = event.target.closest(".step.is-done > .step-head");
+    if (!head) return;
+    const section = head.parentElement;
+    if (section.classList.contains("is-open")) {
+      section.classList.remove("is-open");
+      setToggle(section);
+    } else {
+      open(section, { scroll: false });
+    }
+  });
+
+  return { el, open, done, reset, body, working, refresh: () => list().forEach(setToggle) };
+})();
+
 // ---- 初期化 -------------------------------------------------------------------------
 document.querySelectorAll("[data-file-drop]").forEach(bindFileDrop);
 document.querySelectorAll(".progress-box[data-job-url]").forEach(bindProgressBox);
 updateSelectionCounts();
+ragSections.refresh();
 // 他のスクリプトから使う
-window.App = { toast, postJson, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox };
+window.ragFetch = ragFetch;
+window.ragSections = ragSections;
+window.App = { toast, postJson, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox, ragFetch, ragSections };

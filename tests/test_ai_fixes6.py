@@ -4,7 +4,6 @@
 - 基準日の探し方が AI整形と Markdown で同じ
 - AI接続が外れても、動いているジョブの［中止］は画面に残る
 """
-import io
 import json
 
 import pytest
@@ -19,7 +18,6 @@ from tables.spec import spec_from_dict
 from tests.conftest import BufferedClient, make_config
 from tests.fake_servers import Reply
 from tests.test_aiproc import SPEC, ai_app, fake, _write_rows  # noqa: F401  (fixture)
-from tests.test_tables_flow import COLUMNS, CSV_TEXT
 
 
 # ---- R6-AI-1 max_tokens → max_completion_tokens は「名前の付け替え」として覚える ----------------
@@ -160,23 +158,9 @@ def plain_app(tmp_path):
 
 
 def _read_csv_import(app, client) -> int:
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(CSV_TEXT.encode("cp932")), "a.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "cp932", "delimiter": ",", "template": "new", "new_template_name": "T"})
-    client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""})
-    payload = {"name": "T", "group_by": "month", "max_records_per_file": 300, "omit_person": True,
-               "lightrag_hint": True,
-               "columns": [{"index": i, "header": h, "use": True, "key": k, "display": h.split("(")[0], "type": t,
-                            "role": r, "unit": "分" if k == "downtime" else "", "md": "attribute",
-                            "fill_down_blank": False, "ai": r == "log", "description": ""}
-                           for i, (k, h, t, r) in enumerate(COLUMNS)]}
-    assert client.post(f"/tables/imports/{import_id}/columns", json=payload).status_code == 200
-    from tables import store
-    with app.app_context():
-        assert jobs.wait_job(store.get_import(import_id)["job_id"], timeout=60)["status"] == "done"
-    return import_id
+    from tests.tables_helpers import imported
+
+    return imported(app, client, "a.csv", "T", ai_role="log")
 
 
 def test_paused_ai_job_can_still_be_cancelled_without_ai_settings(plain_app):
@@ -192,7 +176,10 @@ def test_paused_ai_job_can_still_be_cancelled_without_ai_settings(plain_app):
             conn.commit()
         finally:
             conn.close()
-    html = client.get(f"/tables/imports/{import_id}/ai").get_data(as_text=True)
-    assert "AI接続が設定されていません" in html
-    assert f"/tables/imports/{import_id}/ai/cancel" in html and "中止" in html
-    assert f"/tables/imports/{import_id}/ai/resume" not in html   # 接続が無いので再開はできない
+    from tests.tables_helpers import panel_html
+
+    html = panel_html(client, import_id, "ai")
+    assert "APIキーが設定されていません" in html            # AI接続のパネルは「未設定」と出る
+    assert 'data-ai-control="cancel"' in html and "中止" in html
+    # 接続が無いので実行・再開はできない（中止だけ残る）
+    assert 'data-ai-control="resume"' not in html and 'data-ai-control="pause"' not in html

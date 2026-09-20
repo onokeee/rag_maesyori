@@ -34,8 +34,11 @@ def _default_exclude() -> dict:
     return {"hidden_rows": "exclude_with_warning", "strike_rows": "exclude_with_warning"}
 
 
-# 判定には使っていない項目（tables/detect.py が自分で判断する）。古い JSON にあっても読み捨てる
-RETIRED_KEYS = {"header": ("search_rows",), "exclude": ("aggregate_keywords",)}
+# 判定に使っていない項目・前の版にあって今は無い設定。古い JSON に残っていても読み捨てる
+RETIRED_KEYS = {"header": ("search_rows",), "exclude": ("aggregate_keywords",),
+                # lightrag_hint: ファイル名のヒントは付けない。dedupe_timeline/omit_person: 中身は削らない。
+                # max_records_per_file: 記録ファイルは月ごとで、件数では分けない。
+                "markdown": ("lightrag_hint", "dedupe_timeline", "omit_person", "max_records_per_file")}
 
 
 def _default_record() -> dict:
@@ -52,13 +55,9 @@ def _default_checks() -> dict:
 
 
 def _default_markdown() -> dict:
-    # lightrag_hint: 新しい取り込み設定の既定はオン（ヒント無しだと LIGHTRAG_PARSER 未設定のサーバーで記録が途中で切られる）。
-    # 保存済みの設定は JSON に値を持っているので、この既定では書き換わらない。
-    # dedupe_timeline: 対応の時系列から、同じ記録の他の列と同じ文を省く（既定オン＝これまでの動き）。
-    return {"file_prefix": "", "group_by": "month", "max_records_per_file": 300, "lightrag_hint": True,
-            "dataset_card": True, "records": True, "dedupe_timeline": True,
+    return {"file_prefix": "", "group_by": "month", "dataset_card": True, "records": True,
             "summaries": [SummarySpec("month"), SummarySpec("entity_fiscal_year")],
-            "title_columns": [], "omit_person": True}
+            "title_columns": []}
 
 
 @dataclass
@@ -94,7 +93,6 @@ class LogStageSpec:
     limits: dict = field(default_factory=dict)
     splitter: dict = field(default_factory=dict)  # logproc.SplitOptions.from_dict の形
     mask: list[str] = field(default_factory=lambda: ["phone", "email"])
-    max_timeline_entries: int = 20  # 推定トークンが多いレコードで時系列を切る件数
 
 
 @dataclass
@@ -289,7 +287,7 @@ def spec_from_dict(d: dict) -> TableSpec:
     spec.record = _merged(_default_record(), data.get("record"))
     spec.period = _merged(_default_period(), data.get("period"))
     spec.checks = _merged(_default_checks(), data.get("checks"))
-    markdown = _merged(_default_markdown(), data.get("markdown"))
+    markdown = _merged(_default_markdown(), data.get("markdown"), RETIRED_KEYS["markdown"])
     markdown["summaries"] = [_summary_from(s) for s in _as_list(markdown.get("summaries"))]
     spec.markdown = markdown
     log = data.get("log_stage")
@@ -394,11 +392,6 @@ def validate_spec(spec: TableSpec) -> list[str]:
         errors.append("記録ファイルのまとめ方は month / entity_month から選んでください")
     elif md.get("group_by") == "entity_month" and not spec.first_role("entity"):
         errors.append("設備×月でまとめるには、役割「entity（設備など）」の列が必要です")
-    try:
-        if int(md.get("max_records_per_file") or 0) < 1:
-            errors.append("1ファイルの記録数の上限は1以上にしてください")
-    except (TypeError, ValueError):
-        errors.append("1ファイルの記録数の上限は数値で指定してください")
     for key in _as_list(md.get("title_columns")):
         base = str(key).split(":")[0]
         if base not in all_keys:
@@ -478,12 +471,6 @@ def _log_stage_errors(stage: LogStageSpec) -> list[str]:
     for name, label in (("glossary", "用語集"), ("splitter", "区切り"), ("limits", "上限"), ("run_if", "実行条件")):
         if not isinstance(getattr(stage, name), dict):
             errors.append(f"AI整形の{label}（{name}）の書き方が正しくありません")
-    try:
-        n = stage.max_timeline_entries
-        if isinstance(n, bool) or int(n) != n or not 1 <= int(n) <= 1000:
-            raise ValueError
-    except (TypeError, ValueError):
-        errors.append("時系列の最大件数（max_timeline_entries）は1〜1000の整数で指定してください")
     splitter = stage.splitter if isinstance(stage.splitter, dict) else {}
     for key in ("extra_anchors", "not_date_patterns"):
         patterns = splitter.get(key)
@@ -610,7 +597,7 @@ def _get(obj, name, default=None):
 def spec_from_suggestions(name: str, layout, suggestions, options: dict | None = None) -> TableSpec:
     """見出しの判定結果（LayoutGuess）と列の候補（ColumnSuggestion）から取り込み設定を作る。
 
-    options: description, name_patterns, file_types, group_by, fiscal_year_start_month, max_records_per_file
+    options: description, name_patterns, file_types, group_by, fiscal_year_start_month
     """
     options = dict(options or {})
     spec = TableSpec(name=name)  # ファイル名の先頭は空（＝設定名。TableSpec.file_prefix）
@@ -677,6 +664,4 @@ def spec_from_suggestions(name: str, layout, suggestions, options: dict | None =
                             if spec.columns_with_role("text") else None) if c is not None])
     if options.get("group_by") in GROUP_BY:
         spec.markdown["group_by"] = options["group_by"]
-    if options.get("max_records_per_file"):
-        spec.markdown["max_records_per_file"] = int(options["max_records_per_file"])
     return spec

@@ -322,57 +322,27 @@ def test_zero_serial_in_a_date_formatted_cell_is_a_type_error():
 
 # ---- R3B-5: 「出さない」にした理由 -------------------------------------------------------------
 
-def test_omit_reason_tells_person_blank_and_code_apart(tmp_path):
+def test_only_blank_columns_are_left_out_by_default(tmp_path):
     lines = ["管理No,発生日,起票者,予備,区分コード,現象"]
     for i in range(30):
         lines.append(f"TR-{i:03d},2026/08/{i % 28 + 1:02d},石川 陸,,A{i % 3},ポンプ停止{i}")
     src = _csv(tmp_path, "omit.csv", lines)
     layout = guess_layout(src, "omit.csv")
     by_header = {s.header: s for s in suggest_columns(layout.headers, sample_data_rows(src, "omit.csv", layout))}
-    assert by_header["起票者"].md == "omit" and by_header["起票者"].omit_reason == "person"
+    # 人名の列・コードの列も既定で出す（空欄だけの列だけ「出さない」にする）
+    assert by_header["起票者"].md != "omit" and by_header["区分コード"].md != "omit"
     assert by_header["予備"].md == "omit" and by_header["予備"].omit_reason == "blank"
     assert by_header["現象"].omit_reason == ""
 
 
-def test_columns_page_says_why_a_column_is_left_out(app, client):
-    """「出さない」にした理由を列ごとに出す（人名・空欄だけ）。コードだけの列の説明を使い回さない。"""
-    import io
-
-    text = "管理No,発生日,現象,起票者,予備\r\n" + "".join(
-        f"TR-{i:03d},2026-08-{i:02d},アラーム停止{i},田中,\r\n" for i in range(1, 8))
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(text.encode("utf-8")), "一覧.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "utf-8", "delimiter": ",", "template": "new", "new_template_name": "理由テスト"})
-    client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""})
-    page = client.get(f"/tables/imports/{import_id}/columns").get_data(as_text=True)
-    assert "人名なので、はじめから「出さない」にしています" in page
-    assert "空欄だけなので、はじめから「出さない」にしています" in page
-    assert "値がコードだけなので" not in page
-
-
 def test_preview_is_not_queued_behind_a_paused_ai_job(app, client):
-    """AI整形が一時停止中のまま確認画面を開いても、下書きのジョブを後ろに並べて黙って待たせない。"""
-    import io
+    """AI整形が一時停止中のまま「内容の確認」の段を開いても、下書きのジョブを後ろに並べて黙って待たせない。"""
     import time
 
     from core import jobs
-    from tests.test_tables_flow import COLUMNS, CSV_TEXT, _wait_import_job
+    from tests.tables_helpers import imported, panel
 
-    res = client.post("/tables/upload", data={"file": (io.BytesIO(CSV_TEXT.encode("cp932")), "トラブル一覧.csv")},
-                      content_type="multipart/form-data")
-    import_id = int(res.headers["Location"].split("/")[3])
-    client.post(f"/tables/imports/{import_id}/source",
-                data={"encoding": "cp932", "delimiter": ",", "template": "new", "new_template_name": "停止中テスト"})
-    client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""})
-    payload = {"name": "停止中テスト", "group_by": "month", "max_records_per_file": 300, "omit_person": True,
-               "columns": [{"index": i, "header": h, "use": True, "key": k, "display": h.split("(")[0], "type": t,
-                            "role": r, "unit": "分" if k == "downtime" else "", "md": "attribute",
-                            "fill_down_blank": False, "ai": r == "log", "description": ""}
-                           for i, (k, h, t, r) in enumerate(COLUMNS)]}
-    assert client.post(f"/tables/imports/{import_id}/columns", json=payload).status_code == 200
-    _wait_import_job(app, import_id)
+    import_id = imported(app, client, "トラブル一覧.csv", "停止中テスト", ai_role="log")
 
     def ai(ctx):
         while ctx.wait_if_paused():
@@ -387,13 +357,11 @@ def test_preview_is_not_queued_behind_a_paused_ai_job(app, client):
         while jobs.get_job(ai_job)["status"] != "paused" and time.time() < deadline:
             time.sleep(0.01)
     try:
-        res = client.get(f"/tables/imports/{import_id}/preview")
-        assert res.status_code == 302 and res.headers["Location"].endswith(f"/tables/imports/{import_id}/ai")
+        preview = panel(client, import_id, "preview")
+        assert "AI整形が動いています（一時停止中を含む）" in preview["locked"]
         with app.app_context():
             assert jobs.latest_job("table_import", import_id, kind="table_preview") is None
-        page = client.get(f"/tables/imports/{import_id}/ai").get_data(as_text=True)
-        assert "AI整形が動いています（一時停止中を含む）" in page
-        assert "確認に進めません" in page
+        assert "確認に進めません" in panel(client, import_id, "ai")["html"]
     finally:
         with app.app_context():
             jobs.request_cancel(ai_job)

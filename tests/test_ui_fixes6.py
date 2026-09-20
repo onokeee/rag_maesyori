@@ -1,55 +1,56 @@
-"""画面まわりの不具合修正（6巡目）の確認。"""
+"""画面まわりの不具合修正（6巡目）の確認。
+
+画面が3つになり、取り込みの一覧は無くなった（2026-09-20 の作り直し）。
+［削除］はその取り込みの段の中にしか無いので、「処理中は削除させない」は送り先で確かめる。
+"""
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from tables import store
-from views import TABLE_IMPORT_ACTIVE
 
 
-def _delete_form_shown(html: str, import_id: int) -> bool:
-    return f'action="/tables/imports/{import_id}/delete"' in html
+# ---- UX6-4: 処理中（読み込み中・確定処理中）の取り込みは削除できない --------------------------------
 
-
-# ---- UX6-4: 処理中（読み込み中・確定処理中）の取り込みには、どの画面でも［削除］を出さない --------------------
-
-@pytest.mark.parametrize("url", ["/", "/tables/new"])
-def test_busy_imports_have_no_delete_button_on_any_screen(app, client, url):
+@pytest.mark.parametrize("status", ["reading", "confirming"])
+def test_a_busy_import_cannot_be_deleted(app, client, status):
     with app.app_context():
         import_id = store.create_import("一覧.xlsx", "hash", "tables/一覧.xlsx", {"sheet": "一覧"})
-
-    for status in ("reading", "confirming"):
-        with app.app_context():
-            store.update_import(import_id, status=status)
-        html = client.get(url).get_data(as_text=True)
-        assert not _delete_form_shown(html, import_id), f"{url} / {status}"
-
-    # 処理中でなければ、どちらの画面にも［削除］は出る
-    for status in ("uploaded", "preview", "failed"):
-        with app.app_context():
-            store.update_import(import_id, status=status)
-        html = client.get(url).get_data(as_text=True)
-        assert _delete_form_shown(html, import_id), f"{url} / {status}"
+        store.update_import(import_id, status=status)
+    res = client.post(f"/tables/imports/{import_id}/delete")
+    assert res.status_code == 400
+    assert "処理中の取り込みは削除できません" in res.get_json()["error"]
+    with app.app_context():
+        assert store.get_import(import_id) is not None   # 消えていない
 
 
-# ---- UX6-5: ホームの「作業中の一覧表」の副題が、そこに出る状態をすべて言っている -------------------------------
+@pytest.mark.parametrize("status", ["uploaded", "preview", "failed"])
+def test_an_idle_import_can_be_deleted(app, client, status):
+    with app.app_context():
+        import_id = store.create_import("一覧.xlsx", "hash", "tables/一覧.xlsx", {"sheet": "一覧"})
+        store.update_import(import_id, status=status)
+    res = client.post(f"/tables/imports/{import_id}/delete")
+    assert res.status_code == 200 and res.get_json()["ok"] is True
+    with app.app_context():
+        assert store.get_import(import_id) is None
 
-def test_home_subtitle_names_every_working_table_state(client):
-    html = client.get("/").get_data(as_text=True)
-    subtitle = re.search(r"作業中の一覧表</h2>\s*<p class=\"card-subtitle\">([^<]*)</p>", html).group(1)
-    for word in ("読み込み前", "読み込み中", "確認中", "確定処理中", "失敗"):
-        assert word in subtitle
-    # 状態が増えたら副題も直す（TABLE_IMPORT_ACTIVE と数を合わせる）
-    assert len(subtitle.replace("のもの", "").split("・")) == len(TABLE_IMPORT_ACTIVE)
 
+# ---- R6-C3: 段のポーリングは、ジョブが消えた（404）ら止まって画面を読み直す ----------------------------
 
-# ---- R6-C3: 待ち画面のポーリングは、ジョブが消えた（404）ら止まって画面を読み直す -------------------------------
+def _run_node(script: str):
+    """node -e はコマンドラインの長さに上限があるので、ファイルに書いてから動かす。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "check.mjs"
+        path.write_text(script, encoding="utf-8")
+        out = subprocess.run(["node", str(path)], capture_output=True, check=True, timeout=30, encoding="utf-8")
+    return json.loads(out.stdout)
+
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node がない")
 def test_polling_stops_and_reloads_when_the_job_is_gone():
@@ -77,8 +78,7 @@ globalThis.window = { location: { reload() { reloads++; } } };
   process.stdout.write(JSON.stringify({ gone, broken }));
 })();
 """
-    out = subprocess.run(["node", "-e", script], capture_output=True, check=True, timeout=30, encoding="utf-8")
-    got = json.loads(out.stdout)
+    got = _run_node(script)
     # 404 は一度で止めて読み直す
     assert got["gone"] == {"calls": 1, "reloads": 1}
     # ほかの通信エラーは今までどおり間隔を広げて再試行する（読み直さない）
