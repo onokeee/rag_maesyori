@@ -41,7 +41,6 @@ DEFAULT_MD_OPTIONS: dict = {}
 @dataclass
 class SheetDef:
     sheet_name: str
-    required: bool = True
 
 
 @dataclass

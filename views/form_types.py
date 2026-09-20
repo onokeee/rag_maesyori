@@ -260,7 +260,7 @@ def add_field(pattern_id: int):
         field_rows.append(part)
     message = "。".join(_add_messages(row, added, separated, merged))
     if not any(r["sheet_name"] == sheet for r in sheet_rows):
-        sheet_rows.append({"use": True, "sheet_name": sheet, "required": False})
+        sheet_rows.append({"use": True, "sheet_name": sheet})
     _save_rows(pattern, sheet_rows, field_rows)
     return jsonify(html=_build_html(pattern_id, sample_id), list_html=_list_html(), message=message)
 

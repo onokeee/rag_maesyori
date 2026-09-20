@@ -43,12 +43,11 @@ CREATE TABLE IF NOT EXISTS patterns (
 CREATE TABLE IF NOT EXISTS pattern_sheets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
-    sheet_name TEXT NOT NULL,
-    required INTEGER NOT NULL DEFAULT 1
+    sheet_name TEXT NOT NULL
 );
 
--- 古いDBにある required 列（項目の「必須」）はもう使わない。画面に必須の設定が無いので作らず、
--- 読み書きもしない（古いDBでは既定値 0 のまま残る。列があっても無くても同じように動く）
+-- 古いDBにある required 列（項目の「必須」・シートの「必須」）はもう使わない。画面に必須の設定が
+-- 無いので新しいDBでは作らず、読み書きもしない（古いDBには既定値のまま残る。あっても無くても同じ）
 CREATE TABLE IF NOT EXISTS pattern_fields (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
@@ -544,7 +543,7 @@ def load_pattern(pattern_id: int | None) -> PatternDef | None:
         description=row["description"],
         status=row["status"],
         image_processing=row["image_processing"],
-        sheets=[SheetDef(s["sheet_name"], bool(s["required"])) for s in sheets],
+        sheets=[SheetDef(s["sheet_name"]) for s in sheets],
         fields=[_field_def(f) for f in fields],
     )
     pattern.title_fields = json.loads(row.get("title_fields") or "[]")
@@ -573,8 +572,8 @@ def save_pattern(pattern: PatternDef, status: str) -> None:
         db.execute("DELETE FROM pattern_sheets WHERE pattern_id = ?", (pattern.id,))
         db.execute("DELETE FROM pattern_fields WHERE pattern_id = ?", (pattern.id,))
         db.executemany(
-            "INSERT INTO pattern_sheets (pattern_id, sheet_name, required) VALUES (?, ?, ?)",
-            [(pattern.id, s.sheet_name, int(s.required)) for s in pattern.sheets],
+            "INSERT INTO pattern_sheets (pattern_id, sheet_name) VALUES (?, ?)",
+            [(pattern.id, s.sheet_name) for s in pattern.sheets],
         )
         db.executemany(
             """INSERT INTO pattern_fields

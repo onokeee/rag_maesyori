@@ -5,7 +5,7 @@ from pattern.model import DEFAULT_MD_OPTIONS, RAG_OUTPUTS, FieldDef, PatternDef,
 
 
 def pattern_to_rows(pattern: PatternDef) -> tuple[list[dict], list[dict]]:
-    sheet_rows = [{"use": True, "sheet_name": s.sheet_name, "required": s.required} for s in pattern.sheets]
+    sheet_rows = [{"use": True, "sheet_name": s.sheet_name} for s in pattern.sheets]
     field_rows = [
         {
             "use": True,
@@ -67,7 +67,7 @@ def rows_to_pattern(pattern_id: int, meta: dict, sheet_rows: list[dict], field_r
         version=meta.get("version", "v1"),
         description=meta.get("description", ""),
         image_processing=meta.get("image_processing", "none"),
-        sheets=[SheetDef(r["sheet_name"], r["required"]) for r in sheet_rows if r["use"]],
+        sheets=[SheetDef(r["sheet_name"]) for r in sheet_rows if r["use"]],
         fields=fields,
         title_fields=[n for n in dict.fromkeys(meta.get("title_fields") or []) if n in names],
         md_options={**DEFAULT_MD_OPTIONS, **(meta.get("md_options") or {})},

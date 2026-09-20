@@ -28,7 +28,7 @@ def _label(ws, coord, text, value_coord, value):
 
 def _pattern(*fields):
     return PatternDef(id=1, name="T", version="v1", description="", status="active", image_processing="none",
-                      sheets=[SheetDef("報告書", True)], fields=list(fields))
+                      sheets=[SheetDef("報告書")], fields=list(fields))
 
 
 def _field(ex, name):
