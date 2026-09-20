@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import unicodedata
 import zipfile
 from dataclasses import dataclass, field
@@ -54,6 +55,17 @@ REV_INFO = {
     "v2": ("Rev.2", "2024.04改訂"),
     "v3": ("Rev.3", "2025.07改訂"),
 }
+
+# Windows のファイル名に使えない文字
+_NG_CHARS = '.:/\\*?"<>|'
+
+
+def _version_dir(version: str) -> str:
+    """版ごとのサブフォルダ名（例: Rev.1・2019.10制定 → Rev1_2019制定）。"""
+    label, since = REV_INFO[version]
+    year, kind = since[:4], since.lstrip("0123456789.")     # 2019.10制定 → 2019 / 制定
+    return "".join(c for c in f"{label}_{year}{kind}" if c not in _NG_CHARS)
+
 
 THIN = Side(style="thin", color="000000")
 MEDIUM = Side(style="medium", color="000000")
@@ -1553,21 +1565,35 @@ def _readme(specs: list[FileSpec], records: list[Record]) -> str:
         "",
         "再生成: `python -m scripts.samples.f1_repair_report`（固定シードのため何度実行しても同一バイトのファイルになる）",
         "",
+        "## フォルダ構成",
+        "",
+        "様式の版ごとにサブフォルダを分けてある。各サブフォルダの中身は同じ版の .xlsx だけなので、",
+        "アプリの「帳票取り込み」にフォルダ1つ分をまとめて入れれば、帳票の種類とシートを1回選ぶだけで全ファイルを読み取れる。",
+        "",
+        "```",
+        FORM_DIR + "/",
+        "├─ _README.md        … この説明",
+        "├─ _expected.jsonl   … 抽出結果の正解データ（30行。file は版フォルダからのパス）",
+        *[f"{'└─' if v == 'v3' else '├─'} {_version_dir(v)}/   … {REV_INFO[v][0]}（{REV_INFO[v][1]}）の帳票 {cnt[v]} ファイル"
+          for v in ("v1", "v2", "v3")],
+        "```",
+        "",
         "## 様式の版（改訂履歴）",
         "",
-        "| 版 | layout_version | 制定・改訂 | ファイル数 | レイアウトの特徴 |",
-        "|---|---|---|---|---|",
-        f"| {REV_INFO['v1'][0]} | v1 | {REV_INFO['v1'][1]} | {cnt['v1']} | A〜H列。左ラベル・右値の2列組み（報告番号/報告日/管理No.、設備番号/設備名 …）。"
+        "| 版 | layout_version | 制定・改訂 | フォルダ | ファイル数 | レイアウトの特徴 |",
+        "|---|---|---|---|---|---|",
+        f"| {REV_INFO['v1'][0]} | v1 | {REV_INFO['v1'][1]} | `{_version_dir('v1')}/` | {cnt['v1']} | A〜H列。左ラベル・右値の2列組み（報告番号/報告日/管理No.、設備番号/設備名 …）。"
         "文章項目（故障内容・原因調査・原因・修理内容・修理結果・再発防止策・備考）は見出し行の下に複数行結合セル。"
         "承認欄（承認/確認/作成）は右上。重要度は「□重大　■大　□中　□小」のチェックボックス表記。日時は日付型セル＋表示形式。 |",
-        f"| {REV_INFO['v2'][0]} | v2 | {REV_INFO['v2'][1]} | {cnt['v2']} | A列を狭い余白にした B〜K列。ラベルは B:C結合＋値 D:F、右側は H＋I:K と列位置がズレる。"
+        f"| {REV_INFO['v2'][0]} | v2 | {REV_INFO['v2'][1]} | `{_version_dir('v2')}/` | {cnt['v2']} | A列を狭い余白にした B〜K列。ラベルは B:C結合＋値 D:F、右側は H＋I:K と列位置がズレる。"
         "項目名がファイルごとに揺れる（下表）。トラブルNo./設備番号/設備名の一部は「設備番号：CMP-101」のような1セル内ラベル。"
         "応急処置・影響ロット欄あり。日時・停止時間は文字列（例: R6.5.12、17.2h、17時間12分）。承認欄は下部右（承認/確認/担当 or 作成）。 |",
-        f"| {REV_INFO['v3'][0]} | v3 | {REV_INFO['v3'][1]} | {cnt['v3']} | A〜L列。上部は見出し行＋値行の表形式（報告番号・報告日・設備番号・設備名・ライン・重要度 / "
+        f"| {REV_INFO['v3'][0]} | v3 | {REV_INFO['v3'][1]} | `{_version_dir('v3')}/` | {cnt['v3']} | A〜L列。上部は見出し行＋値行の表形式（報告番号・報告日・設備番号・設備名・ライン・重要度 / "
         "発生日時・復旧日時・停止時間(分)・報告者・担当者・故障区分 / TR番号・アラーム・原因区分・対応状況）。"
         "文章項目は A列の縦書き・縦結合ラベル＋B:L結合セル。なぜなぜ分析・水平展開・廃棄枚数・修理費用・部品費計あり。承認欄は右上。 |",
         "",
-        "旧様式の使い続け: 改訂後の日付でも古い版のファイルが3件ある（Rev.2期間の Rev.1、Rev.3期間の Rev.1 と Rev.2）。",
+        "旧様式の使い続け: 改訂後の日付でも古い版のファイルが3件ある（Rev.2期間の Rev.1、Rev.3期間の Rev.1 と Rev.2）。"
+        "フォルダ分けは日付ではなく様式の版に合わせているため、この3件も版のフォルダに入っている。",
         "",
         "## 共通の体裁",
         "",
@@ -1610,16 +1636,17 @@ def _readme(specs: list[FileSpec], records: list[Record]) -> str:
         f"- シート名が「Sheet1」のまま: {files_with(lambda s, rc: s.default_sheet_name)}",
         "- 記入内容そのものの揺れ: 記入者ごとの書き癖（敬体、半角カナ、全角数字、①/(1)/1) の番号、誤変換）は domain.py 由来",
         "- 再発案件（備考に「TR-… の再発」）: " + files_with(lambda s, rc: s.inc.recurrence)
-        + "。うち前回トラブルの報告書も同じフォルダにあるもの: "
+        + "。うち前回トラブルの報告書もこのサンプルに含まれるもの: "
         + files_with(lambda s, rc: s.inc.recurrence and s.inc.related_incident_id in {x.inc.incident_id for x in specs}),
         "- ファイル名の付け方がばらばら（報告番号入り／日付入り／【重大】付き／_中間報告 付き）",
         "",
         "## _expected.jsonl",
         "",
-        "1行1ファイルの JSON（UTF-8）。",
+        "1行1ファイルの JSON（UTF-8）。`file` はこのフォルダからの相対パス"
+        f"（例: `{_version_dir(specs[0].version)}/{specs[0].filename}`）。",
         "",
         "```",
-        '{"file": ファイル名, "layout_version": "v1"|"v2"|"v3", "form_revision": "Rev.1" 等, "main_sheet": 報告書シート名,',
+        '{"file": 版フォルダ名/ファイル名, "layout_version": "v1"|"v2"|"v3", "form_revision": "Rev.1" 等, "main_sheet": 報告書シート名,',
         ' "values": {キー: 人が読むとおりの値（表示形式適用後の文字列。部品は行ごとの dict のリスト、写真はキャプションのリスト）},',
         ' "labels_used": {キー: そのファイルで実際に使われているラベル文字列（部品表の列名は parts.part_no 等）},',
         ' "sheets": 全シート名, "hidden_sheets": [...], "images": {シート名: 枚数}, "extra_sheets": {...},',
@@ -1645,14 +1672,25 @@ def generate(output_root: Path | None = None) -> list[Path]:
     root = Path(output_root) if output_root is not None else D.OUTPUT_ROOT
     out_dir = root / "forms" / FORM_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("*.xlsx"):   # 名前の変わった古い生成物を残さない（このフォルダは本スクリプト専用）
+    # 名前の変わった古い生成物を残さない（このフォルダは本スクリプト専用）。
+    # 版フォルダを使う前の直下の .xlsx と、今は作らない版フォルダも消す（_README.md / _expected.jsonl は残す）。
+    keep_dirs = {_version_dir(v) for v in REV_INFO}
+    for old in out_dir.glob("*.xlsx"):
         old.unlink()
+    for sub in sorted(p for p in out_dir.iterdir() if p.is_dir()):
+        if sub.name in keep_dirs:
+            for old in sub.glob("*.xlsx"):
+                old.unlink()
+        else:
+            shutil.rmtree(sub)
+    for name in sorted(keep_dirs):
+        (out_dir / name).mkdir(exist_ok=True)
 
     specs = _file_specs()
     records, paths = [], []
     for spec in specs:
         wb, rec = _build_workbook(spec)
-        path = out_dir / spec.filename
+        path = out_dir / _version_dir(spec.version) / spec.filename
         _save_deterministic(wb, path)
         rec_sheets = wb.sheetnames
         records.append((rec, rec_sheets))
@@ -1662,7 +1700,7 @@ def generate(output_root: Path | None = None) -> list[Path]:
     with exp_path.open("w", encoding="utf-8", newline="\n") as fp:
         for spec, (rec, sheets) in zip(specs, records):
             obj = {
-                "file": spec.filename,
+                "file": f"{_version_dir(spec.version)}/{spec.filename}",   # 帳票フォルダからの相対パス
                 "layout_version": spec.version,
                 "form_revision": REV_INFO[spec.version][0],
                 "main_sheet": rec.main_sheet,

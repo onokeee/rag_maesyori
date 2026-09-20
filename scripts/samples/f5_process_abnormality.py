@@ -3,8 +3,10 @@
     python -m scripts.samples.f5_process_abnormality
 
 samples/forms/F5_工程異常連絡票/ に以下を書き出す。
-- Excel帳票 30 ファイル（A4縦 Rev.3 と A3横 Rev.1/Rev.2 の2レイアウト）
-- _expected.jsonl : ファイルごとの正解値（人が読んだ値）と、そのファイルで使われているラベル文字列
+- 版ごとのフォルダ（A3横_Rev1_2023以前 / A3横_Rev2_2024改訂 / A4縦_Rev3_2024改訂）に Excel帳票 30 ファイル。
+  1つのフォルダの中は様式・シート構成がそろっているので、そのまま「帳票取り込み」へまとめて投入できる。
+- _expected.jsonl : ファイルごとの正解値（人が読んだ値）と、そのファイルで使われているラベル文字列。
+  `file` は本フォルダからの相対パス（`A4縦_Rev3_2024改訂/....xlsx`、区切りは `/`）。
 - _README.md      : テンプレート・版の違い・意図的に入れた「ゆれ」の説明
 
 元データは domain.standard_incidents() のうち lots_affected（影響ロット）のあるトラブル。
@@ -41,6 +43,13 @@ from . import domain as D
 # 基本設定
 # ---------------------------------------------------------------------------
 FORM_FOLDER = "F5_工程異常連絡票"
+# 様式の版ごとのフォルダ。同じフォルダの中は様式・シート構成がそろっており、まとめて取り込める。
+# 名前は README の版（layout_version）そのままに使用開始時期を足したもの（Windows で使えない文字「. : / \ * ? " < > |」は使わない）
+VERSION_FOLDERS = {
+    "A3横_Rev.1": "A3横_Rev1_2023以前",
+    "A3横_Rev.2": "A3横_Rev2_2024改訂",
+    "A4縦_Rev.3": "A4縦_Rev3_2024改訂",
+}
 N_FILES = 30
 SNAPSHOT_DATE = date(2026, 8, 31)          # 帳票フォルダを保存した時点（これより後の回答は存在しない）
 REV3_START = date(2024, 10, 1)             # A4縦 Rev.3 への改訂日
@@ -1614,6 +1623,7 @@ def _readme(rows: list[dict]) -> str:
     from collections import Counter
 
     ver = Counter(x["layout_version"] for x in rows)
+    fol = Counter(x["file"].split("/")[0] for x in rows)
     ans = Counter(x["answer_status"] for x in rows)
     flags = Counter(f for x in rows for f in x["irregularities"])
     lines = [
@@ -1622,19 +1632,38 @@ def _readme(rows: list[dict]) -> str:
         "`python -m scripts.samples.f5_process_abnormality` で生成（固定シード・再実行でバイト一致）。",
         "元データは `scripts/samples/domain.py` の `standard_incidents()` のうち影響ロット（`lots_affected`）があるトラブル30件。",
         "",
+        "## フォルダの構成",
+        "様式の版ごとにフォルダを分けてある。**1つのフォルダの中は同じ版（同じ様式・同じシート構成）の .xlsx だけ**なので、"
+        "アプリの「帳票取り込み」にフォルダまるごと投入し、帳票の種類とシートを1回選ぶだけで、そのフォルダの全ファイルをまとめて読み取れる。",
+        "",
+        "```",
+        "F5_工程異常連絡票/",
+        "├ _README.md          ← このファイル",
+        "├ _expected.jsonl     ← 正解値（1行1ファイル）",
+    ]
+    folders = [n for n in VERSION_FOLDERS.values() if fol.get(n)]
+    lines += [f"{'└' if i == len(folders) - 1 else '├'} {name}/   … {fol[name]}ファイル（.xlsx のみ）"
+              for i, name in enumerate(folders)]
+    lines += [
+        "```",
+        "",
+        f"`_expected.jsonl` の `file` は、この帳票フォルダからの相対パス（例 `{rows[-1]['file']}`、区切りは `/`）。",
+        "",
         "## 帳票の運用想定",
         "- 異常を見つけた部署（製造課の各班・生産技術課・品質保証課）が起票し、原因部署（主に設備保全課の各係、設定起因なら生産技術課、人為なら製造課）へ発行する。",
         "- 上段／左側が発行部署の記入欄、下段／右側が宛先（受信）部署の回答欄。回答欄は **ＭＳ 明朝・紺色** で記入され、発行側（ＭＳ Ｐゴシック・黒）と書式が異なる。",
         "- 回答後、品質保証課が効果確認・クローズ判定を行う。押印欄は赤字の「姓＋日付(M/D)」。",
         "",
         "## レイアウト（版）",
-        "| layout_version | 用紙 | 使用期間 | 構成 |",
-        "|---|---|---|---|",
-        "| A3横_Rev.1 | A3横 | 〜2023/12 | 左：発行部署欄、右：【回答欄】。ラベルが旧名称（No.／発行元／発行先／不具合内容／推定原因／処置／処置方法／流出／回答期日／真因／応急処置／再発防止策） |",
-        "| A3横_Rev.2 | A3横 | 2024/01〜2024/09 | Rev.1 と同配置でラベルを改称（管理番号／発信部署／受信部署／異常の内容／発生原因（推定）／処置区分／処置の内容／流出有無／回答希望日／発生原因（確定）／暫定対策／恒久対策）。なぜなぜ分析5段・品証コメント・設備トラブル報告No.欄は Rev.1 から共通。Rev.3 改訂後も一部の班が使い続けている |",
-        "| A4縦_Rev.3 | A4縦 | 2024/10〜 | 方眼紙（36列）のコンパクト版。回答欄は下段。連絡No.は `PA-YYYY-NNNN`（旧版は `工異YY-NNN`）。ロット表は4行、なぜなぜは1セル |",
+        "版ごとに下の「フォルダ」へ入れてある。フォルダ名は版の名前＋使用開始時期。",
         "",
-        f"件数: " + "、".join(f"{k} {v}件" for k, v in sorted(ver.items())) + "（Rev.3 改訂後も旧様式で起票された例を含む）",
+        "| layout_version | フォルダ | 用紙 | 使用期間 | 構成 |",
+        "|---|---|---|---|---|",
+        "| A3横_Rev.1 | `A3横_Rev1_2023以前/` | A3横 | 〜2023/12 | 左：発行部署欄、右：【回答欄】。ラベルが旧名称（No.／発行元／発行先／不具合内容／推定原因／処置／処置方法／流出／回答期日／真因／応急処置／再発防止策） |",
+        "| A3横_Rev.2 | `A3横_Rev2_2024改訂/` | A3横 | 2024/01〜2024/09 | Rev.1 と同配置でラベルを改称（管理番号／発信部署／受信部署／異常の内容／発生原因（推定）／処置区分／処置の内容／流出有無／回答希望日／発生原因（確定）／暫定対策／恒久対策）。なぜなぜ分析5段・品証コメント・設備トラブル報告No.欄は Rev.1 から共通。Rev.3 改訂後も一部の班が使い続けている |",
+        "| A4縦_Rev.3 | `A4縦_Rev3_2024改訂/` | A4縦 | 2024/10〜 | 方眼紙（36列）のコンパクト版。回答欄は下段。連絡No.は `PA-YYYY-NNNN`（旧版は `工異YY-NNN`）。ロット表は4行、なぜなぜは1セル |",
+        "",
+        f"件数（＝各フォルダのファイル数）: " + "、".join(f"{k} {v}件" for k, v in sorted(ver.items())) + "（Rev.3 改訂後も旧様式で起票された例を含む）",
         "",
         "回答状況: " + "、".join(f"{k} {v}件" for k, v in sorted(ans.items())),
         "",
@@ -1675,6 +1704,7 @@ def _readme(rows: list[dict]) -> str:
         "",
         "## _expected.jsonl",
         "1行1ファイル: `{\"file\", \"layout_version\", \"source_incident_id\", \"answer_status\", \"images\", \"irregularities\", \"values\", \"labels_used\"}`。",
+        f"- `file` は版フォルダを含む相対パス（`{rows[0]['file']}`）。区切りは `/` 固定で、Windows でもそのまま `フォルダ / file` で開ける。",
         "- `values` は人が帳票を見て読み取る値（表示どおりの文字列）。ロット・処置区分・なぜなぜはリスト。未記入欄は空文字。",
         "- 押印欄（approver / checker / creator / answer_* / qa_check）は姓のみ（押印日は含めない）。",
         "- キー名は他帳票（F1〜F3）とそろえ、発行者（発信者）は `reporter`、設備トラブル報告No. は `related_incident_id`、影響ロットは `lots`。"
@@ -1699,9 +1729,14 @@ def generate(output_root: Path | None = None) -> list[Path]:
     root = Path(output_root) if output_root is not None else D.OUTPUT_ROOT
     out_dir = root / "forms" / FORM_FOLDER
     out_dir.mkdir(parents=True, exist_ok=True)
-    for old in list(out_dir.glob("*.xlsx")) + [out_dir / "_expected.jsonl", out_dir / "_README.md"]:
+    # 前回の生成物を消す。版フォルダの中の .xlsx も消し、空になった版フォルダ自体も消す
+    # （版の名前を変えたときに古いフォルダが残らないようにする）。_README.md と _expected.jsonl は下で作り直す。
+    for old in list(out_dir.rglob("*.xlsx")) + [out_dir / "_expected.jsonl", out_dir / "_README.md"]:
         if old.exists():
             old.unlink()
+    for sub in sorted((p for p in out_dir.rglob("*") if p.is_dir()), key=lambda p: -len(p.parts)):
+        if not any(sub.iterdir()):
+            sub.rmdir()
 
     incs = select_incidents()
     # 連絡No.の連番: 影響ロットのあるトラブルのうち約半数が連絡票になった想定で、年内の通し番号を振る
@@ -1747,25 +1782,27 @@ def generate(output_root: Path | None = None) -> list[Path]:
             rec.due = _next_weekday(rec.report_date + timedelta(days=10))
             rec.flags.append("Rev.3改訂後に旧様式(A3横Rev.2)で起票")
         wb, V, L, n_img = (_render_a if rec.version == "A" else _render_b)(rec, r)
+        layout = "A4縦_Rev.3" if rec.version == "A" else f"A3横_{rec.rev}"
+        folder = VERSION_FOLDERS[layout]
         name = _file_name(rec, r)
         while name in used_names:
             name = name.replace(".xlsx", "_2.xlsx")
         used_names.add(name)
-        path = out_dir / name
+        (out_dir / folder).mkdir(parents=True, exist_ok=True)
+        path = out_dir / folder / name
         created = datetime.combine(rec.report_date, datetime.min.time()) + timedelta(hours=9, minutes=r.randint(0, 480))
         modifier = rec.answerer if rec.answer_state != "未回答" else ""
         if modifier and " " not in modifier:
             modifier = next((p.name for p in D.people() if p.name.startswith(modifier.split("（")[0])), modifier)
         _save_deterministic(wb, path, created, rec.issuer.name, modifier.split("（")[0])
         paths.append(path)
-        layout = "A4縦_Rev.3" if rec.version == "A" else f"A3横_{rec.rev}"
         if rec.answer_state == "一部回答":
             rec.flags.append("回答欄が一部のみ記入（保留案件）")
         elif rec.answer_state == "未回答":
             rec.flags.append("回答欄が空（未回答）")
         if len({x.lot[:2] for x in rec.lots}) > 1:
             rec.flags.append("複数品種ロットで品名・品番が「複数」表記")
-        rows.append(dict(file=name, layout_version=layout, source_incident_id=inc.incident_id, answer_status=rec.answer_state,
+        rows.append(dict(file=f"{folder}/{name}", layout_version=layout, source_incident_id=inc.incident_id, answer_status=rec.answer_state,
                          images=n_img, irregularities=list(dict.fromkeys(rec.flags)),
                          values=V, labels_used={k: L[k] for k in V if k in L}))
 
@@ -1781,4 +1818,4 @@ if __name__ == "__main__":
 
     t0 = time.time()
     written = generate()
-    print(f"{len(written)} files written to {written[0].parent}  ({time.time() - t0:.1f}s)")
+    print(f"{len(written)} files written to {written[-1].parent}  ({time.time() - t0:.1f}s)")

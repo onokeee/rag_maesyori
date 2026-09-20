@@ -178,6 +178,7 @@ Markdown はサーバーの設定に関わらず読めるように作ります�
 
 - `python scripts/make_samples.py` … 小さな帳票の見本（修理報告書3種・点検記録表）を `samples/` に作ります（テストでも使います）。
 - `python scripts/generate_samples.py` … 動作確認用の大きなサンプル（帳票 F1〜F5、一覧表 T1〜T5）を作ります。内容は [samples/README.md](samples/README.md) と `samples/tables/*_README.md` を参照してください。T3（月別のクロス集計）は現在の範囲では取り込めません。
+- 帳票のサンプルは**様式の版ごとにフォルダが分かれています**（`samples/forms/<様式>/<版>/*.xlsx`。例: `F1_設備修理報告書/Rev1_2019制定/`）。版フォルダの中身は .xlsx だけなので、フォルダを1つそのまま帳票取り込みに置けば、帳票の種類とシートを1回選ぶだけでまとめて読めます。`_README.md` と `_expected.jsonl` は様式フォルダの直下にあります。
 
 ## 注意
 

@@ -5,6 +5,8 @@
 - 正準トラブル履歴（domain.standard_incidents）から、なぜなぜ分析があり重要度「中」以上の案件を30件選ぶ。
 - 様式は2版。報告日が 2025/04/01 より前は「旧様式 Rev.3」（方眼紙レイアウト・押印欄が右上）、
   以降は「新様式 Rev.5」（ラベル左・値右の表形式・承認欄が末尾）。移行後も旧様式を使い回した報告を2件混ぜる。
+- xlsx は様式の版ごとのサブフォルダ（旧様式Rev3_2025年03月まで／新様式Rev5_2025年04月改訂）に分けて出力する。
+  1つのフォルダの中は同じ様式だけなので、フォルダごと帳票取り込みにまとめて投入できる。
 - 各ファイルの正解値を _expected.jsonl に、様式説明と意図的なゆらぎを _README.md に書き出す。
 - 乱数は domain.rng() からのみ取り、xlsx の zip タイムスタンプ・文書プロパティも固定するため、
   再実行してもバイト単位で同一のファイルになる。
@@ -15,6 +17,7 @@ import io
 import json
 import math
 import re
+import shutil
 import time as _time
 import unicodedata
 import zipfile
@@ -45,6 +48,12 @@ SEV_QUOTA = {"重大": 6, "大": 12, "中": 12}
 N_PHOTO_FILES = 12
 
 OLD, NEW = "旧様式Rev.3", "新様式Rev.5"
+
+# 様式の版ごとのフォルダ（1フォルダ＝1様式。フォルダごと帳票取り込みにまとめて投入できるようにする）
+VERSION_DIR = {
+    OLD: "旧様式Rev3_2025年03月まで",
+    NEW: "新様式Rev5_2025年04月改訂",
+}
 
 # 様式ごとの項目ラベル（_expected.jsonl の labels_used にもそのまま使う）
 LABELS = {
@@ -1887,6 +1896,17 @@ def _readme(reports: list[Report]) -> str:
         "`python -m scripts.samples.f2_trouble_report` で再生成できます（固定シードのため毎回同一のファイル）。",
         "元データは `scripts/samples/domain.py` の正準トラブル履歴で、なぜなぜ分析があり重要度が「中」以上の案件から30件を選んでいます。",
         "",
+        "## フォルダの構成",
+        "",
+        "xlsx は**様式の版ごとにフォルダを分けて**います。1つのフォルダの中は同じ様式だけなので、"
+        "フォルダごと帳票取り込みにドロップすれば、帳票の種類とシートを1回決めるだけで全ファイルをまとめて読み取れます。",
+        "",
+        f"- `{VERSION_DIR[OLD]}/` … 旧様式 Rev.3 の {n_old} ファイル"
+        "（うち2件は2025/04以降の報告で旧様式テンプレートを使い回したもの）",
+        f"- `{VERSION_DIR[NEW]}/` … 新様式 Rev.5 の {n_new} ファイル",
+        "",
+        "`_README.md`（このファイル）と `_expected.jsonl` は版フォルダの外、帳票フォルダの直下に置いています。",
+        "",
         "## 帳票の構成",
         "",
         "1. ヘッダ: 件名／管理No／作成日／発生日時／復旧日時／発見者／作成者／設備／対応者／重要度／故障区分／原因区分",
@@ -1905,6 +1925,7 @@ def _readme(reports: list[Report]) -> str:
         "",
         "| 項目 | 旧様式 Rev.3（〜2025/03） | 新様式 Rev.5（2025/04〜） |",
         "|---|---|---|",
+        f"| フォルダ | `{VERSION_DIR[OLD]}/` | `{VERSION_DIR[NEW]}/` |",
         "| レイアウト | 36列の方眼紙。見出し行の下に本文 | B〜K列の表形式。ラベル左・値右 |",
         "| フォント | ＭＳ Ｐゴシック 10pt | Meiryo UI 10pt |",
     ]
@@ -1945,6 +1966,7 @@ def _readme(reports: list[Report]) -> str:
         "",
         "1行が1ファイルで、`file` / `layout_version` / `values` / `labels_used` / `irregularities` を持つ。",
         "",
+        "- `file`: この帳票フォルダからの相対パス（`版フォルダ名/ファイル名.xlsx`、区切りは `/`）。並びは下の「ファイル一覧」と同じ。",
         "- `values`: 人が帳票を読んで取り出す値。文章・日付は **Excel に表示されている文字列そのまま**（日付セルは表示形式を適用した文字列、"
         "例 旧様式 `2023/8/24 16:06`・`R5.8.24 16:06`・押印欄 `8/29`、新様式 `2025/04/28 16:06`）。",
         "- 日付・日時には、年を補って ISO 形式（`YYYY-MM-DD` / `YYYY-MM-DD HH:MM`）にした値を `*_norm` キーで併記する"
@@ -1965,12 +1987,14 @@ def _readme(reports: list[Report]) -> str:
         "",
         "## ファイル一覧",
         "",
+        "「ファイル」は帳票フォルダからの相対パス（`版フォルダ名/ファイル名.xlsx`）で、`_expected.jsonl` の `file` と同じです。",
+        "",
         "| ファイル | 様式 | 設備 | 重要度 | 状態 | 写真 |",
         "|---|---|---|---|---|---|",
     ]
     for x in reports:
-        lines.append(f"| {x.file_name} | {x.version} | {x.inc.equipment.equipment_id} | {x.inc.severity} | {x.inc.status} | "
-                     f"{len(x.photos) if x.photos else '-'} |")
+        lines.append(f"| {VERSION_DIR[x.version]}/{x.file_name} | {x.version} | {x.inc.equipment.equipment_id} | "
+                     f"{x.inc.severity} | {x.inc.status} | {len(x.photos) if x.photos else '-'} |")
     return "\n".join(lines) + "\n"
 
 
@@ -1981,8 +2005,18 @@ def generate(output_root: Path | None = None) -> list[Path]:
     root = Path(output_root) if output_root else D.OUTPUT_ROOT
     out_dir = root / "forms" / FOLDER
     out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("*.xlsx"):
+    # 名前を変えたファイルや、作らなくなった版のフォルダが残らないように掃除する（_README.md と _expected.jsonl は残す）
+    keep_dirs = set(VERSION_DIR.values())
+    for old in out_dir.glob("*.xlsx"):          # 版フォルダに分ける前の出力の残り
         old.unlink()
+    for sub in out_dir.iterdir():
+        if not sub.is_dir():
+            continue
+        if sub.name in keep_dirs:
+            for old in sub.glob("*.xlsx"):
+                old.unlink()
+        else:
+            shutil.rmtree(sub)
     reports = build_reports()
     written: list[Path] = []
     expected = []
@@ -1991,10 +2025,12 @@ def generate(output_root: Path | None = None) -> list[Path]:
         wb.properties.creator = x.writer.name
         wb.properties.lastModifiedBy = x.checker.name if x.checked_on else x.writer.name
         wb.properties.title = x.title
-        path = out_dir / x.file_name
+        rel = f"{VERSION_DIR[x.version]}/{x.file_name}"      # _expected.jsonl はフォルダからの相対パスで持つ
+        path = out_dir / VERSION_DIR[x.version] / x.file_name
+        path.parent.mkdir(exist_ok=True)
         _save_deterministic(wb, path, datetime.combine(x.report_date, time(17, 30)))
         written.append(path)
-        expected.append(dict(file=x.file_name, layout_version=x.version, values=meta["values"],
+        expected.append(dict(file=rel, layout_version=x.version, values=meta["values"],
                              labels_used={k: v for k, v in meta["labels"].items() if k in meta["values"]},
                              irregularities=x.irregularities))
     exp_path = out_dir / "_expected.jsonl"

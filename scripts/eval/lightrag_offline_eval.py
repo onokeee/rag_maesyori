@@ -77,7 +77,10 @@ def generate_forms(out: Path) -> None:
         for i, e in enumerate(entries, start=1):
             info = infos[e["file"]]
             extraction = extract_document(info, pattern, match_pattern(info, pattern).sheet_names)
-            doc = {"id": i, "file_name": e["file"], "file_hash": hashlib.sha256((folder / e["file"]).read_bytes()).hexdigest()}
+            # file_name はアプリが受け取る名前（置かれたファイルの名前）に合わせる。
+            # _expected.jsonl の "file" は「版フォルダ名/ファイル名」なので、最後の要素だけを使う
+            doc = {"id": i, "file_name": Path(e["file"]).name,
+                   "file_hash": hashlib.sha256((folder / e["file"]).read_bytes()).hexdigest()}
             text = build_markdown(doc, extraction)
             name = markdown_filename(doc, extraction)
             used[name] += 1

@@ -7,6 +7,8 @@
 
 - 30件のうち 1/3 は顧客クレーム起点（顧客名・クレームNo・不良数量つき）の様式
 - 様式は「2シート（8D報告(1)/(2)）」と「1シート縦長」、方眼紙レイアウトと列レイアウトが混在
+- ファイルは様式の版ごとのサブフォルダ（VERSION_DIRS）に分けて出力する。1フォルダ＝同じ様式・同じシート構成なので、
+  フォルダごと帳票取り込みに入れれば帳票の種類とシートを1回選ぶだけで全部読み取れる
 - D1〜D8 の見出しは日本語名あり／なし（"D1" のみ）など、ファイルごとに表記がゆれる
 - D6 の対策前後データは、正準データ上の同一設備・同一サブシステムの発生件数やチョコ停件数から実際に数える
 - 抽出精度の検証用に、各ファイルの「人が読んだときの値」と「使われたラベル文字列」を _expected.jsonl に書く
@@ -21,6 +23,7 @@ import math
 import re
 import unicodedata
 import zipfile
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from functools import lru_cache
@@ -1497,6 +1500,17 @@ class Style:
 
 _FONTS = [("ＭＳ Ｐゴシック", 10), ("游ゴシック", 10), ("Meiryo UI", 9.5), ("ＭＳ ゴシック", 10), ("BIZ UDPゴシック", 10)]
 
+# 様式の版ごとの出力先サブフォルダ。「版の呼び名（Windowsで使えない "." は外す）＋その版が使われ始めた年」。
+# 年は改訂履歴シート（_history_sheet）の改訂日に合わせている。
+# 1つのフォルダの中は同じ様式・同じシート構成のファイルだけなので、フォルダごと帳票取り込みに入れて一括で読み取れる。
+VERSION_DIRS = {
+    "QA-F-021_Rev.3_2sheet_hougan": "QA-F-021_Rev3_2sheet_hougan_2023改訂",
+    "QA-F-021_Rev.3_1sheet_hougan": "QA-F-021_Rev3_1sheet_hougan_2023改訂",
+    "QA-F-021_Rev.2_1sheet_cols": "QA-F-021_Rev2_1sheet_cols_2021改訂",
+    "QA-F-022_Rev.1_2sheet_hougan": "QA-F-022_Rev1_2sheet_hougan_2020制定",
+    "QA-F-022_Rev.2_1sheet_cols": "QA-F-022_Rev2_1sheet_cols_2024改訂",
+}
+
 
 def _make_style(idx: int, claim: bool, plan_rank: int) -> Style:
     r = D.rng(f"f3_8d:style:{idx}")
@@ -2272,8 +2286,12 @@ def _readme(entries: list[dict], styles: list[Style]) -> str:
         "",
         "## 様式バージョン（layout_version）",
         "",
-        "| layout_version | 件数 | 特徴 |",
-        "|---|---|---|",
+        "様式の版ごとにサブフォルダを分けてある（サブフォルダの中は .xlsx だけ）。",
+        "1つのフォルダの中は同じ様式・同じシート構成のファイルなので、フォルダごと `帳票取り込み` に入れれば、",
+        "帳票の種類と読み取るシートを1回選ぶだけで、そのフォルダのファイルをまとめて読み取れる。",
+        "",
+        "| フォルダ | layout_version | 件数 | 特徴 |",
+        "|---|---|---|---|",
     ]
     desc = {
         "QA-F-021_Rev.3_2sheet_hougan": "社内用の現行版。方眼紙（36列）、見出し帯。「8D報告(1)」にヘッダ〜D4、「8D報告(2)」にD5〜D8",
@@ -2283,7 +2301,7 @@ def _readme(entries: list[dict], styles: list[Style]) -> str:
         "QA-F-022_Rev.2_1sheet_cols": "顧客クレーム用の顧客提出版。列レイアウト・1シート",
     }
     for k, v in sorted(lv.items()):
-        lines.append(f"| `{k}` | {v} | {desc.get(k, '')} |")
+        lines.append(f"| `{VERSION_DIRS[k]}/` | `{k}` | {v} | {desc.get(k, '')} |")
     lines += [
         "",
         f"顧客クレーム様式は {sum(s.claim for s in styles)} 件（全体の1/3）。顧客名・製品名はすべて架空。",
@@ -2321,8 +2339,9 @@ def _readme(entries: list[dict], styles: list[Style]) -> str:
         "",
         "## _expected.jsonl",
         "",
-        "1行1ファイル: `{\"file\", \"layout_version\", \"values\", \"labels_used\"}`。",
+        "1行1ファイル: `{\"file\", \"layout_version\", \"values\", \"labels_used\"}`。`_expected.jsonl` はこのフォルダ直下に置く。",
         "",
+        "- `file` はこのフォルダからの相対パス（`版フォルダ/ファイル名.xlsx`。区切りは `/`）",
         "- `values` は人が画面で読む表示どおりの文字列（日付セルは表示形式を適用した文字列、停止時間は `1,032分` など）",
         "- 表の項目（`team_members` `containment_actions` `countermeasure_candidates` `permanent_actions` `effect_data` `standard_docs`）は、列見出しをキーにした行dictのリスト。様式の空行は含まない",
         "- `why_why` と `photo_captions` は文字列のリスト",
@@ -2332,7 +2351,7 @@ def _readme(entries: list[dict], styles: list[Style]) -> str:
         "",
         "## ファイル一覧",
         "",
-        "| ファイル | layout_version | 設備 | 関連トラブル | ステータス |",
+        "| ファイル（版フォルダ/ファイル名） | layout_version | 設備 | 関連トラブル | ステータス |",
         "|---|---|---|---|---|",
     ]
     for e in entries:
@@ -2348,8 +2367,17 @@ def generate(output_root: Path | None = None) -> list[Path]:
     root = Path(output_root) if output_root is not None else D.OUTPUT_ROOT
     out_dir = root / "forms" / FOLDER
     out_dir.mkdir(parents=True, exist_ok=True)
+    # 古いファイルの掃除（ファイル名や版フォルダを変えても前回の出力が残らないように）。
+    # 版フォルダの中まで消し、いまは作らない版のフォルダは空にしたうえで削除する。_README.md と _expected.jsonl は残す。
+    keep_dirs = set(VERSION_DIRS.values())
     for old in out_dir.glob("*.xlsx"):
         old.unlink()
+    for sub in sorted(p for p in out_dir.iterdir() if p.is_dir()):
+        for old in sub.glob("*.xlsx"):
+            old.unlink()
+        if sub.name not in keep_dirs:
+            with suppress(OSError):     # 中身が空になったときだけ消える
+                sub.rmdir()
     plans = _plans()
     docs = _DocRegistry()
     entries, styles, paths = [], [], []
@@ -2368,13 +2396,16 @@ def generate(output_root: Path | None = None) -> list[Path]:
         if name in names_used:
             name = name.replace(".xlsx", f"_{idx:02d}.xlsx")
         names_used.add(name)
-        path = out_dir / name
+        sub = VERSION_DIRS[st.layout_version]          # 様式の版ごとにサブフォルダを分ける
+        path = out_dir / sub / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         rd = C["report_date"].v
         _save_deterministic(wb, path, datetime(rd.year, rd.month, rd.day, 17, 30))
         labels = {k: v for k, v in rec.labels.items() if not k.startswith("section_")}
         for i in range(8):
             labels[f"section_d{i + 1}"] = rec.labels[f"section_d{i + 1}"]
-        entries.append(dict(file=name, layout_version=st.layout_version, values=rec.values, labels_used=labels))
+        # file はこのフォルダからの相対パス（区切りは "/"。評価スクリプトが folder / e["file"] で開く）
+        entries.append(dict(file=f"{sub}/{name}", layout_version=st.layout_version, values=rec.values, labels_used=labels))
         styles.append(st)
         paths.append(path)
     exp = out_dir / "_expected.jsonl"

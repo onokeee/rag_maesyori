@@ -206,12 +206,12 @@ IME誤変換・「確認確認」のような重複入力、対応中の行は�
 非表示のリストシート、改訂履歴シート、対策前後の写真、全角数字。""",
     "F4": """\
 **目的**: 定期点検・予防保全・事後保全の作業報告書。20〜40行のチェックシート（基準値・測定値・判定）を含む。
-**形式**: xlsx 30ファイル（v1 A4縦 18 / v2 A4横 12）＋ `_expected.jsonl` ＋ `_README.md`。トレンドシート12（うちグラフ6）。
+**形式**: xlsx 30ファイル（Rev.1 A4縦 14 / Rev.2 A4横 16）＋ `_expected.jsonl` ＋ `_README.md`。トレンドシート12（うちグラフ6）。
 **意図的な揺れ**: 1表 / 左右2表のチェックシート、表ごとに違う列見出し、〃、固定行数テンプレートの空行、チェックボックス表記（■定期点検 □予防保全）、
 非表示列（前回値）、全角数字、測定値空欄で判定○、数値項目に「OK」、○の異体字（◯ / 〇）、承認欄の空欄、旧様式の継続使用。""",
     "F5": """\
 **目的**: 製造・生技から保全への工程異常連絡票（発行側と回答側の2部構成）。欠陥マップ画像を含む。
-**形式**: xlsx 30ファイル（A4縦 Rev.3 16 / A3横 Rev.2 8 / A3横 Rev.1 6）＋ `_expected.jsonl` ＋ `_README.md`。
+**形式**: xlsx 30ファイル（A4縦 Rev.3 14 / A3横 Rev.2 10 / A3横 Rev.1 6）＋ `_expected.jsonl` ＋ `_README.md`。
 **意図的な揺れ**: 回答欄の位置（下 / 右）と版ごとの項目名、回答欄の空欄・一部回答、督促メモ、■/□ のチェックボックス（■と選択肢が別セル）、
 日付セルと文字日付（R6.8.25 / 24/8/25）、設備IDと名称が同じセル、数量の文字列化、キャッシュ値のない =SUM()、
 ロット一覧の別シート、1セルに「回答日：…　回答部署：…」、縦書きラベル、Sheet1 のままのシート名、記入要領シートの残存。""",
@@ -219,7 +219,11 @@ IME誤変換・「確認確認」のような重複入力、対応中の行は�
 
 
 def _inventory_rows(out_root: Path) -> list[tuple[str, int, int]]:
-    """出力先の tables/ と forms/<様式>/ のファイル一覧（相対パス, ファイル数, バイト数）。"""
+    """出力先の tables/ と forms/<様式>/ のファイル一覧（相対パス, ファイル数, バイト数）。
+
+    帳票の .xlsx は様式の版ごとのフォルダに入っているので、版フォルダを1行ずつ出す
+    （`forms/<様式>/<版>/*.xlsx`）。`_README.md` と `_expected.jsonl` は様式フォルダの直下。
+    """
     rows = []
     tables = out_root / "tables"
     if tables.is_dir():
@@ -231,9 +235,11 @@ def _inventory_rows(out_root: Path) -> list[tuple[str, int, int]]:
         for d in sorted(forms.iterdir()):
             if not d.is_dir():
                 continue
-            xlsx = sorted(d.glob("*.xlsx"))
-            if xlsx:
-                rows.append((f"forms/{d.name}/*.xlsx", len(xlsx), sum(p.stat().st_size for p in xlsx)))
+            for sub in sorted(p for p in d.iterdir() if p.is_dir()):
+                xlsx = sorted(sub.glob("*.xlsx"))
+                if xlsx:
+                    rows.append((f"forms/{d.name}/{sub.name}/*.xlsx", len(xlsx),
+                                 sum(p.stat().st_size for p in xlsx)))
             for name in ("_expected.jsonl", "_README.md"):
                 if (d / name).exists():
                     rows.append((f"forms/{d.name}/{name}", 1, (d / name).stat().st_size))
@@ -300,9 +306,26 @@ def write_manifest(out_root: Path) -> Path:
         folder = "tables/" if g.kind == "table" else "forms/<様式>/"
         add(f"詳細は `{folder}` の README を参照。")
         add("")
+    add("## 帳票フォルダの構成")
+    add("")
+    add("帳票（F1〜F5）の .xlsx は**様式の版ごとのフォルダ**に分かれている。版フォルダの中身は .xlsx だけなので、")
+    add("フォルダを1つそのまま「帳票取り込み」に置けば、帳票の種類とシートを1回選ぶだけで全部読める。")
+    add("`_README.md` と `_expected.jsonl` は様式フォルダの直下に置いたまま。")
+    add("")
+    add("```")
+    add("forms/<様式>/_README.md")
+    add("forms/<様式>/_expected.jsonl")
+    add("forms/<様式>/<版>/*.xlsx        ← 例: F1_設備修理報告書/Rev1_2019制定/")
+    add("```")
+    add("")
+    add("版フォルダの名前は各生成モジュールが版の呼び方から作る（F1・F4 は `Rev1_2019制定` のような改訂の表記、")
+    add("F2 は `旧様式Rev3_2025年03月まで`、F3 は様式番号とレイアウト、F5 は用紙サイズを含む）。")
+    add("版ごとの件数は上の「ファイル」の表と各 `_README.md` を参照。")
+    add("")
     add("## 帳票の正解データ（`_expected.jsonl`）")
     add("")
-    add("帳票フォルダ（F1〜F5）には1ファイル1行の正解データがある。共通キーは `file`（ファイル名）、`layout_version`（様式の版）、")
+    add("帳票フォルダ（F1〜F5）には1ファイル1行の正解データがある。共通キーは `file`（**版フォルダ名／ファイル名** の相対パス。")
+    add("区切りは `/`）、`layout_version`（様式の版）、")
     add("`values`（項目キー → Excelに表示されている値。リストや表は配列）、`labels_used`（そのファイルで実際に使われたラベル文字列）。")
     add("値は原則として Excel の表示どおり（全角数字や和暦もそのまま）。キー名は F1〜F5 で揃えてある")
     add("（`report_id` `equipment_id` `equipment_name` `occurred_at` `reporter` `symptom` `cause` `action` `result` `prevention` など）。")

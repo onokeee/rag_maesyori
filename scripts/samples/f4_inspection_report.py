@@ -17,7 +17,9 @@
 - 予防保全の前倒し交換: 持病のある号機のトラブル後、同じ部位の部品を前倒しで交換
 一部のファイルには2枚目のシートに「過去6回の測定値」の傾向管理表（折れ線グラフ付きのものもある）を付ける。
 
-あわせて、抽出結果の正解データ _expected.jsonl と説明 _README.md を書き出す。
+ファイルは様式の版ごとのフォルダ（Rev1_2018制定 / Rev2_2025改訂）に分けて書き出す。
+フォルダの中は .xlsx だけなので、フォルダごと「帳票取り込み」に入れればまとめて読み取れる。
+あわせて、帳票フォルダ直下に抽出結果の正解データ _expected.jsonl（file は帳票フォルダからの相対パス）と説明 _README.md を書き出す。
 乱数は domain.rng() からのみ取り、ZIP 内のタイムスタンプも固定するため、何度実行しても同一バイトのファイルになる。
 """
 from __future__ import annotations
@@ -63,6 +65,7 @@ ZIP_TIME = (2026, 9, 1, 0, 0, 0)     # xlsx(ZIP)内エントリの固定タイ�
 V2_START = date(2025, 4, 1)          # Rev.2 の運用開始日
 
 REV_INFO = {"v1": ("Rev.1", "2018.10制定"), "v2": ("Rev.2", "2025.04改訂")}
+REV_DIR_NG = r'[.:/\\*?"<>|]'        # Windows のフォルダ名に使えない文字
 WORK_TYPES = ("定期点検", "予防保全", "事後保全")
 CYCLE_NAME = {("定期点検", 1): "月例点検", ("定期点検", 3): "3ヶ月点検", ("予防保全", 3): "3ヶ月PM",
               ("予防保全", 6): "6ヶ月PM", ("予防保全", 12): "年次PM"}
@@ -78,6 +81,16 @@ CHEAP_LIMIT = 300_000                 # これ以下の部品は点検時にそ�
 SECTION_HEAD = {"設備保全課 保全1係": "M10544", "設備保全課 保全2係": "M10688", "設備保全課 施設係": "M10902"}
 MANAGER_ID = "M10231"
 UNIT_KEYS = ("car", "pn", "fan", "lp", "shelf")
+
+
+def _rev_dir(version: str) -> str:
+    """版ごとの出力フォルダ名（例: v1 → `Rev1_2018制定`）。
+
+    様式の版の呼び名＋運用開始年。Windows のフォルダ名に使えない文字は落とす（`Rev.1` → `Rev1`）。
+    """
+    label, when = REV_INFO[version]
+    when = re.sub(r"^(\d{4})[.\d]*", r"\1", when)        # 2018.10制定 → 2018制定
+    return re.sub(REV_DIR_NG, "", f"{label}_{when}")
 
 
 # ---------------------------------------------------------------------------
@@ -2302,18 +2315,23 @@ def _readme(specs: list[FileSpec], recs: list[Record]) -> str:
         f"- 作業区分: 定期点検 {cnt_w['定期点検']} / 予防保全 {cnt_w['予防保全']} / 事後保全 {cnt_w['事後保全']}",
         f"- 設備種別: {len(kinds)} 種（{', '.join(kinds)}）",
         f"- 作業日: {min(s.work_date for s in specs):%Y/%m/%d} 〜 {max(s.work_date for s in specs):%Y/%m/%d}",
+        f"- フォルダ: 様式の版ごとに分けてある（`{_rev_dir('v1')}/` {cnt_v['v1']}件 ・ `{_rev_dir('v2')}/` {cnt_v['v2']}件）",
         "",
         "## 様式の版",
         "",
-        "| 版 | layout_version | 制定・改訂 | ファイル数 | レイアウト |",
-        "|---|---|---|---|---|",
-        f"| {REV_INFO['v1'][0]} | v1 | {REV_INFO['v1'][1]} | {cnt_v['v1']} | A4縦・A〜H列。上部右に承認/確認/作成の押印欄、ヘッダは2列組み"
+        "版ごとにフォルダを分けてある。同じフォルダのファイルは様式も項目の並びも同じなので、"
+        "フォルダごと「帳票取り込み」に入れれば、帳票の種類と読み取るシートを1回選ぶだけでまとめて読み取れる。"
+        "版フォルダの中は .xlsx だけ。この `_README.md` と `_expected.jsonl` は帳票フォルダ直下（版フォルダの外）に置いてある。",
+        "",
+        "| 版 | layout_version | 制定・改訂 | フォルダ | ファイル数 | レイアウト |",
+        "|---|---|---|---|---|---|",
+        f"| {REV_INFO['v1'][0]} | v1 | {REV_INFO['v1'][1]} | `{_rev_dir('v1')}/` | {cnt_v['v1']} | A4縦・A〜H列。上部右に承認/確認/作成の押印欄、ヘッダは2列組み"
         "（作業No./作業区分、設備No./設備名、ライン・工程/メーカー・型式、作業日/作業時間、作業者/立会者、点検周期/関連No.）。"
         "作業区分は「■定期点検　□予防保全　□事後保全」のチェックボックス表記。"
         "チェックシートは1つの縦長の表で列は No.／点検部位／点検項目／基準値／前回値／測定値／判定／処置。点検部位は同じ部位の行を縦結合。"
         "基準値は単位込み（例: `0.30mm以上`、`150±10ml/min`、`±0.20psi以内`）。測定値は数値セル＋表示形式。"
         "表の下に総合判定（■良 □要観察 □要処置）と次回点検予定日、交換部品表（No./品名/品番/数量/備考）、所見、特記事項、写真（任意）。 |",
-        f"| {REV_INFO['v2'][0]} | v2 | {REV_INFO['v2'][1]} | {cnt_v['v2']} | A4横・B〜Q列。チェックシートを左右2表に分割: "
+        f"| {REV_INFO['v2'][0]} | v2 | {REV_INFO['v2'][1]} | `{_rev_dir('v2')}/` | {cnt_v['v2']} | A4横・B〜Q列。チェックシートを左右2表に分割: "
         "左「Ａ．機構部・プロセス部」（No／点検箇所／点検内容／管理値／単位／実測値／判定／処置・備考）、"
         "右「Ｂ．電装・安全・ユーティリティ」（No／部位／チェック項目／規格／結果／良否／対応）。"
         "左表の管理値は単位なし（`≧0.30`、`≦2.0`）で単位は別列、右表の規格・結果は単位込みの文字列（`≦40℃`、`31℃`）。"
@@ -2377,14 +2395,16 @@ def _readme(specs: list[FileSpec], recs: list[Record]) -> str:
         f"- ×が未処置で総合判定「要処置」: {files(lambda s, rc: any('未処置' in x for x in rc.irregularities))}",
         f"- 総合判定の記入誤り（Rev.2 の自由記入欄に、修理済みの×があるのに「良」と記入。記入ルールでは「要観察」。この1件だけ）: "
         f"{files(lambda s, rc: 'overall_slip' in s.flags)}",
-        f"- 改訂後も旧様式（Rev.1）を使用: {files(lambda s, rc: 'old_form' in s.flags)}",
+        f"- 改訂後も旧様式（Rev.1）を使用: {files(lambda s, rc: 'old_form' in s.flags)}"
+        f"（フォルダは作業日ではなく様式の版で分けているので `{_rev_dir('v1')}/` に入っている）",
         "- 事後保全の次回点検予定日は「－」「定期点検に準ずる」または再点検日（`2025/06/20（再点検）` など）",
         "- 所見・特記事項の書き方は記入者ごとの癖（番号の振り方、敬体、全角数字、半角カナ、誤変換）が domain.py 由来で混ざる",
         "- ファイル名の付け方がばらばら（作業No.入り／日付入り／【作業区分】付き／TR番号入り）",
         "",
         "## _expected.jsonl",
         "",
-        "1行1ファイルの JSON（UTF-8）。",
+        "1行1ファイルの JSON（UTF-8）。この帳票フォルダ直下に置いてある（版フォルダの中ではない）。"
+        f"`file` は帳票フォルダからの相対パス（例: `{_rev_dir('v1')}/…xlsx`）で、区切りは `/`。",
         "",
         "```",
         '{"file", "layout_version": "v1"|"v2", "form_revision", "main_sheet", "work_type", "incident_id"（対応付けたTR、なければ null）,',
@@ -2416,17 +2436,26 @@ def generate(output_root: Path | None = None) -> list[Path]:
     root = Path(output_root) if output_root is not None else D.OUTPUT_ROOT
     out_dir = root / "forms" / FORM_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
-    for old in out_dir.glob("*.xlsx"):   # このフォルダは本スクリプト専用。名前の変わった古い生成物を残さない
-        old.unlink()
 
     specs = list(_file_specs())
+    rev_dirs = {v: _rev_dir(v) for v in sorted({s.version for s in specs})}
+    # このフォルダは本スクリプト専用。名前の変わった古い生成物・使わなくなった版フォルダを残さない
+    # （_README.md と _expected.jsonl は版フォルダの外にあるので消えない）
+    for old in out_dir.rglob("*.xlsx"):
+        old.unlink()
+    for sub in sorted(out_dir.iterdir()):
+        if sub.is_dir() and not any(sub.iterdir()):
+            sub.rmdir()
+    for name in rev_dirs.values():
+        (out_dir / name).mkdir(exist_ok=True)
+
     # 先に全ファイルの中身を決め、総合判定の記入誤り（1件）を選んでから描画する
     designs = [_design(spec) for spec in specs]
     _apply_overall_slip(specs, designs)
     recs, paths, sheets_list, contents = [], [], [], []
     for spec, design in zip(specs, designs):
         wb, rec, c = _build_workbook(spec, design)
-        path = out_dir / spec.filename
+        path = out_dir / rev_dirs[spec.version] / spec.filename
         _save_deterministic(wb, path)
         recs.append(rec)
         sheets_list.append(wb.sheetnames)
@@ -2437,7 +2466,7 @@ def generate(output_root: Path | None = None) -> list[Path]:
     with exp_path.open("w", encoding="utf-8", newline="\n") as fp:
         for spec, rec, sheets, c in zip(specs, recs, sheets_list, contents):
             obj = {
-                "file": spec.filename,
+                "file": f"{rev_dirs[spec.version]}/{spec.filename}",   # 帳票フォルダからの相対パス
                 "layout_version": spec.version,
                 "form_revision": REV_INFO[spec.version][0],
                 "main_sheet": rec.main_sheet,
