@@ -23,10 +23,6 @@
 {% if not done and not read_yet %}
   <p class="muted">上で帳票の種類とシートを選び、［読み取る］を押してください。読み取った値を確かめてから、ここで確定します。</p>
 {% elif not done %}
-  <div data-missing-box {% if not missing %}hidden{% endif %}>
-    <p class="notice" role="note">必須の項目が空欄です: <span data-missing-list>{{ missing | join('、') }}</span></p>
-    <label class="check"><input type="checkbox" data-allow-missing> 空欄のまま確定する</label>
-  </div>
   <div class="form-actions">
     <button type="button" class="btn primary" data-confirm-doc="{{ current.id }}">
       {% if docs | length > 1 %}この帳票を確定する（{{ current.title or current.file_name }}）{% else %}確定して Markdown を作る{% endif %}

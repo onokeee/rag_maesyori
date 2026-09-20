@@ -20,7 +20,8 @@ from excel.workbook import load_workbook_info
 from export.formats import build_markdown, markdown_filename
 from models import database as db
 from pattern.builder import suggest_title_fields
-from pattern.clicks import click_field, merge_labels, merge_target, split_rows, table_cells
+from pattern.clicks import (click_field, merge_labels, merge_target, same_sheet_field, separate_names, split_rows,
+                            table_cells)
 from pattern.forms import pattern_to_meta, pattern_to_rows, rows_to_pattern
 from pattern.matcher import match_pattern
 from pattern.model import PatternDef
@@ -210,7 +211,6 @@ def _test_result(pattern: PatternDef, sample: dict | None, info) -> dict | None:
         "sheets": sheets,
         "found": sum(1 for f in extraction["fields"] if f["value"] not in (None, "")),
         "total": len(extraction["fields"]),
-        "missing_required": extraction["missing_required"],
         "markdown": build_markdown(doc, extraction),
         "file_name": markdown_filename(doc, extraction),
     }
@@ -241,25 +241,42 @@ def add_field(pattern_id: int):
 
     sheet_rows, field_rows = pattern_to_rows(pattern)
     # 番号と名前を1つのセルにまとめた「使用設備」欄は、設備番号・設備名の2項目になる
-    added, merged = [], []
+    added, separated, merged = [], [], []
     for part in split_rows(row, {f.field_name for f in pattern.fields}):
         # 別の見本で書き方の違う同じ欄（「設備No」と「設備番号」）をクリックしたときは、新しい項目にせず
         # その項目の探す見出しに足す
-        same = merge_target(field_rows, part)
+        same = merge_target(field_rows, part, grid)
         if same is not None:
             merge_labels(same, part)
             merged.append(same["display_name"])
+            continue
+        # 同じ見本の別のセル（「担当者」と「報告者」）なら、辞書の名前が同じでも別の項目にする
+        twin = same_sheet_field(field_rows, part, grid)
+        if twin is not None:
+            separate_names(twin, part)
+            separated.append((part["display_name"], twin["display_name"]))
         else:
-            field_rows.append(part)
             added.append(part["display_name"])
-    if added:
-        message = f"「{'」「'.join(added)}」を項目にしました"
-    else:
-        message = f"「{'」「'.join(merged)}」の見出しに「{(row['candidates'].splitlines() or [''])[0]}」を足しました"
+        field_rows.append(part)
+    message = "。".join(_add_messages(row, added, separated, merged))
     if not any(r["sheet_name"] == sheet for r in sheet_rows):
         sheet_rows.append({"use": True, "sheet_name": sheet, "required": False})
     _save_rows(pattern, sheet_rows, field_rows)
     return jsonify(html=_build_html(pattern_id, sample_id), list_html=_list_html(), message=message)
+
+
+def _add_messages(row: dict, added: list[str], separated: list[tuple[str, str]], merged: list[str]) -> list[str]:
+    """クリックの結果の知らせ（項目にした／別の項目にした／見出しに足した、のどれをしたか）。"""
+    out = []
+    if added:
+        out.append(f"「{'」「'.join(added)}」を項目にしました")
+    for name, twin in separated:
+        out.append(f"「{name}」を「{twin}」とは別の項目にしました（同じ見本の別のセルなので、両方を読み取ります）")
+    if merged:
+        label = (row["candidates"].splitlines() or [""])[0]
+        out.append(f"「{'」「'.join(merged)}」の見出しに「{label}」を足しました"
+                   "（別の見本の書き方違いなので、1つの項目として読み取ります）")
+    return out
 
 
 @bp.post("/<int:pattern_id>/fields/<field_name>/delete")

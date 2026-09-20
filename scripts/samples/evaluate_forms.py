@@ -389,7 +389,7 @@ def click_rows(sample_infos: list, name: str) -> tuple[list[dict], list[dict]]:
     辞書で同じ項目と分かる欄はその項目の見出しに足され、分からない欄は別の項目になる）。
     """
     from excel.extractor import locate_table, locate_value
-    from pattern.clicks import click_field, merge_labels, merge_target, split_rows
+    from pattern.clicks import click_field, merge_labels, merge_target, same_sheet_field, separate_names, split_rows
     from pattern.dictionary import DICTIONARY_NORMS
 
     meta = {"name": name, "version": "eval"}
@@ -427,10 +427,14 @@ def click_rows(sample_infos: list, name: str) -> tuple[list[dict], list[dict]]:
                 known_labels.add(label_norm)
                 # 画面と同じ: 番号と名前をまとめた「使用設備」欄は設備番号・設備名の2項目になる
                 for part in split_rows(row, used):
-                    same = merge_target(rows, part)
+                    same = merge_target(rows, part, grid)
                     if same is not None:
                         merge_labels(same, part)  # 画面と同じ: 書き方の違う同じ欄は見出しに足す
                         continue
+                    # 画面と同じ: 同じ見本の別のセル（「担当者」と「報告者」）は別の項目にする
+                    twin = same_sheet_field(rows, part, grid)
+                    if twin is not None:
+                        separate_names(twin, part)
                     used.add(part["field_name"])
                     rows.append(part)
                 if not any(s["sheet_name"] == sheet for s in sheet_rows):

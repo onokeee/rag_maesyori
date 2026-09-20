@@ -36,7 +36,6 @@ class FieldResult:
     field_name: str
     display_name: str
     data_type: str
-    required: bool
     value: object = None
     sheet: str | None = None
     label_cell: str | None = None
@@ -86,12 +85,8 @@ def is_blank_value(value) -> bool:
 
 
 def refresh_summary(extraction: dict) -> None:
-    """fields から values / missing_required を再計算する。"""
-    fields = extraction["fields"]
-    extraction["values"] = {f["field_name"]: f["value"] for f in fields}
-    extraction["missing_required"] = [
-        f["display_name"] for f in fields if f["required"] and is_blank_value(f["value"])
-    ]
+    """fields から values を作り直す。"""
+    extraction["values"] = {f["field_name"]: f["value"] for f in extraction["fields"]}
 
 
 def apply_manual_values(extraction: dict, form) -> None:
@@ -131,7 +126,7 @@ def apply_manual_values(extraction: dict, form) -> None:
 
 
 def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], stop_labels: set[str]) -> FieldResult:
-    result = FieldResult(fd.field_name, fd.display_name, fd.data_type, fd.required,
+    result = FieldResult(fd.field_name, fd.display_name, fd.data_type,
                          unit=fd.unit, spec_unit=fd.unit or "", rag_output=fd.rag_output)
     if fd.data_type == "table":
         result.table_columns = [c for c in (fd.table_columns or []) if str(c).strip()]

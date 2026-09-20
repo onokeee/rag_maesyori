@@ -173,7 +173,7 @@ def test_output_is_deterministic_bytes(repair_infos):
 # ---- 明細表 ----
 
 def _table_field(value, name="parts", display="交換部品", **extra):
-    return {"field_name": name, "display_name": display, "data_type": "table", "required": False, "value": value,
+    return {"field_name": name, "display_name": display, "data_type": "table", "value": value,
             "unit": "", "rag_output": "show", "edited": False, "warning": None, **extra}
 
 
@@ -214,7 +214,7 @@ def test_label_as_value_lines_are_not_written(standard):
     labels = set(extraction["pattern"]["labels"])
     assert "報告番号" in labels and "発生日" in labels  # 候補ラベル・表示名から作られている
 
-    quantity = {"field_name": "quantity", "display_name": "数量", "data_type": "string", "required": False,
+    quantity = {"field_name": "quantity", "display_name": "数量", "data_type": "string",
                 "value": "発生日", "unit": "", "rag_output": "show", "edited": False, "warning": None}
     extraction["fields"].append(quantity)
     extraction["fields"].append({**quantity, "field_name": "part_name", "display_name": "品名", "value": "報告番号"})

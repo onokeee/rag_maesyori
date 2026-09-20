@@ -448,7 +448,7 @@
       if (badge) { badge.textContent = src[0]; badge.className = "badge badge-" + src[1]; }
       const warn = box.querySelector("[data-warning]");
       if (warn) {
-        const text = (st.missing_required ? "必須の項目が空欄です。" : "") + (st.warning || "");
+        const text = st.warning || "";
         warn.textContent = text;
         warn.hidden = !text;
       }
@@ -457,14 +457,6 @@
     if (pre && typeof s.markdown === "string") pre.textContent = s.markdown;
     const name = el.reviewBody.querySelector("[data-md-name]");
     if (name && s.file_name) name.textContent = s.file_name;
-    // 確定してダウンロードの欄の「必須が空欄」の案内も合わせる
-    const box = el.finishBody.querySelector("[data-missing-box]");
-    if (box) {
-      const list = s.missing_required || [];
-      box.hidden = !list.length;
-      const span = box.querySelector("[data-missing-list]");
-      if (span) span.textContent = list.join("、");
-    }
   }
 
   function gotoNextIssue() {
@@ -524,15 +516,13 @@
   });
 
   async function confirmDoc(id, button) {
-    const allow = el.finishBody.querySelector("[data-allow-missing]");
     if (button) button.disabled = true;
     work("confirm", "Markdown を作っています…");
     try {
       clearTimeout(timer);
       if (dirty) await saveNow();
       if (saving) await saving;
-      await postJson("/forms/" + id + "/confirm",
-        { version: currentVersion(), allow_missing: !!(allow && allow.checked) });
+      await postJson("/forms/" + id + "/confirm", { version: currentVersion() });
       const doc = docOf(id);
       if (doc) doc.state = "confirmed";
       renderDocTabs();
@@ -547,14 +537,6 @@
         sections.show("finish");
       }
     } catch (e) {
-      if (e.data && e.data.missing_required) {
-        const box = el.finishBody.querySelector("[data-missing-box]");
-        if (box) {
-          box.hidden = false;
-          const span = box.querySelector("[data-missing-list]");
-          if (span) span.textContent = e.data.missing_required.join("、");
-        }
-      }
       toast(e.message, "err");
     } finally {
       work("confirm", "");

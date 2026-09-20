@@ -90,9 +90,9 @@ def test_ditto_marks_in_a_detail_table_take_the_value_above():
 
 def test_same_value_input_with_a_warning_is_kept_as_an_edit():
     ex = {"fields": [
-        {"field_name": "w", "display_name": "作業時間", "data_type": "number", "required": False, "value": 1.5,
+        {"field_name": "w", "display_name": "作業時間", "data_type": "number", "value": 1.5,
          "unit": "時間", "spec_unit": "時間", "warning": None, "edited": False},
-        {"field_name": "d", "display_name": "発生日", "data_type": "date", "required": False,
+        {"field_name": "d", "display_name": "発生日", "data_type": "date",
          "value": "2026-09-14", "warning": None, "edited": False}]}
     apply_manual_values(ex, {"value-w": "1.5～3時間", "value-d": "2026-09-14 24:30"})
     w, d = ex["fields"]
@@ -104,7 +104,7 @@ def test_same_value_input_with_a_warning_is_kept_as_an_edit():
 
 
 def test_same_value_without_warning_is_still_not_an_edit():
-    ex = {"fields": [{"field_name": "w", "display_name": "作業時間", "data_type": "number", "required": False,
+    ex = {"fields": [{"field_name": "w", "display_name": "作業時間", "data_type": "number",
                       "value": 1.5, "unit": "時間", "spec_unit": "時間", "warning": None, "edited": False}]}
     apply_manual_values(ex, {"value-w": "1.50"})
     assert not ex["fields"][0]["edited"]

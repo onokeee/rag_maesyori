@@ -298,3 +298,68 @@ def test_the_clicked_label_wins_over_a_dictionary_synonym_on_the_same_sheet(tmp_
         pattern = rows_to_pattern(1, meta, sheets, [row])
         field = extract_document(info, pattern, ["報告書"])["fields"][0]
         assert field["value"] == expected, (label_cell, field)
+
+
+# ---- 同じ意味になる2つの欄（辞書の名前が同じだけの別の欄） -------------------------------------
+
+def _two_people_book(path, equipment_label="設備No", equipment_row=4):
+    """「担当者」と「報告者」が別のセルに並ぶ帳票（設備の見出しは版によって書き方も場所も違う）。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "報告書"
+    fill = PatternFill("solid", fgColor="FFD9E1F2")
+    cells = {"A1": "報告番号", "B1": "R-001", "A2": "担当者", "B2": "清水 彩花",
+             "A3": "報告者", "B3": "長谷川 聡",
+             f"A{equipment_row}": equipment_label, f"B{equipment_row}": "EQ-001"}
+    for coord, value in cells.items():
+        ws[coord] = value
+    for coord in ("A1", "A2", "A3", f"A{equipment_row}"):
+        ws[coord].fill = fill
+    wb.save(path)
+    return path
+
+
+def _click(client, pattern_id, sample_id, label_cell, value_cell="", sheet="報告書"):
+    return client.post(f"/form-types/{pattern_id}/fields",
+                       data={"sample": sample_id, "sheet": sheet,
+                             "label_cell": label_cell, "value_cell": value_cell}).get_json()
+
+
+def test_two_labels_of_the_same_meaning_on_one_sheet_become_two_fields(app, client, tmp_path):
+    """同じ見本の別のセル（「担当者」と「報告者」）は、辞書の名前が同じでもそれぞれ項目になる。"""
+    pattern_id = _create(client, _two_people_book(tmp_path / "二人.xlsx"))
+    with app.app_context():
+        sample_id = db.list_samples(pattern_id)[0]["id"]
+    assert "「担当者」を項目にしました" in _click(client, pattern_id, sample_id, "A2", "B2")["message"]
+    body = _click(client, pattern_id, sample_id, "A3", "B3")
+    assert "「報告者」を「担当者」とは別の項目にしました" in body["message"]
+
+    with app.app_context():
+        fields = db.load_pattern(pattern_id).fields
+    assert [f.field_name for f in fields] == ["reporter", "reporter_2"]
+    # それぞれ自分の見出しを持ち、自分のセルの値を読む
+    assert [f.candidates[0] for f in fields] == ["担当者", "報告者"]
+    assert [f.display_name for f in fields] == ["担当者", "報告者"]
+    assert [f.label_cell for f in fields] == ["A2", "A3"]
+    panel = _panel(client, pattern_id)
+    assert "清水 彩花" in panel and "長谷川 聡" in panel
+
+
+def test_the_same_field_written_differently_in_another_sample_is_still_merged(app, client, tmp_path):
+    """別の見本で書き方の違う同じ欄（「設備No」と「設備番号」）は、今までどおり見出しに足す。"""
+    pattern_id = _create(client, _two_people_book(tmp_path / "v1.xlsx", "設備No"))
+    other = _two_people_book(tmp_path / "v2.xlsx", "設備番号", equipment_row=6)
+    res = client.post(f"/form-types/{pattern_id}/samples",
+                      data={"samples": (io.BytesIO(other.read_bytes()), other.name)},
+                      content_type="multipart/form-data")
+    assert res.status_code == 200, res.get_data(as_text=True)
+    with app.app_context():
+        samples = db.list_samples(pattern_id)
+    _click(client, pattern_id, samples[0]["id"], "A4", "B4")
+    body = _click(client, pattern_id, samples[1]["id"], "A6", "B6")
+    assert "の見出しに「設備番号」を足しました" in body["message"]
+
+    with app.app_context():
+        fields = db.load_pattern(pattern_id).fields
+    assert [f.field_name for f in fields] == ["equipment_id"]
+    assert fields[0].candidates[:2] == ["設備No", "設備番号"]

@@ -47,12 +47,15 @@ def suggest_columns(headers: list[str], sample_rows) -> list[ColumnSuggestion]:
     """見出しと先頭のデータ行から、列ごとの標準キー・型・役割などの候補を作る。
 
     sample_rows: SourceRow のリスト、または値のリストのリスト。
+    見出しも値も無い列（表がA列から始まらないときの左の空列など）は、列の一覧に出さない。
     """
     grid = [_row_values(r) for r in sample_rows]
     out: list[ColumnSuggestion] = []
     for i, header in enumerate(headers):
         unit = split_header_unit(header)[1]
         values = [row[i] if i < len(row) else (None, "") for row in grid]
+        if _is_empty_column(header, values):
+            continue
         stats = _column_stats(values)
 
         found = lookup_header(header)
@@ -128,6 +131,21 @@ def _row_values(row) -> list[tuple[object, str]]:
             for i, c in enumerate(cells)
         ]
     return [(v, cell_text(v)) for v in row]
+
+
+def _is_empty_column(header: str, values: list[tuple[object, str]]) -> bool:
+    """見出しが空欄で、読み取った行のどこにも値が無い列か。
+
+    見出しの空欄は、この時点では「列3」のような仮の名前になっている（tables.detect._dedupe）。
+    値を見る深さは、列の一覧を作るために読んだデータ行（画面からは先頭200行）そのもの。
+    追加で読み直さずに済み、例（examples）や空欄率を出すのと同じ範囲なので、
+    画面に出る中身と食い違わない。空欄でも下の方に値が出てくる列は、この範囲で見つかれば残る。
+    見出しが空でも値がある列（別のところで問題として知らせる）は残す。
+    """
+    h = str(header or "").strip()
+    if h and not (h.startswith("列") and h[1:].isdigit()):
+        return False
+    return all(_is_blank(value, text) for value, text in values)
 
 
 def _is_blank(value, text: str) -> bool:

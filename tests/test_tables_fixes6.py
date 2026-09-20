@@ -586,3 +586,84 @@ def test_the_delete_confirm_text_is_the_same_on_every_table_screen():
     assert found  # 文言は共通のマクロ（と done.html の「ダウンロードせずに」）だけ
     for line in found:
         assert shared in line and "アップロードしたファイル" not in line
+
+
+# ---- R6T-6: 見出しも値も無い列は「列の対応づけ」に出さない ------------------------------------------------------
+
+_EMPTY_COL_CSV = "\r\n".join(
+    [",,管理No,発生日,,対応内容,,設備名,,"]
+    + [f",,TR-{i:03d},2026-08-{i:02d},補足{i},8/{i} 確認した。,,搬送ロボット{i % 2 + 1}号機,"
+       + (f"後から入る{i}" if i >= 6 else "") + "," for i in range(1, 13)]) + "\r\n"
+
+
+def _columns_of(tmp_path, text: str, name: str = "空列.csv"):
+    """CSV を読み、列の対応づけに出る候補を返す。"""
+    from tables.detect import guess_layout, sample_data_rows
+    from tables.mapping import suggest_columns
+    from tables.source import open_source
+
+    path = tmp_path / name
+    path.write_bytes(text.encode("cp932"))
+    source = open_source(path, name, {"encoding": "cp932", "delimiter": ","})
+    layout = guess_layout(source, name)
+    return layout, suggest_columns(layout.headers, sample_data_rows(source, name, layout))
+
+
+def test_columns_empty_in_header_and_values_are_not_listed(tmp_path):
+    """左端・途中・右端の空の列は一覧に出さない。見出しだけ空で値がある列は残す。"""
+    layout, sugg = _columns_of(tmp_path, _EMPTY_COL_CSV)
+    # 表の幅は今までどおり（見出しの検出は変えていない）。仮の名前「列N」も今までどおり付く
+    assert layout.header_rows == [1] and layout.data_start == 2
+    assert layout.headers == ["列1", "列2", "管理No", "発生日", "列5", "対応内容", "列7", "設備名", "列9"]
+    # 列1・列2（左端）と列7（途中）は消える。列5（見出しだけ空）と列9（あとから値が入る）は残る
+    assert [s.header for s in sugg] == ["管理No", "発生日", "列5", "対応内容", "設備名", "列9"]
+    assert [s.index for s in sugg] == [2, 3, 4, 5, 7, 8]  # 列の位置は元のまま（キー col3 などが変わらない）
+
+
+def test_a_column_with_values_only_in_later_rows_stays_in_the_list(tmp_path):
+    """先頭の行だけ空で、あとから値が入る列は残す（空欄だけの列として消さない）。"""
+    _layout, sugg = _columns_of(tmp_path, _EMPTY_COL_CSV, "後から.csv")
+    later = next(s for s in sugg if s.header == "列9")
+    assert later.examples and later.blank_rate < 1.0
+
+
+def test_an_excel_table_that_starts_at_c3_lists_only_its_own_columns(tmp_path):
+    """表が C3 から始まる Excel でも、A・B列は一覧に出さない（Excel も CSV と同じ扱い）。"""
+    from tables.detect import guess_layout, sample_data_rows
+    from tables.mapping import suggest_columns
+    from tables.source import open_source
+
+    wb = Workbook()
+    ws = wb.active
+    for col, head in enumerate(["カルテNo", "受付日", "設備名", "対応内容"], start=3):
+        ws.cell(row=3, column=col, value=head)
+    for i in range(1, 13):
+        ws.cell(row=3 + i, column=3, value=f"K-{i:03d}")
+        ws.cell(row=3 + i, column=4, value=f"2026-08-{i:02d}")
+        ws.cell(row=3 + i, column=5, value=f"搬送ロボット{i % 2 + 1}号機")
+        ws.cell(row=3 + i, column=6, value=f"8/{i} 確認した。")
+    path = tmp_path / "C3から.xlsx"
+    wb.save(path)
+    source = open_source(path, path.name)
+    layout = guess_layout(source, ws.title)
+    assert layout.headers[:2] == ["列1", "列2"] and layout.data_start == 4
+    sugg = suggest_columns(layout.headers, sample_data_rows(source, ws.title, layout))
+    assert [s.header for s in sugg] == ["カルテNo", "受付日", "設備名", "対応内容"]
+
+
+@pytest.mark.samples
+def test_sample_t6_lists_20_columns_instead_of_22():
+    """T6（表が C3 から始まる）の列の一覧は 22 列ではなく 20 列。"""
+    from tables.detect import guess_layout, sample_data_rows
+    from tables.mapping import suggest_columns
+    from tables.source import open_source
+
+    path = Path(__file__).resolve().parents[1] / "samples" / "tables" / "T6_装置トラブルカルテ.xlsx"
+    if not path.exists():
+        pytest.skip(f"{path.name} がありません")
+    source = open_source(path, path.name)
+    sheet = source.sheets()[0].name
+    layout = guess_layout(source, sheet)
+    assert len(layout.headers) == 22 and layout.headers[:2] == ["列1", "列2"]
+    sugg = suggest_columns(layout.headers, sample_data_rows(source, sheet, layout))
+    assert len(sugg) == 20 and sugg[0].header == "カルテNo"

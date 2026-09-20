@@ -18,7 +18,7 @@ from pattern.dictionary import (BY_FIELD_NAME, COMBINED_EQUIPMENT_LABELS, COMBIN
                                 COMBINED_EQUIPMENT_PARTS)
 
 BASE_ROW = {
-    "use": True, "required": False, "rag_output": "show", "table_columns": "", "section": "",
+    "use": True, "rag_output": "show", "table_columns": "", "section": "",
     "unit": "", "direction": "auto", "sheet_name": "", "label_cell": "", "cell": "", "examples": [],
     # 辞書で分かった項目名（「設備番号」など）。別の見本で書き方の違う同じ欄をクリックしたときに、
     # 新しい項目にせず、その項目の探す見出しに足すために使う（保存はしない）
@@ -102,11 +102,15 @@ def _label_row(grid: SheetGrid, label, value_key, direction: str, used: set[str]
         value = value_cell.value if value_cell is not None else ""
         sug = _make_suggestion(label.norm, label_text, value, label)
         value_text = value_cell.text if value_cell is not None else ""
+    field_name = _field_name(sug.field_name, used)
+    # 同じ名前の項目がすでにあるとき（「担当者」の次に「報告者」を押したとき）は、辞書の名前ではなく
+    # クリックした見出しをそのまま項目の名前にする（どちらの欄か見分けられるように）
+    taken = bool(sug.field_name) and field_name != sug.field_name
     return {
         **BASE_ROW,
-        "field_name": _field_name(sug.field_name, used),
+        "field_name": field_name,
         "base_name": sug.field_name or "",
-        "display_name": sug.display_name or label_text,
+        "display_name": label_text if taken else (sug.display_name or label_text),
         # クリックした見出しと、辞書で分かる同じ意味の見出し（「設備番号」に対する「設備No」など）。
         # 書き方の違う帳票でも同じ欄を読めるようにする（値は書き替えない）
         "candidates": "\n".join(dict.fromkeys([label_text, *sug.synonyms])),
@@ -220,8 +224,14 @@ def _table_heading(table) -> tuple[int, int] | None:
 
 
 def _field_name(name: str | None, used: set[str]) -> str:
-    if not name or name in used:
+    """まだ使っていない項目の名前。辞書の名前がふさがっていれば「reporter_2」、名前が無ければ「field_1」。"""
+    if not name:
         name = _next_field_name(used)
+    elif name in used:
+        i = 2
+        while f"{name}_{i}" in used:
+            i += 1
+        name = f"{name}_{i}"
     used.add(name)
     return name
 
@@ -238,30 +248,87 @@ def table_cells(grid: SheetGrid) -> set[str]:
     return out
 
 
-def merge_target(field_rows: list[dict], row: dict) -> dict | None:
+def merge_target(field_rows: list[dict], row: dict, grid: SheetGrid | None = None) -> dict | None:
     """クリックで作った項目行が、登録済みのどの項目と同じ欄か（別の見本で書き方が違うだけの欄）。
 
     辞書で同じ項目と分かるもの（「設備番号」と「設備No」）と、列見出しがほとんど同じ明細表。
     見つかれば、新しい項目にせずその項目の探す見出しに足す。
+    ただし、その項目の見出しが同じシートの別のセルにあるとき（`same_sheet_field`）は、
+    同じ見本の中の別の欄を押したということなので足さない（別の項目にする）。
     """
+    if same_sheet_field(field_rows, row, grid) is not None:
+        return None
+    return next(_same_field_rows(field_rows, row), None)
+
+
+def same_sheet_field(field_rows: list[dict], row: dict, grid: SheetGrid | None = None) -> dict | None:
+    """いま押したシートに、自分の見出しのセルを別に持っている「同じ欄らしい」登録済みの項目。
+
+    「担当者」を登録した見本で「報告者」を押したときのように、同じシートの別のセルを指している。
+    辞書では同じ名前になるが人が読みたい欄は2つなので、見出しを足さずに別の項目にする。
+    別の見本で書き方の違う同じ欄（「設備No」と「設備番号」）を押したときは、その項目の見出しのセルが
+    このシートに無い（または押したセルそのもの）ので None になり、今までどおり見出しを足す。
+    """
+    if grid is None:
+        return None
+    for other in _same_field_rows(field_rows, row):
+        if _label_cell_here(grid, other, row):
+            return other
+    return None
+
+
+def _same_field_rows(field_rows: list[dict], row: dict):
+    """同じ欄かもしれない登録済みの項目（辞書で同じ名前の項目／列見出しがほとんど同じ明細表）。"""
     base = row.get("base_name") or ""
     if base:
         same = next((r for r in field_rows
                      if r["field_name"] == base and r["data_type"] == row["data_type"]), None)
         if same is not None:
-            return same
+            yield same
     if row["data_type"] != "table":
-        return None
+        return
     columns = _column_norms(row)
     if not columns:
-        return None
+        return
     for other in field_rows:
         if other["data_type"] != "table":
             continue
         have = _column_norms(other)
         if have and len(columns & have) / len(columns | have) >= SAME_COLUMNS_RATIO:
-            return other
-    return None
+            yield other
+
+
+def _label_cell_here(grid: SheetGrid, other: dict, row: dict) -> bool:
+    """登録済みの項目の見出しが、いま押したシートの別のセルにそのまま書かれているか。"""
+    if (other.get("sheet_name") or "") != grid.name:
+        return False
+    key = cell_key(grid, other.get("label_cell") or "")
+    if key is None or coord_of(key) == (row.get("label_cell") or ""):
+        return False
+    cell = grid.cells.get(key)
+    if cell is None or not cell.text.strip():
+        return False
+    norms = {normalize_label(l) for l in (other.get("candidates") or "").splitlines() if l.strip()} - {""}
+    return bool(norms) and (cell.inline[0] if cell.inline else cell.norm) in norms
+
+
+def separate_names(twin: dict, row: dict) -> None:
+    """同じシートの別の欄として登録するとき、2つの項目を見分けられる名前にする。
+
+    辞書の名前が同じだけの別の欄（「担当者」と「報告者」）なので、どちらもクリックした見出しを名前にする。
+    見出しまで同じ（区画違いの同じ名前の欄）ときは、新しいほうにセル番地を添える。
+    """
+    if row["display_name"] != twin["display_name"]:
+        return
+    twin_label, row_label = _first_label(twin), _first_label(row)
+    if twin_label and row_label and twin_label != row_label:
+        twin["display_name"], row["display_name"] = twin_label, row_label
+    elif row.get("label_cell"):
+        row["display_name"] = f"{row['display_name']}（{row['label_cell']}）"
+
+
+def _first_label(row: dict) -> str:
+    return next((l.strip() for l in (row.get("candidates") or "").splitlines() if l.strip()), "")
 
 
 def merge_labels(target: dict, row: dict) -> None:

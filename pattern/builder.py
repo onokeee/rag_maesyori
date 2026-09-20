@@ -104,7 +104,6 @@ def suggest_rows(infos: list[WorkbookInfo]) -> tuple[list[dict], list[dict]]:
             "display_name": sug.display_name,
             "candidates": "\n".join(dict.fromkeys([*sug.labels, *sug.synonyms, *sug.table_labels])),
             "data_type": sug.data_type,
-            "required": False,
             "direction": "auto",
             "unit": sug.unit,
             "rag_output": "show",

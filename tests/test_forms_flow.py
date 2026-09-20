@@ -145,29 +145,26 @@ def test_form_flow_happy_path(app, client, sample_dir):
     assert "設備修理報告書" in client.get("/form-types/").get_data(as_text=True)
 
 
-def test_missing_required_field_stops_the_confirm(app, client, sample_dir):
-    """必須の項目が空欄なら確定を止め、チェックを入れたときだけ確定する。"""
+def test_an_empty_value_does_not_stop_the_confirm(app, client, sample_dir):
+    """空欄でも確定は止まらない（「必須」の設定は帳票登録の画面に無く、どこにも無い）。
+
+    空欄は今までどおり「空欄」の印が付くだけで、確定の前に消さなければならない案内は出ない。
+    """
     path = sample_dir / "standard.xlsx"
     pattern_id = create_type(client, path, "設備修理報告書")
     add_field(client, pattern_id, "修理報告書", "A3", "B3")
-    with app.app_context():                      # 必須は帳票登録の画面では決めないので、ここで立てる
-        pattern = db.load_pattern(pattern_id)
-        pattern.fields[0].required = True
-        db.save_pattern(pattern, "active")
+    activate(client, pattern_id)
 
     doc_id, = upload_forms(client, path)
     version = read_form(client, doc_id, pattern_id, ["修理報告書"]).get_json()["version"]
     res = client.post(f"/forms/{doc_id}/draft", json={"values": {"report_id": ""}, "version": version})
     version = res.headers["X-Doc-Version"]
+    state = client.post(f"/forms/{doc_id}/preview", json={"version": version}).get_json()
+    assert state["fields"]["report_id"]["blank"] is True   # 空欄の印は今までどおり
 
+    html = finish(client, [doc_id])["html"]
+    assert "必須" not in html and "空欄のまま確定する" not in html
     res = client.post(f"/forms/{doc_id}/confirm", json={"version": version})
-    assert res.status_code == 409 and res.get_json()["missing_required"] == ["報告番号"]
-    with app.app_context():
-        assert db.get_document(doc_id)["state"] == "reviewing"
-    state = finish(client, [doc_id])
-    assert "必須の項目が空欄です" in state["html"] and "報告番号" in state["html"]
-
-    res = client.post(f"/forms/{doc_id}/confirm", json={"version": version, "allow_missing": True})
     assert res.status_code == 200 and res.get_json()["ok"] is True
     with app.app_context():
         assert db.get_document(doc_id)["state"] == "confirmed"

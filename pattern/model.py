@@ -49,7 +49,6 @@ class FieldDef:
     field_name: str
     display_name: str
     candidates: list[str] = field(default_factory=list)
-    required: bool = False
     data_type: str = "string"
     direction: str = "auto"
     unit: str = ""

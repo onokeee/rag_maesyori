@@ -199,10 +199,9 @@ def _field_status(f: dict) -> dict:
         "数値の部分だけ" in str(f.get("warning") or "")
         or not isinstance(value, (int, float)) or isinstance(value, bool))
     error_value = source == "blank" and str(f.get("warning") or "").startswith(EXCEL_ERROR_WARNING)
-    issue = (f["required"] and blank) or error_value or (
+    issue = error_value or (
         not blank and bool(f.get("warning")) and (source == "auto" or unit_issue or date_issue or number_issue))
-    return {"source": source, "issue": bool(issue), "blank": blank,
-            "missing_required": bool(f["required"] and blank)}
+    return {"source": source, "issue": bool(issue), "blank": blank}
 
 
 def _summary(doc: dict, extraction: dict) -> dict:
@@ -217,7 +216,6 @@ def _summary(doc: dict, extraction: dict) -> dict:
             "manual": sum(1 for s in statuses.values() if s["source"] == "manual"),
             "blank": sum(1 for s in statuses.values() if s["blank"]),
         },
-        "missing_required": list(extraction.get("missing_required") or []),
         "fields": {name: {**s, "warning": f.get("warning") or ""}
                    for name, s, f in ((f["field_name"], statuses[f["field_name"]], f) for f in extraction["fields"])},
     }
@@ -527,15 +525,9 @@ def confirm(doc_id: int):
         return jsonify(error="まだ読み取りをしていません"), 409
     if _is_stale(doc):
         return jsonify(error=STALE_MESSAGE), 409
-    payload = _payload()
     values = _json_values()
     if values and _apply_values(extraction, values, _data(doc, "confirmed_json")):
         db.save_draft(doc_id, _dumps(extraction))
-    missing = extraction.get("missing_required") or []
-    if missing and not payload.get("allow_missing"):
-        return jsonify(error=f"必須の項目が空欄です（{'、'.join(missing)}）。"
-                             "値を入れるか、「空欄のまま確定する」にチェックを入れてください",
-                       missing_required=missing), 409
     db.confirm_document(doc_id, title=_search_title(doc, extraction))
     return jsonify(ok=True, doc_id=doc_id)
 
@@ -560,7 +552,6 @@ def finish_fragment():
     batch_id = current.get("batch_id") or ""
     working = _data(current)
     extraction = _data(current, "confirmed_json") or working
-    missing = list((working or {}).get("missing_required") or [])
     html = render_template(
         "forms/_finish.html",
         docs=docs,
@@ -568,7 +559,6 @@ def finish_fragment():
         confirmed=confirmed,
         pending=pending,
         batch_id=batch_id if len(docs) > 1 else "",
-        missing=missing,
         read_yet=working is not None,
         confirmed_states=CONFIRMED_STATES,
         file_name=markdown_filename(current, extraction) if extraction else "",

@@ -96,9 +96,6 @@
       <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
     {% else %}
       <p>{{ test.total }}項目中 <strong>{{ test.found }}</strong>項目が見つかりました（シート: {{ test.sheets | join('、') }}）。</p>
-      {% if test.missing_required %}
-        <p class="warn">必須の項目が空欄です: {{ test.missing_required | join('、') }}</p>
-      {% endif %}
       <details class="fold" {% if test.found < test.total %}open{% endif %}>
         <summary>できる Markdown を見る（ファイル名: {{ test.file_name }}）</summary>
         <pre class="code md-preview">{{ test.markdown }}</pre>

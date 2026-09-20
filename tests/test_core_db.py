@@ -101,6 +101,13 @@ def test_migrates_old_db_with_registered_document(tmp_path):
         assert db.list_patterns()[0]["document_count"] == 1
         assert db.find_confirmed_by_hash("h1")["id"] == 1
 
+        # 古いDBに残っている pattern_fields.required（もう使わない「必須」）は書かない。
+        # 列があっても既定値のまま保存できる
+        assert "required" in {r[1] for r in conn.execute("PRAGMA table_info(pattern_fields)")}
+        db.save_pattern(pattern, "active")
+        assert [f.field_name for f in db.load_pattern(1).fields] == ["report_id"]
+        assert conn.execute("SELECT required FROM pattern_fields WHERE pattern_id = 1").fetchone()[0] == 0
+
     # 2回目の起動でも壊れない（冪等）
     app2 = make_app(tmp_path)
     with app2.app_context():

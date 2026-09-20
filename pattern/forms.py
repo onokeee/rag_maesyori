@@ -13,7 +13,6 @@ def pattern_to_rows(pattern: PatternDef) -> tuple[list[dict], list[dict]]:
             "display_name": f.display_name,
             "candidates": "\n".join(f.candidates),
             "data_type": f.data_type,
-            "required": f.required,
             "direction": f.direction,
             "unit": f.unit,
             "rag_output": f.rag_output,
@@ -48,7 +47,6 @@ def rows_to_pattern(pattern_id: int, meta: dict, sheet_rows: list[dict], field_r
             display_name=r["display_name"],
             # 「値だけ」の項目（クリックで作った、見出しの無い項目）は探す見出しを持たない
             candidates=r["candidates"].splitlines() or ([] if r.get("cell") else [r["display_name"]]),
-            required=r["required"],
             data_type=r["data_type"],
             direction=r["direction"],
             unit=r.get("unit", "") or "",

@@ -52,7 +52,7 @@
           <div class="field review-field{{ ' is-issue' if st.issue }}" data-field="{{ f.field_name }}" data-issue="{{ 1 if st.issue else 0 }}"
                data-sheet="{{ f.sheet or '' }}" data-label-cell="{{ f.label_cell or '' }}" data-value-cell="{{ f.value_cell or '' }}">
             <div class="cluster">
-              <label class="field-label" for="value-{{ f.field_name }}">{{ f.display_name }}{% if f.required %}<span class="req" title="必須">*</span>{% endif %}{% if f.unit %} <small class="muted">（{{ f.unit }}）</small>{% endif %}</label>
+              <label class="field-label" for="value-{{ f.field_name }}">{{ f.display_name }}{% if f.unit %} <small class="muted">（{{ f.unit }}）</small>{% endif %}</label>
               <span class="badge badge-{{ src[1] }}" data-source-badge>{{ src[0] }}</span>
               {% if f.value_cell %}<small class="muted">{{ f.sheet }}!{{ f.value_cell }}</small>{% endif %}
             </div>
@@ -86,7 +86,7 @@
             {% else %}
               <input class="input" id="value-{{ f.field_name }}" name="value-{{ f.field_name }}" value="{{ text }}" {% if f.data_type == 'date' %}placeholder="例: 2026-09-14"{% elif f.data_type == 'number' %}inputmode="decimal"{% endif %}>
             {% endif %}
-            <p class="warn" data-warning {% if not st.warning and not st.missing_required %}hidden{% endif %}>{% if st.missing_required %}必須の項目が空欄です。{% endif %}{{ st.warning }}</p>
+            <p class="warn" data-warning {% if not st.warning %}hidden{% endif %}>{{ st.warning }}</p>
           </div>
           {% endfor %}
           {% if extraction.attachments %}

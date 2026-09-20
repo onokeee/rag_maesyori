@@ -64,8 +64,7 @@ def match_pattern(info: WorkbookInfo, pattern: PatternDef) -> PatternMatch:
     if chosen:
         _add_continuation_sheets(info, pattern, chosen, found_by_sheet)
     found = set().union(*(found_by_sheet[n] for n in chosen)) if chosen else set()
-    weights = {fd.field_name: 2 if fd.required else 1 for fd in pattern.fields}
-    field_score = sum(weights[f] for f in found) / sum(weights.values()) if weights else 0.0
+    field_score = len(found) / len(pattern.fields) if pattern.fields else 0.0
     confidence = round(100 * (0.25 * sheet_score + 0.75 * field_score))
     return PatternMatch(pattern, confidence, chosen, len(found), len(pattern.fields))
 

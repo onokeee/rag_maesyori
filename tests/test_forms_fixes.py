@@ -3,7 +3,7 @@ from excel.extractor import apply_manual_values, refresh_summary
 
 
 def _number_field(**kw) -> dict:
-    f = {"field_name": "downtime", "display_name": "停止時間", "data_type": "number", "required": False,
+    f = {"field_name": "downtime", "display_name": "停止時間", "data_type": "number",
          "value": None, "unit": "", "warning": None, "edited": False}
     f.update(kw)
     return f
@@ -30,7 +30,7 @@ def test_manual_number_with_another_written_unit_keeps_it_and_stays_to_be_checke
     f = ex["fields"][0]
     assert f["value"] == 2.5 and f["unit"] == "時間" and f["edited"]
     assert f["warning"].startswith("この項目の単位は")
-    assert _field_status(f) == {"source": "manual", "issue": True, "blank": False, "missing_required": False}
+    assert _field_status(f) == {"source": "manual", "issue": True, "blank": False}
 
 
 def test_manual_number_takes_the_written_unit_when_the_form_type_has_none():
@@ -89,12 +89,12 @@ from models import database as db  # noqa: E402
 
 
 def _extraction(name="CMP研磨装置") -> str:
-    field = {"field_name": "equipment_name", "display_name": "設備名", "data_type": "string", "required": False,
+    field = {"field_name": "equipment_name", "display_name": "設備名", "data_type": "string",
              "value": name, "sheet": "報告書", "label_cell": "A1", "value_cell": "B1", "label_found": True,
              "warning": None, "edited": False, "unit": "", "spec_unit": "",
              "rag_output": "show", "table_columns": [], "table_blocks": 1}
     data = {"pattern": {"id": 1, "name": "設備修理報告書", "version": "v1"}, "sheets": ["報告書"],
-            "fields": [field], "attachments": [], "values": {"equipment_name": name}, "missing_required": []}
+            "fields": [field], "attachments": [], "values": {"equipment_name": name}}
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -226,7 +226,7 @@ def test_time_range_is_not_read_as_its_start_hour():
 # ---- 設備だけのタイトル（export/formats.py） ----------------------------------------------------
 
 def _md_field(name, display, value, data_type="string"):
-    return {"field_name": name, "display_name": display, "data_type": data_type, "required": False, "value": value,
+    return {"field_name": name, "display_name": display, "data_type": data_type, "value": value,
             "unit": "", "rag_output": "show", "edited": False}
 
 
@@ -348,7 +348,7 @@ def test_editing_a_reread_confirmed_form_keeps_the_new_form_type_settings(app, c
 def test_confirmed_field_is_not_restored_when_its_settings_differ():
     from views.forms import _restore_confirmed_fields
 
-    old = {"field_name": "line", "display_name": "ライン", "data_type": "string", "required": False,
+    old = {"field_name": "line", "display_name": "ライン", "data_type": "string",
            "value": "L4", "unit": "", "rag_output": "show"}
     new = dict(old, display_name="製造ライン", rag_output="omit", edited=True)
     confirmed = {"pattern": {"id": 1, "version_no": 2}, "sheets": ["s"], "fields": [old]}
@@ -429,7 +429,7 @@ def test_date_keeps_the_time_of_day():
 def test_hand_typed_date_without_a_year_stays_to_be_checked():
     from views.forms import _field_status
 
-    ex = {"fields": [{"field_name": "d", "display_name": "発生日", "data_type": "date", "required": False,
+    ex = {"fields": [{"field_name": "d", "display_name": "発生日", "data_type": "date",
                       "value": "2/12 3時17分", "warning": "年が書かれていません。", "edited": False}]}
     apply_manual_values(ex, {"value-d": "2/12 3:17"})
     assert ex["fields"][0]["edited"] and _field_status(ex["fields"][0])["issue"]

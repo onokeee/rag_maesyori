@@ -20,7 +20,7 @@ EXTRACTION = {
     "values": {"equipment_id": "EQ-001"},
     "fields": [{"field_name": "equipment_id", "display_name": "設備番号", "data_type": "string", "value": "EQ-001",
                 "sheet": "修理報告書", "label_cell": "A4", "value_cell": "B4", "edited": False}],
-    "missing_required": [], "attachments": [], "sheets": ["修理報告書"],
+    "attachments": [], "sheets": ["修理報告書"],
 }
 
 

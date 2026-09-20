@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS pattern_sheets (
     required INTEGER NOT NULL DEFAULT 1
 );
 
+-- 古いDBにある required 列（項目の「必須」）はもう使わない。画面に必須の設定が無いので作らず、
+-- 読み書きもしない（古いDBでは既定値 0 のまま残る。列があっても無くても同じように動く）
 CREATE TABLE IF NOT EXISTS pattern_fields (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
@@ -54,7 +56,6 @@ CREATE TABLE IF NOT EXISTS pattern_fields (
     field_name TEXT NOT NULL,
     display_name TEXT NOT NULL,
     candidates TEXT NOT NULL DEFAULT '[]',         -- JSON配列
-    required INTEGER NOT NULL DEFAULT 0,
     data_type TEXT NOT NULL DEFAULT 'string',
     extraction_rule TEXT NOT NULL DEFAULT '{}'     -- JSON {"direction", "columns", "section"}
 );
@@ -497,7 +498,6 @@ def _field_def(row: dict) -> FieldDef:
         field_name=row["field_name"],
         display_name=row["display_name"],
         candidates=json.loads(row["candidates"]),
-        required=bool(row["required"]),
         data_type=row["data_type"],
         direction=json.loads(row["extraction_rule"]).get("direction", "auto"),
     )
@@ -578,12 +578,12 @@ def save_pattern(pattern: PatternDef, status: str) -> None:
         )
         db.executemany(
             """INSERT INTO pattern_fields
-               (pattern_id, sort_order, field_name, display_name, candidates, required, data_type, extraction_rule,
+               (pattern_id, sort_order, field_name, display_name, candidates, data_type, extraction_rule,
                 unit, rag_output)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (pattern.id, i, f.field_name, f.display_name, json.dumps(f.candidates, ensure_ascii=False),
-                 int(f.required), f.data_type, json.dumps(_extraction_rule(f), ensure_ascii=False),
+                 f.data_type, json.dumps(_extraction_rule(f), ensure_ascii=False),
                  getattr(f, "unit", "") or "", getattr(f, "rag_output", "show") or "show")
                 for i, f in enumerate(pattern.fields)
             ],

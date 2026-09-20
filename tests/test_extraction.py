@@ -117,7 +117,7 @@ def test_builder_suggests_units_and_title_fields(repair_infos, tmp_path):
 
 def _field_row(field_name, display_name, data_type="string", **extra):
     row = {"use": True, "field_name": field_name, "display_name": display_name, "candidates": display_name,
-           "data_type": data_type, "required": False, "direction": "auto", "unit": "", "rag_output": "show",
+           "data_type": data_type, "direction": "auto", "unit": "", "rag_output": "show",
            "table_columns": "", "section": ""}
     row.update(extra)
     return row

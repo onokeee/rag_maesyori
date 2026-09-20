@@ -10,7 +10,7 @@ from tests.test_forms_fixes import _doc_version
 
 
 def _number_field(**kw) -> dict:
-    f = {"field_name": "downtime", "display_name": "停止時間", "data_type": "number", "required": False,
+    f = {"field_name": "downtime", "display_name": "停止時間", "data_type": "number",
          "value": None, "unit": "", "spec_unit": "", "warning": None, "edited": False}
     f.update(kw)
     return f
@@ -145,7 +145,7 @@ def test_excel_error_values_are_not_taken_as_values(tmp_path):
 def test_empty_table_add_and_remove_row_is_not_an_edit():
     from views.forms import _apply_values, _field_status
 
-    f = {"field_name": "parts", "display_name": "使用部品", "data_type": "table", "required": False,
+    f = {"field_name": "parts", "display_name": "使用部品", "data_type": "table",
          "value": None, "table_columns": ["部品名", "数量"], "warning": "表に行がありません",
          "edited": False, "unit": ""}
     ex = {"fields": [f], "pattern": {"id": 1, "version_no": 1}, "sheets": ["S"]}
