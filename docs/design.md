@@ -103,7 +103,17 @@ AI による種類の推定・空欄探しは無い（0.1）。
 1. **ファイル**：Excel/CSV をドロップ。
 2. **読み取り方**：CSV は文字コード・区切り・前置行、Excel はシート。変えるたびに自動で保存し、下の「表の範囲」を作り直す（取り込み設定は保存しないので、選ぶものは無い）。
 3. **表の範囲と見出し行**：先頭60行の色つきグリッドで確かめ、必要なら直す。
-4. **列の対応づけ**：表の上に「表の名前」（ファイル名から入れておく）を１つだけ置き、列ごとに「使う」「見出し（読むだけ）」「役割（識別番号 / 日付 / 設備 / AI整形の対象（追記ログ）/ その他）」の３つを決める。キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値から候補づくり（`tables/mapping.suggest_columns`）が決める。値の例と、知らせること（型エラー・空欄が多い・値の型が違う・はじめから使わない設定）があるときだけその列に出す。保存するとその取り込みの設定（`table_imports.spec_json`）になり、読み込みが始まる。
+4. **列の対応づけ**：表の上に「表の名前」（ファイル名から入れておく）を１つだけ置く。この段で決められるのは **「使う（＝Markdown に出す）」と「役割（識別番号 / 日付 / 設備 / AI整形の対象（追記ログ）/ その他）」だけ**で、キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値から候補づくり（`tables/mapping.suggest_columns`）が決める。保存するとその取り込みの設定（`table_imports.spec_json`）になり、読み込みが始まる。
+   - **決まっていれば要約1行だけ**にする（利用者の問い 2026-09-20「列の対応付けを行う意味は？」）。決めることが無いのに20行を超える表を出しても意味がないため。要約は見つけた四つの役割を名指しし、出す列と出さない列の数も書く（例:「カルテNo＝識別番号、発生日時＝日付、設備番号＝設備、対応内容＝AI整形の対象として読み取ります。20列のうち20列を Markdown に出します（出さない列はありません）。」）。設備やAI整形の対象の列が無い表では「設備の列はありません。」のようにそのまま書く。［変更する］（`static/tables.js` の `openColumnsTable`）で表が開く。
+   - **「決まっている」の決まり**（`views/tables.py` の `_columns_todo`・`UNSURE_BLANK_RATE`）。次をすべて満たすときだけ要約にする。
+     1. 識別番号の列がちょうど１つで、見出しが標準キー辞書と完全一致（`matched_by == "dictionary"`）
+     2. 日付の列がちょうど１つで、同じく完全一致
+     3. 設備の列は０か１つ。１つなら完全一致（０なら要約に「設備の列はありません」と書く）
+     4. AI整形の対象の列は０か１つ。１つなら完全一致（０なら要約にそう書く）
+     5. 出す列のどれにも、出すかどうかを決め直す理由が無い＝読み取れない値がある（`type_error_rate > 0`）／ほとんど空欄（`blank_rate >= 0.9`）
+     似た語で当たっただけ（`matched_by == "similar"`）や値の並びから当てた（`"none"`）列が四つの役割に付いていると 1〜4 で外れる。役割が合っているかは人にしか決められないため。半分くらい空欄なのは「知らせ」に出すだけで決め直す理由にしない。
+   - **決まっていないときは今までどおり表**を開き、上に決めてもらうことを１行ずつ並べる（「識別番号の列が決まっていません。1つ選んでください」「列「アラーム」に読み取れない値があります（5.0%）。出すかどうか決めてください」など）。表には列ごとに「使う」「見出し（読むだけ）」「役割」「値の例」と、知らせること（型エラー・空欄が多い・値の型が違う・はじめから使わない設定）があるときだけその列に出す。
+   - 要約のときも**列の表は隠して DOM に残す**ので、［変更する］を押しても押さなくても保存で送る中身（＝できる Markdown）は変わらない（`tests/test_tables_columns_summary.py`）。
 5. **AI整形（任意）**：決めた1つの列（いまは一覧表の追記ログ列）の文章を構成する。**AI接続の設定（接続先URL・APIキー・使うモデル・接続テスト）はこの段の中に畳んで置く**（`details`、既定は閉じる）。対象の列が無い取り込みでは灰色のままで、見出しに「追記ログの列（AI整形の対象）がないので、この取り込みでは使いません」と1行だけ出す。
 6. **できるものの確認**：作られる md の一覧と中身、警告、合計の照合。
 7. **確定してダウンロード（zip）**：渡し終わるとその取り込みのデータは消える（3.3）。
@@ -306,7 +316,7 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
 | WP-forms | `excel/*`, `pattern/*`, `export/formats.py`, `tests/test_extraction.py`, `tests/test_forms_md.py` | 帳票の md 改善（タイトル・ファイル名・定型文削減・値の NFKC・単位・出さない項目）、種類定義の拡張、一覧表らしさ判定関数 |
 | WP-shell | `app.py`, `config.py`, `templates/base.html`, `templates/components/_ui.html`, `templates/errors/*`, `static/style.css`, `static/app.js`, `views/__init__.py` | レイアウト・デザイン・ヘッダー（3画面だけ）・段（`.step` と `ragSections`）・エラー画面、blueprint 登録。ホーム画面・設定画面・`views/home.py`・`views/settings.py`・`templates/home.html`・`templates/settings/*` は削除済み |
 | WP-formsui | `views/forms.py`, `views/form_types.py`, `templates/forms/*`, `templates/form_types/*`, `static/review.js`, `tests/test_forms_flow.py` | 帳票フロー画面と帳票の種類の管理画面 |
-| WP-tablesui | `views/tables.py`, `templates/tables/*`, `static/tables.js`, `tests/test_tables_flow.py` | 一覧表の1画面（読み取り方・範囲・列の対応づけ・AI整形・確認・ダウンロード） |
+| WP-tablesui | `views/tables.py`, `templates/tables/*`, `static/tables.js`, `tests/test_tables_flow.py`, `tests/test_tables_columns_summary.py` | 一覧表の1画面（読み取り方・範囲・列の対応づけ・AI整形・確認・ダウンロード） |
 | WP-samples | `scripts/samples/*`（追記のみ）, `samples/`（生成物） | T1 に「対応内容」追記ログ列を追加（書き方の揺れを再現）など |
 
 依存：WP-core・WP-read・WP-log・WP-forms は並行（第1波）。WP-pipe・WP-ai は第1波の後（第2波）。WP-shell は第1波と並行可（テンプレートのみ）。WP-formsui・WP-tablesui は第2波の後（第3波）。

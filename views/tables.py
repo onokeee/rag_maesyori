@@ -533,6 +533,70 @@ def _column_row(sugg) -> dict:
             "warnings": _warnings_of(sugg)}
 
 
+# 「列の対応づけは決まっている」の決まり（利用者の問い 2026-09-20「列の対応付けを行う意味は？」）。
+# この段で決められるのは「出す／出さない」と四つの役割だけで、ふつうの一覧表ならそのどちらも
+# 候補づくり（tables.mapping）が見出しと値から決めている。決めることが無いのに22行の表を出すのは
+# 意味がないので、次の条件をすべて満たすときは表をたたんで要約1行だけ出す。
+#   1. 識別番号の列がちょうど1つで、見出しが辞書と完全一致している（matched_by == "dictionary"）
+#   2. 日付の列がちょうど1つで、同じく完全一致している
+#   3. 設備の列は0か1つ。1つなら完全一致している（0なら要約に「設備の列はありません」と書く）
+#   4. AI整形の対象の列は0か1つ。1つなら完全一致している（0なら要約にそう書く）
+#   5. 出す列のどれにも、出すかどうかを決め直す理由が無い
+#      ＝ 読めない値がある（type_error_rate > 0）／ほとんど空欄（blank_rate >= UNSURE_BLANK_RATE）
+# 似た語で当たっただけ（matched_by == "similar"）や、値の並びから当てた（"none"）列が四つの役割に
+# 付いていると 1〜4 で外れる。役割が本当に合っているかは人にしか決められないので、表を開く。
+# 半分くらい空欄なのは「知らせ」に出すだけで決め直す理由にしない（出しても困らないため）。
+UNSURE_BLANK_RATE = 0.9
+
+# 四つの役割（画面で決められるもの）と、要約・知らせに出す名前。識別番号と日付は無いと決まらない
+_DECIDED_ROLES = [("key", "識別番号", True), ("date", "日付", True),
+                  ("entity", "設備", False), ("log", "AI整形の対象", False)]
+
+
+def _role_columns(pairs, role: str) -> list[tuple[dict, object]]:
+    return [pair for pair in pairs if pair[0]["use"] and pair[0]["role"] == role]
+
+
+def _columns_todo(pairs) -> list[str]:
+    """表を開いて決めてもらうことを並べる（空なら要約だけでよい）。pairs: [(画面の1行, 候補)]"""
+    todo: list[str] = []
+    for role, label, required in _DECIDED_ROLES:
+        found = _role_columns(pairs, role)
+        if len(found) > 1:
+            todo.append(f"{label}の列が{len(found)}つあります。1つにしてください")
+        elif not found:
+            if required:
+                todo.append(f"{label}の列が決まっていません。1つ選んでください")
+        elif found[0][1].matched_by != "dictionary":
+            todo.append(f"「{found[0][0]['header']}」を{label}として読み取ります。これでよいか確かめてください")
+    for row, sugg in pairs:
+        if not row["use"]:
+            continue
+        if sugg.type_error_rate:
+            todo.append(f"列「{row['header']}」に読み取れない値があります"
+                        f"（{round(sugg.type_error_rate * 100, 1)}%）。出すかどうか決めてください")
+        elif sugg.blank_rate >= UNSURE_BLANK_RATE:
+            todo.append(f"列「{row['header']}」はほとんど空欄です"
+                        f"（{int(round(sugg.blank_rate * 100))}%）。出すかどうか決めてください")
+    return todo
+
+
+def _columns_summary(pairs) -> str:
+    """決まっているときに出す1行。見つけた役割と、出す列・出さない列の数を正直に書く。"""
+    named, missing = [], []
+    for role, label, _required in _DECIDED_ROLES:
+        found = _role_columns(pairs, role)
+        if found:
+            named.append(f"{found[0][0]['header']}＝{label}")
+        else:
+            missing.append(f"{label}の列はありません。")
+    used = sum(1 for row, _s in pairs if row["use"])
+    left = len(pairs) - used
+    return ("、".join(named) + "として読み取ります。" + "".join(missing)
+            + f"{len(pairs)}列のうち{used}列を Markdown に出します"
+            + (f"（残る{left}列は出しません）。" if left else "（出さない列はありません）。"))
+
+
 def _default_table_name(imp: dict) -> str:
     """表の名前の初期値。ファイル名から作る（設定は残らないので、名前もこの取り込みだけのもの）。"""
     return Path(imp["file_name"]).stem
@@ -594,8 +658,12 @@ def _panel_columns(imp: dict):
             row["use"] = col is not None
             if col is not None:
                 row["role"] = _screen_role(col.role)
+    # 決めることが無ければ表をたたんで要約1行にする（表は隠すだけで残すので、保存で送る中身は同じ）
+    pairs = list(zip(rows, suggestions))
+    todo = _columns_todo(pairs)
     html = render_template(
-        "tables/_p_columns.html", rows=rows, roles=SCREEN_ROLES,
+        "tables/_p_columns.html", rows=rows, roles=SCREEN_ROLES, todo=todo,
+        summary="" if todo else _columns_summary(pairs),
         name=spec.name if spec is not None else _default_table_name(imp),
         save_url=url_for("tables.save_columns", import_id=import_id))
     return _panel(html, note=f"{sum(1 for r in rows if r['use'])}／{len(rows)}列")

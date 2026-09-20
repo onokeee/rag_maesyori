@@ -490,6 +490,8 @@ details summary { cursor: pointer; color: var(--primary); }
 .col-editor input[type=text], .col-editor select { min-width: 7rem; width: 100%; }
 .col-editor .examples { font-size: .78rem; color: var(--muted); max-width: 14rem; white-space: pre-wrap; word-break: break-all; }
 .col-editor tr.is-unused td:not(:first-child) { opacity: .45; }
+/* 決めることが無いときの要約1行（表の代わり。［変更する］で表が出る） */
+.col-summary { margin: 0 0 var(--sp-3); font-size: .95rem; line-height: 1.7; }
 .seg-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: .5rem; }
 .seg-list li { border: 1px solid var(--border); border-radius: 6px; padding: .45rem .6rem; background: var(--surface); }
 .seg-meta { font-size: .82rem; color: var(--text-2); display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .2rem; }

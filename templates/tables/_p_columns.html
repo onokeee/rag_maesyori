@@ -1,6 +1,8 @@
 {#- 段4「列の対応づけ」の中身。決めるのは「表の名前」と、列ごとの「使う・役割」だけ。
     キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値からサーバーが決める（利用者の指示 2026-09-20）。
-    必要な変数: rows, roles, name, save_url -#}
+    決めることが無いとき（summary がある）は表をたたんで要約1行だけ出す。表は隠して DOM に残すので、
+    ［変更する］で開いても、開かずに保存しても、送る中身（＝できる Markdown）は変わらない。
+    必要な変数: rows, roles, name, save_url, summary, todo -#}
 {% import "components/_ui.html" as ui %}
 <div data-columns-editor data-save-url="{{ save_url }}">
   <label class="stack-label">表の名前
@@ -8,8 +10,18 @@
     <small>Markdown のファイル名と、データセット説明の見出しに使います。</small>
   </label>
 
-  {% call ui.card("列の対応づけ", "Markdown に出す列にチェックを入れ、役割を選びます。キー・型・単位・出し方は値から決めます。") %}
-    <div class="table-wrap">
+  {% call ui.card("列の対応づけ", "この段で決めるのは「出す列」と「役割」だけです。ほかは見出しと値から決めます。"
+                                  if summary else
+                                  "Markdown に出す列にチェックを入れ、役割を選びます。キー・型・単位・出し方は値から決めます。") %}
+    {% if summary %}
+    <div data-columns-summary>
+      <p class="col-summary">{{ summary }}</p>
+      <p><button type="button" class="btn" data-columns-open>変更する</button></p>
+    </div>
+    {% elif todo %}
+    <ul class="list-plain warn" data-columns-todo>{% for t in todo %}<li>{{ t }}</li>{% endfor %}</ul>
+    {% endif %}
+    <div class="table-wrap" data-columns-table {{ 'hidden' if summary }}>
     <table class="table compact col-editor">
       <thead>
         <tr><th>使う</th><th>見出し（そのまま項目名になります）</th><th>役割</th><th>値の例</th><th>知らせ</th></tr>

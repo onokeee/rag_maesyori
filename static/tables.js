@@ -353,6 +353,13 @@
       return;
     }
 
+    // 列の対応づけ: ［変更する］で要約をたたんで表を出す
+    const openTable = hit("[data-columns-open]");
+    if (openTable) {
+      openColumnsTable(openTable.closest("[data-columns-editor]"));
+      return;
+    }
+
     // 列の対応づけ: 保存して読み込む
     const save = hit("[data-editor-save]");
     if (save) {
@@ -567,6 +574,15 @@
   });
 
   // ---- 4 列の対応づけ -------------------------------------------------------------------
+  // ［変更する］: 要約を隠して表を出す。表は要約のときも DOM にあるので、保存で送る中身は変わらない
+  function openColumnsTable(editor) {
+    if (!editor) return;
+    const summary = editor.querySelector("[data-columns-summary]");
+    const table = editor.querySelector("[data-columns-table]");
+    if (summary) summary.hidden = true;
+    if (table) table.hidden = false;
+  }
+
   function onEditorChange(tr, input) {
     const editor = tr.closest("[data-columns-editor]");
     const field = input.dataset.field;
