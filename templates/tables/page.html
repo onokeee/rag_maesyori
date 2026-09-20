@@ -5,35 +5,41 @@
 {% block content %}
 {#- 表の取り込みは、この1枚で全部やる（利用者の指示 2026-09-20）。
     段の中身は /tables/imports/<id>/panel/<名前> が HTML の断片で返し、static/tables.js が入れる。 -#}
-<div class="page-head">
-  <div>
-    <h1>表の取り込み</h1>
-    <p class="page-lead">Excel/CSV の一覧・台帳（1行＝1件。例：トラブル対応一覧、故障履歴CSV）から、
-      LightRAG に入れやすい Markdown を作ります。この画面だけで最後まで終わります。</p>
-  </div>
-</div>
 
-<div data-tables-page
+<div data-tables-page data-steps-open
      data-upload-url="{{ url_for('tables.upload') }}"
+     data-discard-url="/tables/discard"
      data-new-url="{{ url_for('tables.new') }}">
+
+  {#- 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）を先に伝える。
+      実際に捨てるのは static/app.js の ragDiscard → POST /tables/discard。 -#}
+  <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた zip はその場でダウンロードしてください。</p>
 
   {% call ui.step("file", 1, "ファイルを置く", open=True) %}
     <form data-upload-form class="stack">
       {{ ui.file_drop("file", accept=".xlsx,.xlsm,.csv,.tsv,.txt", label="一覧表のファイルをここにドラッグ＆ドロップ",
            hint=".xlsx / .xlsm / .csv / .tsv / .txt（月別集計のようなクロス集計の表には対応していません）") }}
-      <div class="form-actions">
-        <button type="submit" class="btn primary" data-upload-run>このファイルを読み取る</button>
-        <button type="button" class="btn ghost" data-restart hidden>別のファイルにする</button>
-      </div>
     </form>
   {% endcall %}
 
-  {% call ui.step("source", 2, "読み取り方と取り込み設定") %}{% endcall %}
-  {% call ui.step("layout", 3, "表の範囲") %}{% endcall %}
-  {% call ui.step("columns", 4, "列の対応づけ") %}{% endcall %}
-  {% call ui.step("ai", 5, "AI整形（任意）") %}{% endcall %}
-  {% call ui.step("preview", 6, "内容の確認") %}{% endcall %}
-  {% call ui.step("done", 7, "確定してダウンロード（zip）") %}{% endcall %}
+  {% call ui.step("source", 2, "読み取り方と取り込み設定", open=True) %}
+    <p class="muted">上でファイルを置くと、ここに文字コード・区切り・シートと、使う取り込み設定が出ます。</p>
+  {% endcall %}
+  {% call ui.step("layout", 3, "表の範囲", open=True) %}
+    <p class="muted">見出しの行とデータの範囲を、色分けした先頭の行を見ながら決めます。</p>
+  {% endcall %}
+  {% call ui.step("columns", 4, "列の対応づけ", open=True) %}
+    <p class="muted">列ごとに、キー（見出し）・表示名・型・単位・役割を決めます。前と同じ形の表なら、この段は飛ばします。</p>
+  {% endcall %}
+  {% call ui.step("ai", 5, "AI整形（任意）", open=True) %}
+    <p class="muted">追記ログの列（例: 対応内容）があるときだけ使います。AI接続の設定もここにあります。</p>
+  {% endcall %}
+  {% call ui.step("preview", 6, "内容の確認", open=True) %}
+    <p class="muted">件数・問題の一覧と、作られる Markdown の中身をここで確認します。</p>
+  {% endcall %}
+  {% call ui.step("done", 7, "確定してダウンロード（zip）", open=True) %}
+    <p class="muted">確定すると、ここから zip をダウンロードできます。ダウンロードするとサーバーからデータが消えます。</p>
+  {% endcall %}
 </div>
 {% endblock %}
 {% block scripts %}<script src="{{ url_for('static', filename='tables.js') }}"></script>{% endblock %}

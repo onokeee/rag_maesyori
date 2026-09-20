@@ -164,7 +164,7 @@ def test_a_partly_confirmed_batch_does_not_say_everything_is_deleted(app, client
     body = _finish(client, [first, pending], current=first)
     assert body["confirmed"] == 1 and body["total"] == 2 and body["next_id"] == pending
     page = body["html"]
-    assert "このまとまりの帳票のデータはこのPCからすべて消えます" not in page
+    assert "このまとまりの帳票のデータはサーバーからすべて消えます" not in page
     assert "確定済みの1件だけを zip でダウンロードします" in page and "未確定の1件は残ります" in page
     assert "確定済み1件だけをダウンロード（zip）" in page
 
@@ -173,7 +173,7 @@ def test_a_partly_confirmed_batch_does_not_say_everything_is_deleted(app, client
         db.update_document(pending, data_json=_extraction(), confirmed_json=_extraction())
     page = _finish(client, [first, pending], current=first)["html"]
     assert "まとめて Markdown をダウンロード（zip）" in page and "確定済み1件だけ" not in page
-    assert "このまとまりの帳票のデータはこのPCからすべて消えます" in page
+    assert "このまとまりの帳票のデータはサーバーからすべて消えます" in page
 
 
 def test_batch_upload_error_names_the_file_that_was_skipped(app, client, sample_dir):

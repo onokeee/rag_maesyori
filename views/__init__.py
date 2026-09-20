@@ -4,8 +4,38 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from urllib.parse import quote, urlsplit
+from uuid import uuid4
 
-from flask import request
+from flask import request, session
+
+
+# ---- 使っている人ごとの作業場所 ---------------------------------------------------------
+# 社内LANのサーバーで動かし、数人が同時に別々のPCから使う（2026-09-20 の利用者の指示）。
+# ログインは無いので「誰か」は分からないが、「どのブラウザか」はセッションのクッキーで分かる。
+# 取り込んだ帳票・一覧表はそのブラウザのものとして持ち主を記録し、ほかのブラウザからは
+# 見えない・触れないようにする（views/forms.py・views/tables.py の 404）。
+# 「設定」（帳票の種類・取り込み設定・AI接続）はみんなで使うものなので分けない。
+
+SESSION_ID_KEY = "sid"
+
+
+def current_session_id() -> str:
+    """このブラウザの作業場所の id（クッキーに無ければ作る）。"""
+    sid = session.get(SESSION_ID_KEY)
+    if not isinstance(sid, str) or len(sid) != 32:
+        sid = uuid4().hex
+        session[SESSION_ID_KEY] = sid
+    return sid
+
+
+def owns(row) -> bool:
+    """帳票・取り込みの行がこのブラウザのものか。
+
+    session_id が空の行は持ち主が分からない（この仕組みを入れる前のDBの行・テストで直接作った行）ので、
+    これまでどおり誰からでも扱えるものとして扱う。起動時の片付けで消えるので、普段は残らない。
+    """
+    owner = (row or {}).get("session_id") if hasattr(row, "get") else None
+    return not owner or owner == current_session_id()
 
 
 def safe_next(default: str) -> str:
@@ -43,7 +73,7 @@ def set_download_name(response, name: str, default_stem: str):
 # 127.0.0.1 だけで待ち受けても、「利用者が開いた別のサイトのページが、そのブラウザから
 # このアプリへ POST する」ことは防げない（AI接続先の書き換え・帳票の削除などができてしまう）。
 # ブラウザは POST に必ず Origin を付け、最近のブラウザは Sec-Fetch-Site も付けるので、
-# 他サイト発と分かる書き込みだけを断る（curl などヘッダの無い要求はこのPCからの操作として許す）。
+# 他サイト発と分かる書き込みだけを断る（curl などヘッダの無い要求はアプリを直接たたく操作として許す）。
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 SAME_SITE_FETCH = ("same-origin", "none")

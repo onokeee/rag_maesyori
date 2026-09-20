@@ -24,6 +24,7 @@ from pattern.clicks import click_field, merge_labels, merge_target, split_rows, 
 from pattern.forms import pattern_to_meta, pattern_to_rows, rows_to_pattern
 from pattern.matcher import match_pattern
 from pattern.model import PatternDef
+from views import current_session_id
 from views.forms import _sheet_grids, upload_error_text
 
 bp = Blueprint("form_types", __name__, url_prefix="/form-types")
@@ -95,6 +96,9 @@ def _sample_infos(pattern_id: int) -> tuple[list[dict], list, list[str]]:
 
 @bp.get("/", endpoint="index")
 def page():
+    # 帳票の種類は「設定」なのでみんなで使う（ブラウザごとに分けない）。
+    # 作業場所のクッキーだけは、ここで開いたときにも決めておく（ほかの画面での取り違えを防ぐ）
+    current_session_id()
     return render_template("form_types/page.html", list_html=_list_html(),
                            max_mb=(current_app.config.get("MAX_CONTENT_LENGTH") or 0) // (1024 * 1024))
 
@@ -339,19 +343,32 @@ def change_status(pattern_id: int):
         return jsonify(error="読み取る項目がありません。シートで見出しのセルと値のセルをクリックしてください"), 400
     db.set_pattern_status(pattern_id, status)
     if status == "active":
+        # 残すのは設定だけ。使用開始の時点で見本の Excel は消す（design.md 3.3）
+        removed = _remove_samples(pattern_id)
         message = f"「{pattern.name}」の使用を開始しました。帳票取り込みの候補に出ます"
+        if removed:
+            message += "。見本のExcelはサーバーから消しました（設定だけ残ります）"
     else:
         message = f"「{pattern.name}」の使用を停止しました。帳票取り込みの候補に出なくなります"
     return jsonify(ok=True, status=status, html=_build_html(pattern_id), list_html=_list_html(), message=message)
 
 
-@bp.post("/<int:pattern_id>/delete")
-def delete(pattern_id: int):
-    pattern = _get_pattern(pattern_id)
+def _remove_samples(pattern_id: int) -> int:
+    """見本の Excel を消す（設定は残る）。戻り値は消した件数。"""
+    removed = 0
     for sample in db.list_samples(pattern_id):
         try:
             remove_upload(sample["stored_path"])
         except UploadError:
             pass
+        db.delete_sample(sample["id"])
+        removed += 1
+    return removed
+
+
+@bp.post("/<int:pattern_id>/delete")
+def delete(pattern_id: int):
+    pattern = _get_pattern(pattern_id)
+    _remove_samples(pattern_id)
     db.delete_pattern(pattern_id)
     return jsonify(ok=True, list_html=_list_html(), message=f"帳票の種類「{pattern.name}」を削除しました")

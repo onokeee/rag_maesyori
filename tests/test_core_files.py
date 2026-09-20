@@ -132,7 +132,7 @@ def test_precheck_zip_limits(tmp_path, monkeypatch):
 def test_remove_upload_empties_a_locked_file_and_reports_it(core_app, monkeypatch):
     """他のプロセスに掴まれていて消せないときは、例外を出さずに中身を空にして False を返す。
 
-    「ダウンロードしたらこのPCから消えます」（design.md 3.3）と言い切っているので、ファイル名が残っても
+    「ダウンロードしたらサーバーから消えます」（design.md 3.3）と言い切っているので、ファイル名が残っても
     元の Excel/CSV の中身は残さない（空になったファイルは次の起動時に片付く）。
     """
     with core_app.app_context():

@@ -110,8 +110,10 @@
     const name = newForm.querySelector("[data-type-name]");
     if (file && name) {
       file.addEventListener("change", () => {
-        if (!file.files || !file.files.length || name.value.trim()) return;
-        name.value = file.files[0].name.replace(/\.[^.]+$/, "");
+        if (!file.files || !file.files.length) return;
+        if (!name.value.trim()) name.value = file.files[0].name.replace(/\.[^.]+$/, "");
+        // 置いたらそのままシートを開く（ボタンを押さなくてよい）
+        newForm.requestSubmit();
       });
     }
     newForm.addEventListener("submit", async (event) => {

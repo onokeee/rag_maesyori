@@ -32,7 +32,7 @@ from excel.workbook import WorkbookInfo, load_workbook_info
 from export.formats import build_markdown, markdown_filename
 from models import database as db
 from pattern.matcher import rank_patterns, table_like_sheets
-from views import set_download_name
+from views import current_session_id, owns, set_download_name
 
 bp = Blueprint("forms", __name__, url_prefix="/forms")
 
@@ -42,10 +42,10 @@ GRID_MAX_COLS = 60
 CONFIRMED_STATES = ("confirmed", "modified")
 MAX_BATCH_FILES = 50
 # ダウンロードでデータが消えることの案内（画面の文言・確認ダイアログで使う）
-DELETE_ON_DOWNLOAD_NOTE = ("ダウンロードすると、この帳票の元のファイルと読み取り結果はこのPCから消えます。"
+DELETE_ON_DOWNLOAD_NOTE = ("ダウンロードすると、この帳票の元のファイルと読み取り結果はサーバーから消えます。"
                            "同じものをもう一度ダウンロードすることはできません。")
-DELETE_ON_DOWNLOAD_CONFIRM = "ダウンロードすると、この帳票のデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
-BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳票のデータはこのPCからすべて消えます。"
+DELETE_ON_DOWNLOAD_CONFIRM = "ダウンロードすると、この帳票のデータはサーバーから消えます。もう一度ダウンロードすることはできません。"
+BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳票のデータはサーバーからすべて消えます。"
                         "もう一度ダウンロードすることはできません。")
 LOST_WORK_MESSAGE = "読み取り直すと、手で修正した値は失われます"
 # 別のタブ・古い画面から保存・確定されたときの案内
@@ -55,8 +55,12 @@ STALE_MESSAGE = "別の画面で内容が変わりました。画面を読み込
 # ---- 共通 -------------------------------------------------------------------------
 
 def _get_document(doc_id: int) -> dict:
+    """この画面（このブラウザ）の帳票を返す。ほかの人の帳票は「無い」として扱う（404）。
+
+    403 にすると「その番号の帳票はある」ことが分かってしまうので、404 にそろえる。
+    """
     doc = db.get_document(doc_id)
-    if doc is None:
+    if doc is None or not owns(doc):
         abort(404)
     return doc
 
@@ -285,6 +289,7 @@ def _is_stale(doc: dict) -> bool:
 @bp.get("/new", endpoint="new")
 def page():
     """帳票取り込みの1枚の画面。ここから先はすべて fetch で欄が増えていく。"""
+    current_session_id()   # 画面を開いた時点で作業場所（クッキー）を決めておく（同時に置かれても取り違えない）
     return render_template("forms/page.html",
                            active_pattern_count=db.count_active_patterns(),
                            pattern_count=len(db.list_patterns()),
@@ -321,7 +326,7 @@ def _store_document(storage, batch_id: str = "", order: int = 0) -> int:
         remove_upload(stored.stored_path)   # 思わぬエラーでもアップロードしたファイルを残さない（design.md 3.3）
         raise
     return db.create_document(stored.file_name, stored.file_hash, stored.stored_path,
-                              batch_id=batch_id, batch_order=order)
+                              batch_id=batch_id, batch_order=order, session_id=current_session_id())
 
 
 @bp.post("/upload")
@@ -345,6 +350,30 @@ def upload():
     if not docs:
         return jsonify(error=errors[0] if errors else "取り込めるファイルがありませんでした", errors=errors), 400
     return jsonify(docs=docs, batch_id=batch_id, errors=errors)
+
+
+# ---- 画面を離れたので捨てる ------------------------------------------------------------
+# 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）。
+# 画面を閉じた・隠したときに static/app.js の ragDiscard がここへ「捨てて」と送ってくる。
+# 送り主は navigator.sendBeacon なので、
+#   - 中身の型は text/plain（get_json(force=True) で読む）
+#   - 応答は読めず、やり直しもできない（いつでも 204 を返し、4xx にしない）
+# もう無い番号・ほかの人の番号・処理中のものは core.purge 側で黙って外れる。
+
+@bp.post("/discard")
+def discard():
+    """この画面（このブラウザ）の、まだダウンロードしていない帳票を捨てる。"""
+    payload = request.get_json(force=True, silent=True) or {}
+    ids = payload.get("doc_ids") or []
+    sid = current_session_id()
+    try:
+        if ids:
+            purge.discard_documents(ids, sid)
+        else:
+            purge.purge_session(sid, tables=False)   # 表の取り込み（別のタブ）は巻き込まない
+    except Exception as exc:   # 捨て損ねてもブラウザには伝えられない。時間切れの片付けに任せる
+        current_app.logger.warning("帳票の片付けに失敗しました: %s", exc.__class__.__name__)
+    return "", 204
 
 
 # ---- 2 帳票の種類とシート ---------------------------------------------------------------
@@ -377,7 +406,8 @@ def type_fragment(doc_id: int):
         selected_id=selected_id,
         selected_sheets=selected_sheets,
         table_sheets=table_like_sheets(info),
-        duplicate=db.find_confirmed_by_hash(doc["file_hash"], exclude_id=doc["id"]),
+        duplicate=db.find_confirmed_by_hash(doc["file_hash"], exclude_id=doc["id"],
+                                            session_id=current_session_id()),
         lost_work=doc["state"] in CONFIRMED_STATES,
         form_types_url=url_for("form_types.index"),
     )
@@ -523,8 +553,8 @@ def confirm(doc_id: int):
 
 
 def _docs_of(ids: list[int]) -> list[dict]:
-    docs = [d for d in (db.get_document(i) for i in ids) if d is not None]
-    return docs
+    """この画面の帳票だけ（ほかのブラウザの帳票は、番号を送られても無いものとして外す）。"""
+    return [d for d in (db.get_document(i) for i in ids) if d is not None and owns(d)]
 
 
 @bp.get("/finish", endpoint="finish")
@@ -569,7 +599,7 @@ def _batch_zip_confirm(docs: list[dict]) -> str:
     pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
     confirmed = len(docs) - len(pending)
     if pending:
-        return (f"確定済みの{confirmed}件だけを zip でダウンロードします。その{confirmed}件のデータはこのPCから消えます"
+        return (f"確定済みの{confirmed}件だけを zip でダウンロードします。その{confirmed}件のデータはサーバーから消えます"
                 f"（未確定の{len(pending)}件は残ります）。")
     return BATCH_DELETE_CONFIRM
 
@@ -607,7 +637,7 @@ def _unique_name(name: str, used: set[str]) -> str:
 
 def _batch_markdown_files(confirmed_ids: list[int]) -> list[tuple[str, bytes]]:
     files, used = [], set()
-    for doc in db.list_confirmed_documents(confirmed_ids):
+    for doc in db.list_confirmed_documents(confirmed_ids, session_id=current_session_id()):
         try:
             extraction = json.loads(doc["confirmed_json"])
         except (TypeError, ValueError):
@@ -621,11 +651,11 @@ def _batch_markdown_files(confirmed_ids: list[int]) -> list[tuple[str, bytes]]:
 def download_batch(batch_id: str):
     """まとめ取り込み1回分の Markdown を zip で渡し、渡し終えた分のデータを消す。
 
-    確定済みの帳票だけを zip にして、その分だけ消す（未確定の帳票はこのPCに残る）。
+    確定済みの帳票だけを zip にして、その分だけ消す（未確定の帳票はサーバーに残る）。
     """
-    docs = db.list_batch_documents(batch_id)
+    docs = db.list_batch_documents(batch_id, session_id=current_session_id())
     if not docs:
-        abort(404)
+        abort(404)   # ほかのブラウザのまとまりも「無い」として扱う
     pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
     confirmed_ids = [d["id"] for d in docs if d["state"] in CONFIRMED_STATES]
     if not confirmed_ids:

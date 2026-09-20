@@ -17,7 +17,7 @@
       <button type="button" class="btn primary" data-set-status="active" data-pattern="{{ pattern.id }}">使用開始</button>
     {% endif %}
     <button type="button" class="btn danger-outline" data-delete-type="{{ pattern.id }}"
-            data-confirm="帳票の種類「{{ pattern.name }}」と見本ファイルを削除します。元に戻せません。&#10;確定済みの帳票{{ confirmed_count }}件は削除されずに残ります。"
+            data-confirm="帳票の種類「{{ pattern.name }}」を削除します。元に戻せません。&#10;確定済みの帳票{{ confirmed_count }}件は削除されずに残ります。"
             data-confirm-ok="削除">この種類を削除</button>
   </div>
 
@@ -37,7 +37,7 @@
       </div>
       <div class="split-pane-body">
         {% if not grids %}
-          <p class="muted">見本ファイルがありません。下の「別の見本を足す」から選んでください。</p>
+          <p class="muted">見本のExcelはサーバーに残していません。同じ帳票のExcelを下の「見本のExcelを置く」で置くと、シートを見ながら項目を直せます。</p>
         {% endif %}
         <p class="hint" data-click-hint aria-live="polite">見出しのセルをクリックしてください。</p>
         <div class="btn-row" data-click-actions hidden>
@@ -127,22 +127,22 @@
 
   {# ---- 見本ファイル ---- #}
   <section class="card">
-    <div class="card-head"><div><h3 class="card-title">見本ファイル</h3></div></div>
+    <div class="card-head"><div><h3 class="card-title">見本のExcel</h3></div></div>
     {% if samples %}
     <ul class="sample-list">
       {% for s in samples %}
         <li>{{ s.file_name }}
           <button type="button" class="btn danger-outline small"
                   data-delete-sample="{{ url_for('form_types.delete_sample', pattern_id=pattern.id, sample_id=s.id) }}"
-                  data-confirm="見本ファイル「{{ s.file_name }}」をこのPCから削除します。元に戻せません。"
-                  data-confirm-ok="削除">見本ファイルを削除</button></li>
+                  data-confirm="見本のExcel「{{ s.file_name }}」をサーバーから削除します。設定は残ります。"
+                  data-confirm-ok="削除">いま消す</button></li>
       {% endfor %}
     </ul>
     {% endif %}
     <form class="upload-form" data-add-samples="{{ url_for('form_types.add_samples', pattern_id=pattern.id) }}"
           enctype="multipart/form-data">
       <input type="file" name="samples" accept=".xlsx,.xlsm" multiple required aria-label="見本ファイル">
-      <button type="submit" class="btn">別の見本を足す</button>
+      <button type="submit" class="btn">見本のExcelを置く</button>
     </form>
     <p class="hint">書き方の違う同じ帳票（「設備No」と「設備番号」など）を足して同じ欄をクリックすると、どちらの書き方でも読めるようになります。</p>
   </section>

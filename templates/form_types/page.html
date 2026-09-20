@@ -3,16 +3,11 @@
 {% block title %}帳票登録{% endblock %}
 {% block container_class %}wide{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>帳票登録</h1>
-    <p class="page-lead">帳票（1ファイル＝1件）のどこに何が書いてあるかを登録します。見本の Excel を1つ置き、読み取りたい欄の
-      <strong>見出しのセル</strong>と<strong>値のセル</strong>をクリックするだけです。［使用開始］を押すと、
-      <a href="{{ url_for('forms.index') }}">帳票取り込み</a>の候補に出ます。</p>
-  </div>
-</div>
 
-<div id="typesPage" data-create-url="{{ url_for('form_types.create') }}" data-list-url="{{ url_for('form_types.list_fragment') }}">
+<div id="typesPage" data-steps-open data-create-url="{{ url_for('form_types.create') }}" data-list-url="{{ url_for('form_types.list_fragment') }}">
+
+  {#- 帳票登録は見本のExcelを預かるだけ（取り込んだデータは持たない）。捨てるのは［使用開始］と起動時。 -#}
+  <p class="notice" role="note">［使用開始］まで進めないまま画面を閉じると、置いた見本の Excel は捨てられます。登録した帳票の種類（読み取りの設定）は残ります。</p>
 
   {% call ui.step("list", 1, "登録済みの帳票の種類", open=True) %}
       <div data-list-body>{{ list_html | safe }}</div>
@@ -23,19 +18,27 @@
         {{ ui.file_drop("samples", accept=".xlsx,.xlsm", label="この種類の帳票のExcelをここにドラッグ＆ドロップ",
                         hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。合計" ~ max_mb ~ "MBまで", multiple=False) }}
         <label class="field"><span>帳票の種類の名前<span class="req">*</span></span>
-          <input name="name" class="input" placeholder="置いたファイルの名前が入ります" data-type-name required></label>
-        <p class="notice" role="note">見本の Excel は、項目の見直しと読み取りテストに使うため<strong>このPCに残り続けます</strong>
-          （取り込んだ帳票と違って、ダウンロードで消える対象ではありません）。本物の報告書を見本にしたときは、
-          使い終わったあとに下の［見本ファイルを削除］で消してください。</p>
-        <div class="form-actions">
-          <button type="submit" class="btn primary">シートを開いて項目を作る</button>
-        </div>
+          <input name="name" class="input" placeholder="置いたファイルの名前が入ります" data-type-name required>
+          <span class="hint">置くとすぐにシートが開きます。名前は下の画面で直せます。</span></label>
+        <p class="hint" role="note">置いた Excel は項目を作る間だけ使います。［使用開始］を押すとサーバーから消え、<strong>残るのは読み取りの設定だけ</strong>です。</p>
       </form>
       <p class="work-line" data-work="create" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
   {% endcall %}
 
-  {% call ui.step("build", 3, "読み取る欄をクリックする") %}
-      <div data-build-body></div>
+  {% call ui.step("build", 3, "読み取る欄をクリックする", open=True) %}
+      <div data-build-body>
+        <div class="split">
+          <section class="split-pane" aria-label="見本のシート">
+            <div class="split-pane-head"><h3>見本のシート</h3></div>
+            <div class="split-pane-body"><p class="muted">上で Excel を置くと、ここにシートが出ます。
+              見出しのセル、次に値のセルをクリックすると項目になります。</p></div>
+          </section>
+          <section class="split-pane" aria-label="読み取る項目">
+            <div class="split-pane-head"><h3>読み取る項目(0)</h3></div>
+            <div class="split-pane-body"><p class="muted">まだ項目がありません。</p></div>
+          </section>
+        </div>
+      </div>
   {% endcall %}
 </div>
 {% endblock %}

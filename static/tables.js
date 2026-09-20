@@ -12,8 +12,18 @@
   const JOB_FINISHED = ["done", "failed", "cancelled", "interrupted"];
 
   let urls = null;                 // サーバが返す各 URL（取り込みごと）
+  let importId = null;             // いま画面で作業している取り込みの番号（捨てるときに使う）
   const pollers = {};              // 段ごとの進捗の見張り
   const notes = {};                // 段ごとの要約（見出しに出す）
+
+  // ダウンロードしないまま画面を離れたら、この取り込みは捨てる（利用者の指示 2026-09-20）。
+  // 番号はサーバが返す URL から取る（res.import_id があればそれを使う）。
+  const idFrom = (url) => {
+    const hit = /\/imports\/(\d+)\//.exec(url || "");
+    return hit ? Number(hit[1]) : null;
+  };
+  const guard = (window.ragDiscard || { watch: () => ({ now: async () => {}, clear() {}, arm() {} }) })
+    .watch(page.dataset.discardUrl || "/tables/discard", () => ({ import_ids: importId ? [importId] : [] }));
 
   const el = (tag, attrs = {}, ...children) => {
     const node = document.createElement(tag);
@@ -56,7 +66,11 @@
         if (JOB_FINISHED.includes(job.status)) return;
       } catch (e) {
         if (e.status === 404) {
-          onUpdate({ status: "failed", message: "処理の記録が見つかりません" });
+          // 取り込みごと無くなった（ダウンロードした・自分で消した・画面を離れて捨てた）。
+          // 失敗ではないので何も言わず止め、画面を最初の状態に戻す
+          stopped = true;
+          clearTimeout(timer);
+          window.location.reload();
           return;
         }
         wait = Math.min(wait * 2, 8000);   // 通信エラーは間隔を広げて続ける
@@ -251,6 +265,10 @@
 
   // ---- 1 ファイルを置く ---------------------------------------------------------------
   const uploadForm = page.querySelector("[data-upload-form]");
+  // 置いた（またはクリックで選んだ）時点でそのまま読み取る。ボタンは押さなくてよい
+  uploadForm?.querySelector("input[type=file]")?.addEventListener("change", (event) => {
+    if (event.target.files && event.target.files.length) uploadForm.requestSubmit();
+  });
   uploadForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
     const button = uploadForm.querySelector("[data-upload-run]");
@@ -259,24 +277,29 @@
       toast("ファイルを選んでください。", "err");
       return;
     }
-    button.disabled = true;
+    if (button) button.disabled = true;
     sections.working("file", "ファイルを読み取っています…");
     try {
+      // 新しいファイルを置いたら、前の取り込み（ダウンロードしていない分）はその場で捨てる
+      if (importId) { await guard.now(); importId = null; urls = null; }
       const res = await rf(page.dataset.uploadUrl, { form: new FormData(uploadForm), quiet: true });
       urls = res.urls;
+      importId = Number(res.import_id) || idFrom(urls && urls.panel);
       sections.done("file", res.file_name);
-      uploadForm.querySelector("[data-restart]").hidden = false;
       await loadPanel("layout", { open: true, scroll: false });
       await loadPanel("source", { open: true });
     } catch (e) {
       toast(e.message, "err");
     } finally {
-      button.disabled = false;
+      if (button) button.disabled = false;
       sections.working("file", "");
     }
   });
 
-  page.querySelector("[data-restart]")?.addEventListener("click", () => {
+  page.querySelector("[data-restart]")?.addEventListener("click", async () => {
+    // 別のファイルにするときも、いまの取り込み（ダウンロードしていない分）はその場で捨てる
+    await guard.now();
+    importId = null;
     window.location.href = page.dataset.newUrl;
   });
 
@@ -306,6 +329,7 @@
       if (!confirmed(delImport)) return;
       try {
         const res = await rf(urls.delete, { json: {}, quiet: true });
+        importId = null;                      // もう消えているので、画面を離れるときに捨てるものは無い
         toast(res.message || "削除しました");
         window.location.href = page.dataset.newUrl;
       } catch (e) {
@@ -404,10 +428,12 @@
     const download = hit("[data-done-page] a[href$='download.zip']");
     if (download) {
       if (!confirmed(download)) return;
+      // 渡した時点でサーバ側は消える（purge_after_send）ので、画面を離れるときに捨てるものはもう無い
+      importId = null;
       setTimeout(() => {
         body("done").replaceChildren(
           el("p", { text: "ダウンロードしました。この取り込みのデータ（元のファイル・読み込んだ内容・作った Markdown）は"
-                          + "このPCから消えています。" }),
+                          + "サーバーから消えています。" }),
           el("p", { class: "hint", text: "zip の「RAG投入用」フォルダの .md を LightRAG の画面にドラッグしてください。" }),
           el("div", { class: "form-actions" },
             el("button", { type: "button", class: "btn primary", "data-restart-done": "", text: "別の表を取り込む" })));
@@ -542,6 +568,9 @@
     detectTimer = setTimeout(async () => {
       const mine = ++detectSeq;
       root.setAttribute("aria-busy", "true");
+      // 大きい表は判定に数秒かかる。古い表示のままだと「効いていない」ように見えるので、その場に出す
+      const rangeEl = root.querySelector("[data-range]");
+      if (rangeEl) rangeEl.textContent = "判定しています…";
       try {
         const info = await rf(urls.detect, {
           json: { header_rows: parseRows(root.querySelector("[data-header-input]").value),
@@ -549,6 +578,7 @@
           quiet: true });
         if (mine === detectSeq) applyLayout(root, info);
       } catch (e) {
+        if (rangeEl) rangeEl.textContent = "判定できませんでした";
         toast(e.message, "err");
       } finally {
         root.removeAttribute("aria-busy");
@@ -560,11 +590,8 @@
     const root = th.closest("[data-layout-page]");
     const n = Number(th.parentElement.dataset.row);
     const headerInput = root.querySelector("[data-header-input]");
-    const endInput = root.querySelector("[data-end-input]");
-    const mode = root.querySelector("input[name=pick]:checked")?.value || "header";
-    if (mode === "end") {
-      endInput.value = String(n);
-    } else if (shift) {
+    // 行番号のクリックは見出し行の指定（Shift で2段）。データの終わりは入力欄で決める
+    if (shift) {
       const all = [...new Set([...parseRows(headerInput.value), n])].sort((a, b) => a - b);
       headerInput.value = [all[0], all[all.length - 1]].filter((v, i, a) => a.indexOf(v) === i).join(",");
     } else {

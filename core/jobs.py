@@ -6,8 +6,11 @@
   動いている間も、このプロセスが持っていないジョブの heartbeat が古ければ、参照したときに「中断」にする
   （アプリを閉じてすぐ起動し直したとき、前のプロセスのジョブが「処理中」のまま残らないように）。
 - AI整形（ai_format）は何時間もかかったり一時停止したりするので、読み込み・プレビュー・Markdown作成とは
-  別のワーカーで動かす（止めている間に、ほかの取り込みの作業まで止まらないように）。
+  別の列（lane）で動かす（止めている間に、ほかの取り込みの作業まで止まらないように）。
   同じ取り込みのジョブは、列が違っても同時には動かさない（前のジョブが終わるまで待たせる）。
+- 社内LANのサーバーで数人が同時に使う（2026-09-20 の利用者の指示）ので、列ごとに数本のワーカーを持つ
+  （JOB_WORKERS。既定 3）。誰かが3万行の表を読んでいる間、ほかの人の読み込みが待たされないようにする。
+  取り込みごとの直列（同じ取り込みを2つのジョブが同時に触らない）は、ワーカーが増えても守る。
 """
 from __future__ import annotations
 
@@ -48,13 +51,22 @@ STATUS_LABELS = {
 # ジョブの種類 → 動かす列（書いていない種類は "main"）
 LANE_OF_KIND = {"ai_format": "ai"}
 
+# 列ごとのワーカー本数（app.config["JOB_WORKERS"]）。数人が同時に使うので、1本だと
+# 誰かの長い読み込みでほかの人が待たされる。増やしすぎても DB とディスクの取り合いになるだけ
+DEFAULT_WORKERS = 3
+MAX_WORKERS = 8
+IDLE_POLL = 1.0                  # 待つものが何も無いときに、キューを見直す間隔（秒）
+
 _queues: dict[str, queue.Queue] = {}
-_workers: dict[str, threading.Thread] = {}
+# キューから取り出したが、まだ始めていないジョブ（列ごと。同じ列のワーカーで分け合う）
+_pending: dict[str, list] = {}
+# (列, 何本目) → ワーカーのスレッド
+_workers: dict[tuple[str, int], threading.Thread] = {}
 _worker_lock = threading.Lock()
-# 各列がいま実行している取り込み（ref_type, ref_id）。同じ取り込みのジョブを別の列で同時に動かさないため
-_executing: dict[str, tuple] = {}
-# 各列がいま実行しているジョブ（DB のパス, job_id）。待機中のジョブに「何を待っているか」を出すため
-_executing_job: dict[str, tuple[str, int]] = {}
+# 各ワーカーがいま実行している取り込み（ref_type, ref_id）。同じ取り込みのジョブを2つ同時に動かさないため
+_executing: dict[tuple[str, int], tuple] = {}
+# 各ワーカーがいま実行しているジョブ（DB のパス, job_id）。待機中のジョブに「何を待っているか」を出すため
+_executing_job: dict[tuple[str, int], tuple[str, int]] = {}
 # このプロセスが登録したジョブ（DB のパス, job_id）。これ以外で heartbeat が古いものは持ち主がいない
 _owned: set[tuple[str, int]] = set()
 
@@ -226,7 +238,7 @@ def start_job(kind: str, ref_type: str, ref_id: int | None, fn: Callable[[JobCon
         _owned.add((_db_key(), job_id))
         q = _queues.setdefault(lane, queue.Queue())
     q.put((app, job_id, fn, ref, _db_key()))
-    _ensure_worker(lane)
+    _ensure_workers(lane)
     return job_id
 
 
@@ -234,44 +246,64 @@ def _db_key() -> str:
     return str(current_app.config["DATABASE"])
 
 
-def _ensure_worker(lane: str) -> None:
+def worker_count() -> int:
+    """1つの列で同時に動かすジョブの本数（app.config["JOB_WORKERS"]、既定 3）。"""
+    try:
+        value = int(current_app.config.get("JOB_WORKERS") or DEFAULT_WORKERS)
+    except (KeyError, RuntimeError, TypeError, ValueError):
+        value = DEFAULT_WORKERS
+    return max(1, min(MAX_WORKERS, value))
+
+
+def _ensure_workers(lane: str) -> None:
+    """その列のワーカーを必要な本数まで立てる（落ちていたら立て直す）。"""
+    count = worker_count()
     with _worker_lock:
-        worker = _workers.get(lane)
-        if worker is None or not worker.is_alive():
-            worker = threading.Thread(target=_worker_loop, args=(lane,), name=f"job-worker-{lane}", daemon=True)
-            _workers[lane] = worker
-            worker.start()
+        for index in range(count):
+            key = (lane, index)
+            worker = _workers.get(key)
+            if worker is None or not worker.is_alive():
+                worker = threading.Thread(target=_worker_loop, args=(lane, index), daemon=True,
+                                          name=f"job-worker-{lane}-{index}")
+                _workers[key] = worker
+                worker.start()
 
 
-def _next_item(lane: str, pending: list):
-    """次に実行するものを取り出す。同じ取り込みを別の列が実行中なら、その取り込みの分は後回しにする。
+def _next_item(lane: str, key: tuple[str, int]):
+    """次に実行するものを取り出す。同じ取り込みを別のワーカーが実行中なら、その取り込みの分は後回しにする。
 
     先頭から見て最初に動けるものを選ぶので、同じ取り込みの後ろのジョブが前のジョブを追い越すことはない。
+    待ち行列（_pending）は同じ列のワーカーで分け合うので、どのワーカーも必ず時間を区切って見直す
+    （別のワーカーが取り出して置いた分に、いつまでも誰も手を付けない、が起きないように）。
     """
     q = _queues[lane]
     while True:
-        try:
-            while True:
-                pending.append(q.get_nowait())
-        except queue.Empty:
-            pass
         with _worker_lock:
-            busy = {ref for other, ref in _executing.items() if other != lane and ref is not None}
+            pending = _pending.setdefault(lane, [])
+            try:
+                while True:
+                    pending.append(q.get_nowait())
+            except queue.Empty:
+                pass
+            busy = {ref for other, ref in _executing.items() if other != key and ref is not None}
             for i, item in enumerate(pending):
                 if item[3] is None or item[3] not in busy:
-                    _executing[lane] = item[3]
-                    _executing_job[lane] = (item[4], item[1])
+                    _executing[key] = item[3]
+                    _executing_job[key] = (item[4], item[1])
                     return pending.pop(i)
+            waiting = bool(pending)
         try:
-            pending.append(q.get(timeout=PAUSE_POLL if pending else None))
+            item = q.get(timeout=PAUSE_POLL if waiting else IDLE_POLL)
         except queue.Empty:
-            pass
+            continue
+        with _worker_lock:
+            _pending.setdefault(lane, []).append(item)
 
 
-def _worker_loop(lane: str = "main") -> None:
-    pending: list = []
+def _worker_loop(lane: str = "main", index: int = 0) -> None:
+    key = (lane, index)
     while True:
-        app, job_id, fn, _ref, _db = _next_item(lane, pending)
+        app, job_id, fn, _ref, _db = _next_item(lane, key)
         try:
             _run(app, job_id, fn)
         except Exception:  # ワーカーは止めない
@@ -282,8 +314,8 @@ def _worker_loop(lane: str = "main") -> None:
             _fail_left_open(app, job_id)
         finally:
             with _worker_lock:
-                _executing.pop(lane, None)
-                _executing_job.pop(lane, None)
+                _executing.pop(key, None)
+                _executing_job.pop(key, None)
 
 
 def _fail_left_open(app, job_id: int) -> None:
@@ -437,13 +469,18 @@ def _waiting_note(conn, job: dict | None) -> dict | None:
     with _worker_lock:
         running = dict(_executing)
         running_jobs = dict(_executing_job)
+        lane_size = sum(1 for k, w in _workers.items() if k[0] == lane and w.is_alive())
+    mine = {k: v for k, v in running_jobs.items() if v[0] == db_key and v[1] != job["id"]}
     blocker, same_ref = None, False
-    for other, other_ref in running.items():   # 同じ取り込みを別の列が実行中
-        if other != lane and ref is not None and other_ref == ref and running_jobs.get(other, ("",))[0] == db_key:
-            blocker, same_ref = running_jobs[other][1], True
+    for key, owner in mine.items():        # 同じ取り込みを別のワーカーが実行中
+        if ref is not None and running.get(key) == ref:
+            blocker, same_ref = owner[1], True
             break
-    if blocker is None and running_jobs.get(lane, ("",))[0] == db_key and running_jobs[lane][1] != job["id"]:
-        blocker = running_jobs[lane][1]           # 同じ列で前のジョブが動いている
+    if blocker is None:
+        # 同じ列のワーカーが全部ふさがっている（空くまで動けない）
+        busy_here = [owner[1] for key, owner in mine.items() if key[0] == lane]
+        if busy_here and len(busy_here) >= max(1, lane_size):
+            blocker = busy_here[0]
     if blocker is None:
         return job
     row = conn.execute("SELECT id, kind, ref_type, ref_id, status FROM jobs WHERE id = ?", (blocker,)).fetchone()

@@ -114,7 +114,7 @@ def test_form_flow_happy_path(app, client, sample_dir):
         assert db.get_document(doc_id)["state"] == "confirmed"
     state = finish(client, [doc_id])
     assert state["ready"] is True and state["confirmed"] == 1
-    assert "ダウンロードすると、この帳票の元のファイルと読み取り結果はこのPCから消えます" in state["html"]
+    assert "ダウンロードすると、この帳票の元のファイルと読み取り結果はサーバーから消えます" in state["html"]
     assert f"/forms/{doc_id}/download.md" in state["html"]
 
     # 確定後に直すと「修正中」。確定し直せば確定済みに戻る
@@ -128,7 +128,7 @@ def test_form_flow_happy_path(app, client, sample_dir):
     assert res.status_code == 400 and "確認のチェック" in res.get_json()["error"]
     assert read_form(client, doc_id, pattern_id, ["修理報告書"], acknowledge="on").status_code == 200
 
-    # 5. ダウンロードが最後の手順（ダウンロードするとこのPCからデータが消える）
+    # 5. ダウンロードが最後の手順（ダウンロードするとサーバーからデータが消える）
     client.post(f"/forms/{doc_id}/confirm", json={})
     md = client.get(f"/forms/{doc_id}/download.md")
     assert md.status_code == 200

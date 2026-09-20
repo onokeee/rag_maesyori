@@ -155,7 +155,7 @@ def test_not_found_page_is_japanese(client):
 def test_not_found_answers_json_when_the_screen_asked_for_json(client):
     """開いたままの画面が、消えた帳票へ途中保存・プレビューを送ったとき（app.js の postJson）。"""
     res = client.post("/forms/999/draft", json={"values": {}})
-    assert res.status_code == 404 and "このPCに残っていません" in res.get_json()["error"]
+    assert res.status_code == 404 and "サーバーに残っていません" in res.get_json()["error"]
 
 
 def test_method_not_allowed_page_is_japanese(client):
@@ -175,7 +175,7 @@ def test_bad_request_page_is_japanese(client):
 
 
 def test_other_host_is_refused(client):
-    """このPC以外の名前で届いたリクエストは断る（DNSリバインディング対策）。"""
+    """待ち受けていない名前で届いたリクエストは断る（DNSリバインディング対策）。"""
     assert client.get("/forms/new", headers={"Host": "127.0.0.1:5000"}).status_code == 200
     assert client.get("/forms/new", headers={"Host": "localhost:5000"}).status_code == 200
     assert client.get("/forms/new", headers={"Host": "evil.example"}).status_code == 400
@@ -191,6 +191,73 @@ def test_a_refused_host_is_told_which_address_works(client):
     assert "このページは再読み込みや古いアドレスからは開けません" not in page   # 断られた理由に合う文だけ出す
     res = client.post("/forms/1/delete", headers={"Host": "mypc", "Accept": "application/json"})
     assert res.status_code == 400 and "http://127.0.0.1:5000/" in res.get_json()["error"]
+
+
+# ---- 社内LANで動かす（2026-09-20 の運用変更） ------------------------------------------
+# サーバ（JupyterLab のターミナルなど）で起動し、他のPCから開いて数人で使う。
+# 待ち受け先は環境変数（HOST・PORT）で決め、受け付ける宛先の名前は app.allowed_hosts が決める。
+
+def test_the_operator_chooses_where_to_listen(monkeypatch):
+    """PORT は環境変数から読み、数字でなければ理由を出して起動しない。"""
+    import app as app_module
+
+    monkeypatch.setenv("PORT", "8080")
+    assert app_module._env_port() == 8080
+    monkeypatch.setenv("PORT", "")
+    assert app_module._env_port() == 5000          # 未設定なら既定
+    monkeypatch.setenv("PORT", "ポート")
+    with pytest.raises(SystemExit, match="PORT"):
+        app_module._env_port()
+
+
+def test_lan_addresses_are_accepted_only_when_we_listen_on_the_lan(monkeypatch):
+    """LAN に出したときだけ、このサーバ自身の名前・アドレスでも開ける（出していなければループバックだけ）。"""
+    import socket
+
+    import app as app_module
+
+    monkeypatch.delenv("ALLOWED_HOSTS", raising=False)
+    own = socket.gethostname().split(".")[0].lower()
+    assert app_module.allowed_hosts("127.0.0.1") == {"127.0.0.1", "localhost", "::1"}
+    lan = app_module.allowed_hosts("0.0.0.0")
+    assert {"127.0.0.1", "localhost", "::1"} <= lan and own in lan
+    assert "evil.example" not in lan
+    # 特定のアドレスを指定したときは、そのアドレスでも開ける
+    assert "192.168.10.20" in app_module.allowed_hosts("192.168.10.20")
+
+
+def test_the_operator_can_add_names_with_allowed_hosts(monkeypatch):
+    """別名（社内DNSの名前）で開くときは ALLOWED_HOSTS で足す。`*` はすべて受け付ける。"""
+    import app as app_module
+
+    monkeypatch.setenv("ALLOWED_HOSTS", "rag.example.local:5000, RAG-SERVER")
+    names = app_module.allowed_hosts("0.0.0.0")
+    assert "rag.example.local" in names and "rag-server" in names   # ポートは外し、小文字に揃える
+    monkeypatch.setenv("ALLOWED_HOSTS", "*")
+    assert app_module.allowed_hosts("0.0.0.0") == {"*"}
+
+
+def test_a_request_to_an_allowed_name_is_served(tmp_path):
+    """運用者が意図した名前で届いた要求は通し、それ以外は 400 のまま。"""
+    other = create_app(make_config(tmp_path, ALLOWED_HOSTS={"rag-server", "192.168.10.20"}))
+    with other.test_client() as c:
+        assert c.get("/forms/new", headers={"Host": "RAG-Server:5000"}).status_code == 200
+        assert c.get("/forms/new", headers={"Host": "192.168.10.20:5000"}).status_code == 200
+        assert c.get("/forms/new", headers={"Host": "127.0.0.1:5000"}).status_code == 200
+        assert c.get("/forms/new", headers={"Host": "evil.example"}).status_code == 400
+
+
+def test_the_startup_notice_says_there_is_no_login(monkeypatch):
+    """LAN に出して起動したときは、ログインが無いことと消えることを必ず知らせる。"""
+    import app as app_module
+
+    monkeypatch.setattr(app_module, "HOST", "0.0.0.0")
+    notice = app_module.startup_notice(5000)
+    assert "ログインはありません" in notice and "誰でも使えます" in notice
+    assert "ダウンロードするとサーバーからデータが消えます" in notice
+    assert "http://" in notice and ":5000/" in notice
+    monkeypatch.setattr(app_module, "HOST", "127.0.0.1")
+    assert app_module.startup_notice(5000) == "[app] http://127.0.0.1:5000/ で起動しました（このサーバの中からだけ開けます）"
 
 
 def test_pages_and_json_are_not_kept_in_the_browser_cache(app, client):

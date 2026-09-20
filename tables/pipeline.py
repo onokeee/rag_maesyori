@@ -140,7 +140,7 @@ def _write_md_dir(target: Path, files: list[MdFile]) -> None:
         if len(os.path.abspath(tmp)) + 1 + len(longest) > limit:
             # Windows のパスの長さの上限（260文字）を超えると、書けずに分かりにくいエラーで止まる
             raise PipelineError(
-                f"Markdownのファイル名が長すぎて、このPCのデータの置き場所に書けません（最長 {len(longest)}文字）。"
+                f"Markdownのファイル名が長すぎて、サーバーのデータの置き場所に書けません（最長 {len(longest)}文字）。"
                 "取り込み設定の設定名・ファイル名の先頭を短くするか、アプリを浅いフォルダに置いてください")
     shutil.rmtree(tmp, ignore_errors=True)
     # 親（imports/<id>/）は作り直さない。消された取り込みのフォルダを復活させないため（design.md 3.3）

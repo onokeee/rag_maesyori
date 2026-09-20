@@ -158,7 +158,8 @@ def test_cancel_while_paused_and_queued(core_app):
 
     with core_app.app_context():
         first = jobs.start_job("ai", "table_import", 1, blocker)
-        second = jobs.start_job("ai", "table_import", 2, never)
+        # 同じ取り込みのジョブは前のジョブが終わるまで動かない（ワーカーが何本あっても）
+        second = jobs.start_job("ai", "table_import", 1, never)
         _wait_until(lambda: jobs.get_job(first)["status"] == "running")
         assert jobs.get_job(second)["status"] == "queued"
         assert jobs.request_cancel(second)
@@ -234,7 +235,8 @@ def test_a_queued_job_of_this_process_is_not_interrupted_while_it_waits(core_app
     release = threading.Event()
     with core_app.app_context():
         first = jobs.start_job("table_read", "table_import", 1, lambda ctx: release.wait(10) and None)
-        second = jobs.start_job("table_render", "table_import", 2, lambda ctx: {"ok": True})
+        # 同じ取り込みなので、前のジョブが終わるまで待機中のまま
+        second = jobs.start_job("table_render", "table_import", 1, lambda ctx: {"ok": True})
         _wait_until(lambda: jobs.get_job(first)["status"] == "running")
         monkeypatch.setattr(jobs, "STALE_AFTER", timedelta(seconds=-60))   # どれも「古い」とみなす
         assert jobs.get_job(second)["status"] == "queued"   # このプロセスのジョブなので中断にしない
@@ -249,7 +251,7 @@ def test_a_long_queued_job_is_not_interrupted_by_a_second_launch(core_app, monke
     old = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
     with core_app.app_context():
         first = jobs.start_job("table_read", "table_import", 1, lambda ctx: release.wait(10) and None)
-        second = jobs.start_job("table_render", "table_import", 2, lambda ctx: {"ok": True})
+        second = jobs.start_job("table_render", "table_import", 1, lambda ctx: {"ok": True})
         _wait_until(lambda: jobs.get_job(first)["status"] == "running")
         conn = db.connect()
         conn.execute("UPDATE jobs SET heartbeat_at = NULL, created_at = ?, updated_at = ? WHERE id = ?",
@@ -307,22 +309,36 @@ def test_a_job_waiting_behind_a_paused_ai_job_says_what_it_waits_for(core_app):
         _wait_until(lambda: jobs.get_job(ai_job)["status"] == "paused")
 
         same = jobs.start_job("table_preview", "table_import", 11, lambda ctx: {"files": 1})
+        # 別の取り込みの AI整形は待たされない（列にワーカーが複数あるため。design.md 同時利用）
         other_ai = jobs.start_job("ai_format", "table_import", 12, lambda ctx: {"rows": 1})
-        time.sleep(0.3)
+        assert jobs.wait_job(other_ai, timeout=10)["status"] == "done"
         waiting = jobs.get_job(same)
         assert waiting["status"] == "queued"
         assert "この取り込みのAI整形が一時停止中" in waiting["message"] and "再開するか中止" in waiting["message"]
         assert waiting["waiting_for"]["job_id"] == ai_job and waiting["waiting_for"]["same_ref"]
-        behind = jobs.latest_job("table_import", 12, kind="ai_format")
-        assert behind["status"] == "queued"
-        assert "別の取り込みのAI整形が一時停止中" in behind["message"]
-        assert behind["waiting_for"]["ref_id"] == 11 and not behind["waiting_for"]["same_ref"]
         assert "message" not in jobs.get_job(ai_job) or "待っています" not in jobs.get_job(ai_job)["message"]
 
         jobs.request_cancel(ai_job)
         assert jobs.wait_job(same, timeout=5)["status"] == "done"
-        assert jobs.wait_job(other_ai, timeout=5)["status"] == "done"
         assert jobs.get_job(same).get("waiting_for") is None
+
+
+def test_a_job_waits_when_every_worker_of_its_lane_is_busy(core_app, monkeypatch):
+    """ワーカーが全部ふさがっている列で待つジョブにも、何を待っているかを出す（JOB_WORKERS の効き目）。"""
+    monkeypatch.setitem(jobs.LANE_OF_KIND, "slow_test", "test-lane-1")
+    core_app.config["JOB_WORKERS"] = 1     # この列は初めて使うので、この本数で立つ
+    release = threading.Event()
+
+    with core_app.app_context():
+        first = jobs.start_job("slow_test", "table_import", 21, lambda ctx: release.wait(10) and None)
+        _wait_until(lambda: jobs.get_job(first)["status"] == "running")
+        second = jobs.start_job("slow_test", "table_import", 22, lambda ctx: {"ok": True})
+        time.sleep(0.3)
+        waiting = jobs.get_job(second)
+        assert waiting["status"] == "queued" and waiting["waiting_for"]["job_id"] == first
+        assert "待っています" in waiting["message"]
+        release.set()
+        assert jobs.wait_job(second, timeout=10)["status"] == "done"
 
 
 def test_a_job_whose_last_status_write_fails_ends_as_failed(core_app, monkeypatch):

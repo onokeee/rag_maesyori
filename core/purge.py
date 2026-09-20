@@ -372,12 +372,19 @@ def forget_id_counters(db) -> int:
 
 # ---- まとめて捨てる（作業中の表示を持たない） ----------------------------------------------
 # この アプリは「作業中の一覧」も「ダウンロード待ちの一覧」も持たない（利用者の指示 2026-09-20）。
-# 画面を閉じた時点で続きは開けないので、ダウンロードしていない取り込みは残さずに捨てる。
+# 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）ので、捨てる機会は4つ:
+#   - 画面を離れたとき: その人が触っていた分を捨てる（purge_session / discard_documents / discard_table_imports）
+#   - 新しいファイルを置いたとき: 同じ人の前の分を捨てる（同上）
+#   - 動いている間: IDLE_HOURS さわられていないものを捨てる（sweep_stale）
 #   - 起動時: ダウンロードしていない帳票・一覧表をすべて捨てる（purge_all_pending）
-#   - 動いている間: 24時間さわられていないものを捨てる（sweep_stale）
+# あとの2つ（時間切れ・起動時）は、動いているジョブが付いているものには手を出さない（_busy_ids）。
 # 残すのは「設定」（帳票の種類・一覧表の取り込み設定・AI接続）だけで、これは purge の対象ではない。
 
-STALE_HOURS = 24
+# 放っておかれた取り込みを捨てるまでの時間。数人が同時に使う社内LANの置き方（2026-09-20）では、
+# 画面を閉じた合図（sendBeacon）が届かないこと（ブラウザの強制終了・スリープ・LANの切断）があるので、
+# 短めにして「残らないこと」を優先する。長くしたいときはこの数字だけを変える。
+IDLE_HOURS = 2
+STALE_HOURS = IDLE_HOURS   # 旧名（app.py が参照している）
 
 
 def _import_ids(db, where: str = "", args=()) -> list[int]:
@@ -394,13 +401,41 @@ def purge_all_pending() -> tuple[int, int]:
     ダウンロードが終わったものはその時点で消えている（purge_after_send）ので、DB に残っている
     帳票・取り込みは「途中のもの」か「確定したがダウンロードしていないもの」しかない。
     続きを開く入口（作業中の一覧）を持たないので、起動時にまとめて捨てる。
+
+    動いているジョブが付いているものには手を出さない。起動直後は _recover_jobs が動いていた
+    ジョブを「中断」に直したあとなので、ふつうは1件も残らない。それでも、別のプロセスが同じ DB を
+    見ているとき（JupyterLab のターミナルで二重に起動したとき）に、他方が処理中の取り込みを
+    消してしまわないようにする。
     """
     db = database.get_db()
-    forms = purge_documents(_document_ids(db))
+    busy_docs = _busy_ids(db, "document")
+    busy_imports = _busy_ids(db, "table_import")
+    forms = purge_documents([i for i in _document_ids(db) if i not in busy_docs])
     tables = 0
     for import_id in _import_ids(db):
-        tables += purge_table_import(import_id)
+        if import_id not in busy_imports:
+            tables += purge_table_import(import_id)
     return forms, tables
+
+
+def purge_all_samples() -> int:
+    """帳票登録の見本 Excel をすべて捨てる（残すのは設定だけ。design.md 3.3）。
+
+    使用開始の時点で消しているが、登録の途中でブラウザを閉じたときに残るので起動時にも捨てる。
+    """
+    from core.files import UploadError, remove_upload
+
+    db = database.get_db()
+    rows = db.execute("SELECT id, stored_path FROM pattern_samples").fetchall()
+    for row in rows:
+        try:
+            remove_upload(row[1])
+        except UploadError:
+            pass
+        db.execute("DELETE FROM pattern_samples WHERE id = ?", (row[0],))
+    if rows:
+        db.commit()
+    return len(rows)
 
 
 def _stale_before(hours: float) -> str:
@@ -441,5 +476,115 @@ def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
             db, "WHERE COALESCE(confirmed_at, updated_at, created_at) < ?", (limit,)):
         if import_id in busy_imports:
             continue
+        tables += purge_table_import(import_id)
+    return forms, tables
+
+
+# ---- 使っている人ごとに捨てる ---------------------------------------------------------
+# 社内LANに置いて数人が同時に使う（利用者の指示 2026-09-20）ので、「作業中のもの」は
+# 全員分がひとつの DB に混ざっている。画面を離れた人の分だけを捨てられるように、
+# documents / table_imports は持ち主（session_id。views.current_session_id() がブラウザごとに配る）を持つ。
+#
+# 持ち主の列がまだ無い古い DB でも動くようにしてある:
+#   - 番号を指して捨てる（discard_documents / discard_table_imports）… 持ち主を確かめずに捨てる
+#     （1人で使っていた頃と同じ動き。指された番号は、その画面が自分で取り込んだものしかない）
+#   - まとめて捨てる（purge_session）… 誰のものか分からないので何も捨てない（他人の分を巻き込まない）
+
+SESSION_COLUMN = "session_id"
+
+
+def _has_session_column(db, table: str) -> bool:
+    try:
+        return SESSION_COLUMN in {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}
+    except sqlite3.Error:
+        return False
+
+
+def _owned_ids(db, table: str, ids, session_id) -> list[int]:
+    """ids のうち、いま DB にあって、その人のもの（持ち主の列が無ければ確かめない）。
+
+    もう無い番号・他人の番号はここで落ちるので、呼び出しを何度繰り返しても2回目からは何もしない
+    （画面を閉じる合図は同じものが2回届くことがある）。
+    """
+    wanted = sorted({int(i) for i in ids})
+    if not wanted:
+        return []
+    marks = ", ".join("?" for _ in wanted)
+    sql = f'SELECT id FROM "{table}" WHERE id IN ({marks})'
+    args = list(wanted)
+    if session_id and _has_session_column(db, table):
+        sql += f' AND "{SESSION_COLUMN}" = ?'
+        args.append(session_id)
+    try:
+        return [row[0] for row in db.execute(sql, args)]
+    except sqlite3.Error:
+        return []
+
+
+def _session_ids(db, table: str, session_id) -> list[int]:
+    if not session_id or not _has_session_column(db, table):
+        return []
+    try:
+        return [row[0] for row in db.execute(f'SELECT id FROM "{table}" WHERE "{SESSION_COLUMN}" = ?', (session_id,))]
+    except sqlite3.Error:
+        return []
+
+
+def discard_documents(doc_ids, session_id=None) -> int:
+    """指された帳票のうち、その人のもので、処理中でないものを捨てる。戻り値: 捨てた件数。
+
+    画面を離れたとき・新しいファイルを置いたときに呼ぶ。もう無いもの・他人のもの・処理中のものは
+    黙って飛ばす（何度呼んでも安全で、無駄な読み書きもしない）。
+    """
+    db = database.get_db()
+    ids = _owned_ids(db, "documents", doc_ids, session_id)
+    if not ids:
+        return 0
+    busy = _busy_ids(db, "document")
+    return purge_documents([i for i in ids if i not in busy])
+
+
+def discard_table_imports(import_ids, session_id=None) -> int:
+    """指された一覧表の取り込みのうち、その人のもので、処理中でないものを捨てる。戻り値: 捨てた件数。"""
+    db = database.get_db()
+    ids = _owned_ids(db, "table_imports", import_ids, session_id)
+    if not ids:
+        return 0
+    busy = _busy_ids(db, "table_import")
+    removed = 0
+    for import_id in ids:
+        if import_id not in busy:
+            removed += purge_table_import(import_id)
+    return removed
+
+
+def purge_session(session_id, *, include_busy: bool = False,
+                  documents: bool = True, tables: bool = True) -> tuple[int, int]:
+    """その人の、まだダウンロードしていない帳票・一覧表をすべて捨てる。戻り値: (帳票の件数, 一覧表の件数)。
+
+    捨てるのは、元のファイル・imports/<id>/（読み込んだ行・控え・作った md）・DB の行・
+    AI整形の控えと、ほかから使われなくなった AI の応答（purge_documents / purge_table_import と同じ）。
+    残すのは設定（帳票の種類・一覧表の取り込み設定・AI接続）だけ。
+
+    documents / tables で片方だけにできる。帳票取り込みの画面を閉じた合図で
+    表の取り込みの画面（同じブラウザの別のタブ）の作業まで巻き込まないために使う。
+
+    動いているジョブ（読み込み・下書き・AI整形）が付いているものは、そのジョブが壊れるので捨てない。
+    捨て損ねた分は、ジョブが終わったあと sweep_stale が IDLE_HOURS で片付ける。
+    どうしても今すぐ捨てるときだけ include_busy=True（ジョブは次の書き込みで失敗して終わる）。
+    """
+    if not session_id:
+        return 0, 0
+    db = database.get_db()
+    doc_ids = _session_ids(db, "documents", session_id) if documents else []
+    import_ids = _session_ids(db, "table_imports", session_id) if tables else []
+    if not include_busy:
+        busy_docs = _busy_ids(db, "document")
+        busy_imports = _busy_ids(db, "table_import")
+        doc_ids = [i for i in doc_ids if i not in busy_docs]
+        import_ids = [i for i in import_ids if i not in busy_imports]
+    forms = purge_documents(doc_ids)
+    tables = 0
+    for import_id in import_ids:
         tables += purge_table_import(import_id)
     return forms, tables

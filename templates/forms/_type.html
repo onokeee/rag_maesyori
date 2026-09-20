@@ -2,7 +2,7 @@
 {% import "components/_ui.html" as ui %}
 
 {% if duplicate %}
-<div class="notice" role="note">同じ内容のファイルをこの画面でもう一度置いています（先に確定した分は、ダウンロードするまでこのPCに残っています）。</div>
+<div class="notice" role="note">同じ内容のファイルをこの画面でもう一度置いています（先に確定した分は、ダウンロードするまでサーバーに残っています）。</div>
 {% endif %}
 
 {% if table_sheets %}
@@ -64,7 +64,7 @@
   <div class="form-actions">
     <button type="submit" class="btn primary">{{ '読み取り直す' if lost_work else '読み取る' }}</button>
     <button type="button" class="btn ghost" data-drop-doc="{{ doc.id }}"
-            data-confirm="この帳票の取り込みをやめ、元のファイルと読み取り結果をこのPCから消します。元に戻せません。"
+            data-confirm="この帳票の取り込みをやめ、元のファイルと読み取り結果をサーバーから消します。元に戻せません。"
             data-confirm-ok="取り込みをやめる">この帳票はやめる</button>
   </div>
 </form>

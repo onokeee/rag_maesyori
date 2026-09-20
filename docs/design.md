@@ -4,7 +4,19 @@
 
 ## 0. 前提と範囲
 
-- 利用者は1人。**ログインなし**。起動は `127.0.0.1` のみ（`app.py` が他のアドレスを拒否）。
+- **社内LANのサーバーで動かし、数人が同時に使う**（2026-09-20 の運用変更。それまでは1人・`127.0.0.1` のみ）。
+  運用者はサーバーの JupyterLab のターミナルから `HOST=0.0.0.0 PORT=5000 python app.py` のように起動し、
+  利用者は自分のPCのブラウザで `http://<サーバーのアドレス>:5000/` を開く（README「社内LANのサーバーで動かす」）。
+- **ログインなし**（社内LANなので制限しない、という利用者の判断）。**アドレスを知っている人は誰でも使え、
+  いま取り込み中のデータも開かれれば見える**。起動時にこの2点を必ず案内する（`app.startup_notice`）。
+  待ち受け先は環境変数 `HOST`（既定 `127.0.0.1`）・`PORT`（既定 5000）で決める。
+  受け付ける宛先の名前（Host ヘッダー）は、ループバック・サーバー自身の名前とアドレス・`ALLOWED_HOSTS` に
+  挙げたものだけ（`app.allowed_hosts`。DNSリバインディング対策。`*` ですべて受け付ける）。
+  デバッガ（`FLASK_DEBUG=1` / `--debug`、LAN のアドレスでの `DEBUG = True`）では起動しない。
+- **誰の作業かはブラウザのクッキーで分ける**（`views.current_session_id()`。3.3「誰の作業か」）。
+  そのため署名鍵 `SECRET_KEY` が必須（`app.py` が `FLASK_SECRET_KEY` か `.flask_secret` から入れる）。
+  鍵が変わると全員のクッキーが無効になり、取り込み中のものが自分のものだと分からなくなる（時間切れで捨てられる）。
+- **同時に動かす処理の本数**は `JOB_WORKERS`（既定 3・1〜8）。1本だと誰かの長い読み込みで全員が待たされる（5.1 `core/jobs.py`）。
 - 目的：Excel/CSV を読み取り、**LightRAG に自分で投げ込みやすい Markdown(.md) を作ってダウンロードする**まで。LightRAG への送信・アプリ内検索・SQL と解析は作らない。
 - 取り込みは2系統に分かれる。
   - **帳票**（1ファイル＝1件。例：設備修理報告書）… 中身は「ラベル探し」だけで読む。
@@ -27,7 +39,7 @@
 - 画面は **3つだけ**：`/forms`（帳票取り込み）・`/tables`（表の取り込み）・`/form-types`（帳票登録）。`/` は帳票取り込みへ転送する。
 - **ホーム画面は無い**。**設定の画面も無い**（AI接続は「表の取り込み」画面の AI整形の段の中、帳票の種類は「帳票登録」画面、一覧表の取り込み設定は「表の取り込み」画面の中）。**取り込み履歴も無い**。
 - **①→②→③と画面を移らない**。1つの画面に「段」（`.step`）が下へ増えていき、進むほど次の段が現れる。送信はすべて `fetch`（`window.ragFetch`）で、画面のURLは変わらなくてよい。時間のかかる処理（大きな表の読み込み・Markdown作成）も、同じ画面の中に進み具合を出す。
-- **作業中のものは捨てる**。起動時にダウンロードしていない帳票・一覧表をすべて捨て、動いている間も24時間さわられていないものを捨てる（3.3）。閉じた画面の続きを開く入口は持たない。
+- **作業中のものは捨てる**。画面を閉じたらその人の分を捨て、起動時にダウンロードしていない帳票・一覧表をすべて捨て、動いている間も2時間さわられていないものを捨てる（3.3）。閉じた画面の続きを開く入口は持たない。
 - **AI は「Markdown を作るときに、決めた1つの値の文章を構成する」ところだけ**。帳票側の AI 補助（AIで種類を推定・AIで空欄を探す、`services/ai_assist.py`）は削除した。
 - 読み取りの中身（ラベル探し・セクション・チェックボックス・積み上げ明細表・型と単位の推定・レイアウト判定・文字コード判定・正規化・Markdown のルール・保持期間）は**一切変えていない**。これは画面の作り直しであって、読み取りの作り直しではない。
 
@@ -166,11 +178,13 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 
 ### 3.3 データを残さない（保存方針）
 
-サーバー（このPC）の容量を使わないため、**取り込んだデータはダウンロードが終わった時点で消す**。再ダウンロードはできない。
+サーバーの容量を使わず、**他の利用者の目にも残さない**ため、**取り込んだデータはダウンロードが終わった時点で消す**。再ダウンロードはできない。
+**その場でダウンロードしなかったものは、その場ですぐ捨てる**（2026-09-20 の利用者の判断）。数人が同じサーバーを
+使うので、誰かの途中のデータが残り続けることが無いようにする（下の「途中のものは捨てる」）。
 
 | | 消すもの | いつ |
 |---|---|---|
-| 帳票 | `uploads/documents/<保存名>`、`documents` の行（と `document_id` を持つ表の行） | `GET /forms/<id>/download.md` を**送り終えたあと**。まとまりは `GET /forms/batches/<batch_id>/download.zip`。zip に入るのは**確定済みの帳票だけ**で、消えるのもその分だけ（まだ確定していない帳票はこのPCに残り、同じ画面で続きを読める） |
+| 帳票 | `uploads/documents/<保存名>`、`documents` の行（と `document_id` を持つ表の行） | `GET /forms/<id>/download.md` を**送り終えたあと**。まとまりは `GET /forms/batches/<batch_id>/download.zip`。zip に入るのは**確定済みの帳票だけ**で、消えるのもその分だけ（まだ確定していない帳票はサーバーに残り、同じ画面で続きを読める） |
 | 一覧表 | `uploads/tables/<保存名>`、`TABLES_DIR/imports/<id>/`（rows.jsonl.gz・issues・控え・md・preview_md）、`table_imports` の行、`jobs`（`ref_type='table_import'`）、`ai_items`（`import_id` がこの取り込みの分）、どの `ai_items` からも参照されなくなった `llm_calls` | `GET /tables/imports/<id>/download.zip` を**送り終えたあと** |
 
 
@@ -183,14 +197,50 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
   書き換えたり消したりする。乱数にすると最初の番号（1〜）とも前回の番号とも重ならない（重なる確率は1回あたり
   件数 / 約4.5×10^15）ので、古い画面の操作は 404 になる。作業中の取り込みが残っている間は番号の続きはそのまま。
   新しいDBは 1 から始まる。
+- **誰の作業か（2026-09-20）**：数人が同時に使うので、取り込み中のものには「どの画面のものか」を持たせる。
+  Flask のセッションクッキーに持つ番号（`views.current_session_id()`。最初に使うときに作る）を
+  `documents`・`table_imports` の `session_id` 列に入れ、画面と API は自分の番号のものだけを見る。
+  ログインではないので**秘密ではない**（番号を知られれば開ける）。起動時の案内でもそう伝える（0）。
+  その画面の分だけまとめて捨てるのが `core/purge.purge_session(session_id)`。
+  `session_id` が空の行は「持ち主不明」（この仕組みより前のDBの行・テストで直接作った行）で、
+  これまでどおり誰からでも扱える。セッション単位の片付けは拾わず、起動時の一括片付けだけが拾う。
+  ほかの人のものを番号で指しても **404**（403 にすると「その番号はある」ことが分かるため）。
+  `/api/jobs/<id>` も同じで、ほかの人のジョブ・取り込みごと消えたジョブは 404 を返し、画面は静かに止まる。
+  分けないもの（みんなで共有する設定）：帳票の種類（`patterns` 系）・一覧表の取り込み設定（`table_templates` 系）・
+  AI接続。取り込み設定の削除チェックだけは、ほかの人の取り込みも数える（使用中の設定を消させないため）。
 - **途中のものは捨てる（2026-09-20）**：作業中の一覧もダウンロード待ちの一覧も持たない（0.1）ので、
-  閉じた画面の続きを開く入口が無い。残しておく意味が無いので捨てる。
-  - 起動時：ダウンロードしていない帳票・一覧表を**すべて**捨てる（`core/purge.purge_all_pending`、`app._purge_pending`）。
-  - 動いている間：`core.purge.STALE_HOURS`（24時間）さわられていないものを1時間ごとに捨てる
-    （`core/purge.sweep_stale`、`app._start_sweeper` の daemon スレッド）。
-    **動いているジョブ（待機中・実行中・一時停止中）が付いているものは捨てない**。大きな表の読み込みや AI整形は
-    24時間を超えることがあり、途中で消すとジョブが「もう無い行」を書きに行って失敗する。ジョブが終われば
-    `updated_at` がその時刻になるので、次の回以降に改めて対象になる。
+  閉じた画面の続きを開く入口が無い。残しておく意味が無いので、**その場でダウンロードしなかったものはその場で捨てる**。
+  捨てる機会は次の4つ。どれも `purge_documents` / `purge_table_import` を通る。
+  1. **画面を閉じた・隠した**：ブラウザが `POST /forms/discard` / `POST /tables/discard` に
+     `navigator.sendBeacon` で `{doc_ids:[…]}` / `{import_ids:[…]}` を送る（`static/app.js` の `ragDiscard`）。
+     受け側は `core/purge.discard_documents` / `discard_table_imports`（番号が空なら `purge_session`）。
+     閉じた（`pagehide`）ならすぐ、隠れただけ（`visibilitychange`）なら**5分待ってから**送る。
+     5分の猶予があるので、LightRAG の WebUI を見に行って戻ってくる分には消えない。
+     合図は届かないことがある（強制終了・LANの切断）ので、これだけに頼らず 3. と 4. で拾う。
+     応答は読めないので、サーバーはいつでも 204 を返す（もう無い番号・ほかの人の番号・処理中のものは黙って外す）。
+     **帳票の合図で一覧表の分まで捨てない**（同じブラウザの別のタブで作業していることがある。
+     `purge_session(sid, tables=False)` / `purge_session(sid, documents=False)`）。
+  2. **別の取り込みを始めた**：新しいファイルを置く・［別のファイルにする］を押すと、前の分を先に捨てる
+     （画面から 1. と同じ宛先へ）。
+  3. **しばらくさわられていない**：`core.purge.IDLE_HOURS`（2時間。旧名 `STALE_HOURS`）さわられていないものを
+     `app.SWEEP_INTERVAL_SECONDS`（最長10分）ごとに捨てる（`core/purge.sweep_stale`、`app._start_sweeper` の
+     daemon スレッド。見回りの間隔は `IDLE_HOURS` に追従し、最短60秒）。
+  4. **起動時**：ダウンロードしていない帳票・一覧表を**すべて**捨てる（`core/purge.purge_all_pending`、
+     `app._purge_pending`）。セッションでは分けない。**数人で使っているときにアプリを再起動すると、
+     そのとき作業中だった全員の分が消える**（「その場でダウンロードしない限りその場で捨てる」方針どおりだが、
+     再起動は利用者のいない時間に行う）。
+
+  3. と 4. は**動いているジョブ（待機中・実行中・一時停止中）が付いているものを捨てない**。大きな表の読み込みや
+  AI整形は2時間を超えることがあり、途中で消すとジョブが「もう無い行」を書きに行って失敗する。ジョブが終われば
+  `updated_at` がその時刻になるので、次の回以降に改めて対象になる。
+  1. と 2.（`discard_*` / `purge_session`）も同じく処理中のものは捨てない。
+
+  決めたこと（2026-09-20 の統合時）:
+  - **ファイルを置いたときにサーバー側で勝手に前の分を捨てない**。「その人の分をぜんぶ」捨てると、
+    同じ人が別のタブで開いている作業まで消えてしまう。捨てる番号は画面が指す（上の 2.）。
+    タブを再読み込みしたあとなど、画面が番号を忘れた分は 3. の時間切れで片付く。
+  - **帳票登録の見本の Excel（`pattern_samples`）には持ち主を持たせていない**ので、上の 1.・2. では捨てない。
+    捨てるのは［使用開始］のときと起動時（`purge_all_samples`）。画面にもそう書く。
   - どちらも `purge_documents` / `purge_table_import` を通るので、消えるものは上の表のとおり。
     設定（帳票の種類・一覧表の取り込み設定・AI接続）は捨てない。
 - **消し方**：`core/purge.py`（`purge_documents` / `purge_batch` / `purge_table_import`）。消す表は名前で決め打ちせず、その取り込みを指す列（`document_id` / `import_id`）を持つ表を `sqlite_master` から探す（表が増えても消し残さない）。
@@ -225,14 +275,14 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 - **消したあとの AI整形**：動いている AI整形のジョブは、取り込みの行が消えたら新しい呼び出しを出さず、結果も書かずに止まる（`aiproc/runner._import_gone`。ジョブの行が消えたときは `JobContext` が中止扱いにする）。一覧表の削除・確定・zip のダウンロードは AI整形の実行中は受け付けない。
 - **他サイトからのダウンロード（＝削除）を断る**：消すダウンロード（`forms.download_md` / `forms.download_batch` / `tables.download_zip`）は GET でも、`Sec-Fetch-Site` が same-origin / none 以外、他サイトの `Origin`、（`Sec-Fetch-Site` が無いときは）他サイトの `Referer` なら 403（`views.PURGING_ENDPOINTS`）。
 - **読み取れないアップロード**：事前チェックや読み込みで思わぬ例外が出ても、アップロードしたファイルは消してから落とす（帳票・一覧表とも）。
-- **画面の知らせ**：ダウンロードのボタンには確認ダイアログ（`data-confirm`）、完了・確認画面には「ダウンロードするとこのPCから消える／もう一度ダウンロードできない」の一文を出す。
+- **画面の知らせ**：ダウンロードのボタンには確認ダイアログ（`data-confirm`）、完了・確認画面には「ダウンロードするとサーバーからデータが消える／もう一度ダウンロードできない」の一文を出す。
   修正中（確定済みの版あり）の帳票は、確定し直していない変更が入らずに消えることを確認文の先頭に書く（確認・完了画面とホームの .md / zip ボタン。`views.forms.delete_confirm` / `batch_zip_confirm`）。
   消えないボタン（帳票の `download.json`・`original`）には「（消えません）」と書く。ホームではまとめ取り込みを1行にまとめ、
   1件だけダウンロードするとまとまりが崩れることを押す前に知らせる。
 - **画面のメッセージにファイル名を出さない**：`flash` は署名付きセッションクッキーとしてブラウザに残るので、
   取引先名や「社外秘」を含みうるファイル名は載せない（サーバー側を消してもブラウザに残るため）。
 - **残ると分かっていて残すもの**：帳票の種類の見本ファイル（`uploads/samples/<uuid>.xlsx`＋`pattern_samples`。読み取りテストと
-  項目の見直しに使うため。画面に「このPCに残り続けます」と書き、1件ずつ削除できる）、一覧表の取り込み設定の名前
+  項目の見直しに使うため。画面に「サーバーに残り続けます」と書き、1件ずつ削除できる）、一覧表の取り込み設定の名前
   （初期値はファイル名にしない。空欄＋プレースホルダ）。
 - **新しい表**：取り込みを指す列は必ず `document_id` / `import_id` という名前にする（purge の探索に乗せるため）。
   使わない表は置かない（`table_outputs`・`table_downloads`・`table_template_samples`・`alias_entries` はマイグレーション `_m5` で削除）。
@@ -279,6 +329,10 @@ def purge_after_send(response, fn, *args) -> response   # 本文を最後まで�
 # 消す表は sqlite_master から document_id / import_id 列を持つ表を探して決める（新しい表はこの列名にする）
 # 消したあと: PRAGMA wal_checkpoint(TRUNCATE) と VACUUM（中身のゼロ埋めは接続時の PRAGMA secure_delete = ON）
 def forget_id_counters(db) -> int   # 空になった取り込みの表の sqlite_sequence を乱数にする（番号の続きを履歴にしない）
+# 使っている人ごとに捨てる（3.3 の 1.・2.）。処理中のもの・ほかの人のもの・もう無い番号は黙って外す（何度呼んでも安全）
+def discard_documents(doc_ids, session_id=None) -> int;  def discard_table_imports(import_ids, session_id=None) -> int
+def purge_session(session_id, *, include_busy=False, documents=True, tables=True) -> tuple[int, int]
+IDLE_HOURS = 2   # 旧名 STALE_HOURS（別名として残す）。def sweep_stale(hours=IDLE_HOURS) -> tuple[int, int]
 
 # core/naming.py
 def safe_filename_part(text: str, max_len: int = 60) -> str   # NFKC、\ / : * ? " < > | 制御文字 空白 '[' ']' を _ に、'.[' を除去、前後の . _ を除去
@@ -298,7 +352,10 @@ def error_message(exc) -> str          # 想定外の例外は Python の例外�
 def start_job(kind: str, ref_type: str, ref_id: int, fn: Callable[[JobContext], dict | None], params: dict | None = None) -> int
 def get_job(job_id) -> dict | None;  def request_pause(job_id); def request_resume(job_id); def request_cancel(job_id)
 def recover_interrupted() -> None      # 起動時: running/queued で heartbeat が2分以上古い → interrupted
-# 実装: 単一ワーカースレッド＋キュー。fn 内で DB を使うときは database.connect()。app_context は start_job 時に app を捕まえて with app.app_context() で実行
+# 実装: 列（lane）ごとに JOB_WORKERS 本（app.config["JOB_WORKERS"]、既定 3・1〜8 に丸める）のワーカースレッド＋キュー。
+#   数人が同時に使うので1本だと誰かの3万行の読み込みでほかの人が待たされる。同じ取り込みのジョブは本数が増えても同時に動かさない。
+#   本数はプロセス内でその列を最初に使ったときに決まり、あとから減らない。
+#   fn 内で DB を使うときは database.connect()。app_context は start_job 時に app を捕まえて with app.app_context() で実行
 ```
 
 ### 5.2 tables（読み取り）
@@ -645,7 +702,7 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   （3.3「欠けないダウンロード」。手元の元の Excel から取り込み直す）。ブラウザが保存し終えたことを画面から知らせて
   から消す形（受け取り確認）にすれば防げるが、ダウンロードを2段階にする変更になるため未実施。
   応答を作れなかったとき・206/304・1バイトも送れなかったときは消さない。
-- 帳票の種類の見本ファイルはこのPCに残り続ける（3.3「残ると分かっていて残すもの」）。本物の報告書を見本にする運用では、
+- 帳票の種類の見本ファイルはサーバーに残り続ける（3.3「残ると分かっていて残すもの」）。本物の報告書を見本にする運用では、
   使い終わったら画面から削除する必要がある。自動で消すには「読み取りテストのたびに見本を選び直す」形に変える必要があり、未実施。
 - `instance/app.db` のファイル自体は残る（中身は `secure_delete` + `VACUUM` で消える）。`.flask_secret`・`data/model_settings.yaml`
   （APIキーを平文で持つ）・`env` も残る。

@@ -3,18 +3,16 @@
 {% block title %}帳票取り込み{% endblock %}
 {% block container_class %}wide{% endblock %}
 {% block content %}
-<div class="page-head">
-  <div>
-    <h1>帳票取り込み</h1>
-    <p class="page-lead">1ファイル＝1件の報告書・記録票（例：設備修理報告書）を Markdown にします。
-      1行＝1件の表は<a href="{{ url_for('tables.new') }}">表の取り込み</a>から。</p>
-  </div>
-</div>
 
-<div id="formsPage"
+<div id="formsPage" data-steps-open
      data-upload-url="{{ url_for('forms.upload') }}"
+     data-discard-url="/forms/discard"
      data-finish-url="{{ url_for('forms.finish') }}"
      data-max-files="{{ max_files }}">
+
+  {#- 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）を先に伝える。
+      実際に捨てるのは static/app.js の ragDiscard → POST /forms/discard。 -#}
+  <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた Markdown はその場でダウンロードしてください。</p>
 
   {% call ui.step("file", 1, "ファイルを置く", open=True) %}
       {% if active_pattern_count == 0 %}
@@ -30,26 +28,23 @@
       <form id="uploadForm" class="stack" enctype="multipart/form-data">
         {{ ui.file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
                         hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて置くと、この画面で1件ずつ読み取って最後に zip にまとめます（" ~ max_files ~ "ファイル・合計" ~ max_mb ~ "MBまで）", multiple=True) }}
-        <div class="form-actions">
-          <button type="submit" class="btn primary">読み取る</button>
-        </div>
-        <p class="hint">取り込んだデータはこのPCに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
+        <p class="hint">取り込んだデータはサーバーに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
       </form>
       <p class="work-line" data-work="upload" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
   {% endcall %}
 
-  {% call ui.step("type", 2, "帳票の種類とシート") %}
+  {% call ui.step("type", 2, "帳票の種類とシート", open=True) %}
       <div class="doc-tabs" data-doc-tabs role="tablist" aria-label="取り込む帳票" hidden></div>
-      <div data-type-body></div>
+      <div data-type-body><p class="muted">上で Excel を置くと、ここに帳票の種類と読み取るシートが出ます。</p></div>
       <p class="work-line" data-work="read" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
   {% endcall %}
 
-  {% call ui.step("review", 3, "読み取り結果") %}
-      <div data-review-body></div>
+  {% call ui.step("review", 3, "読み取り結果", open=True) %}
+      <div data-review-body><p class="muted">読み取ると、ここに元のシートと読み取った値が並びます。値はその場で直せます。</p></div>
   {% endcall %}
 
-  {% call ui.step("finish", 4, "確定してダウンロード") %}
-      <div data-finish-body></div>
+  {% call ui.step("finish", 4, "確定してダウンロード", open=True) %}
+      <div data-finish-body><p class="muted">読み取り結果を確定すると、ここから Markdown をダウンロードできます。</p></div>
       <p class="work-line" data-work="confirm" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
   {% endcall %}
 </div>

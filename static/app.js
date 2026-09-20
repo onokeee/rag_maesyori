@@ -153,7 +153,8 @@ function bindFileDrop(root) {
     const dt = new DataTransfer();
     Array.from(files).slice(0, input.multiple ? files.length : 1).forEach((f) => dt.items.add(f));
     input.files = dt.files;
-    show();
+    // クリックで選んだときと同じにする（change を見ている画面がファイル名を使う）
+    input.dispatchEvent(new Event("change", { bubbles: true }));
   });
 }
 
@@ -269,7 +270,7 @@ async function ragFetch(url, options = {}) {
   try {
     res = await fetch(url, init);
   } catch (e) {
-    const error = new Error("このPCのアプリにつながりませんでした。アプリが動いているか確かめてください");
+    const error = new Error("アプリのサーバーにつながりませんでした。ネットワークとアプリが動いているか確かめてください");
     error.status = 0;
     if (!quiet) toast(error.message, "err");
     throw error;
@@ -296,6 +297,86 @@ async function ragFetch(url, options = {}) {
   return data;
 }
 
+// ---- ragDiscard: ダウンロードしないまま画面を離れたら捨てる --------------------------------
+// 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）。
+// 画面が隠れた・閉じられた時点で、その人がまだダウンロードしていない取り込みをサーバに捨てさせる。
+//
+// 使い方（各画面の JS から）:
+//   const guard = ragDiscard.watch("/forms/discard", () => ({ doc_ids: docs.map((d) => d.id) }));
+//   guard.now();     … いま持っている分を今すぐ捨てる（新しいファイルを置く前。await できる）
+//   guard.clear();   … もう捨てるものが無い（ダウンロードが終わった・自分で消した）
+//
+// 閉じる合図は pagehide（閉じる・別のページへ移る）と visibilitychange（タブを隠す・スリープ）の両方で見る。
+// どちらも「必ず呼ばれる」ものではない（強制終了・LANの切断）ので、これだけに頼らない
+// （サーバ側は IDLE_HOURS さわられていないものを捨て、起動時にも捨てる。core/purge.py）。
+// 送るのは navigator.sendBeacon（閉じる最中でも届く。応答は読めない）。使えないブラウザでは
+// keepalive を付けた fetch にする。同じものが2回届いても、サーバ側は2回目に何もしない。
+const ragDiscard = (() => {
+  function send(url, payload) {
+    const text = JSON.stringify(payload || {});
+    // sendBeacon は Content-Type を選べるが、text/plain 以外だと事前確認（preflight）が要る。
+    // 同じサイト宛てなので preflight は起きないが、素直に text/plain で送る（サーバは中身で判断する）
+    try {
+      if (navigator.sendBeacon) {
+        const blob = new Blob([text], { type: "text/plain;charset=UTF-8" });
+        if (navigator.sendBeacon(url, blob)) return true;
+      }
+    } catch (e) { /* 使えなければ下の fetch にする */ }
+    try {
+      fetch(url, {
+        method: "POST", keepalive: true, headers: { "Content-Type": "application/json" }, body: text,
+      }).catch(() => {});
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // タブを隠しただけ（別のタブを見に行った・画面を最小化した）で捨てると、戻ってきたときに
+  // 取り込みが消えていて困る。閉じた（pagehide）ならすぐ捨て、隠れただけなら この時間だけ待つ。
+  // 待っている間に戻ってくれば捨てない。隠れたままのタブでは timer が遅れるが、遅れる分には困らない。
+  const HIDDEN_GRACE_MS = 5 * 60 * 1000;
+
+  /** url へ「これを捨てて」と送る見張りを付ける。payloadFn() は {doc_ids:[…]} / {import_ids:[…]} を返す。 */
+  function watch(url, payloadFn) {
+    let live = true;
+    let hiddenTimer = null;
+    const has = () => {
+      const payload = (live && payloadFn && payloadFn()) || {};
+      const ids = [].concat(payload.doc_ids || [], payload.import_ids || []);
+      return ids.length ? payload : null;
+    };
+    const leave = () => {
+      const payload = has();
+      if (payload) send(url, payload);
+    };
+    const stopTimer = () => { clearTimeout(hiddenTimer); hiddenTimer = null; };
+
+    window.addEventListener("pagehide", () => { stopTimer(); leave(); });
+    document.addEventListener("visibilitychange", () => {
+      stopTimer();
+      if (document.visibilityState === "hidden") hiddenTimer = setTimeout(leave, HIDDEN_GRACE_MS);
+    });
+    return {
+      /** いま持っている分を今すぐ捨てる（新しいファイルを置く前）。失敗しても取り込みは続けられる。 */
+      async now() {
+        const payload = has();
+        if (!payload) return;
+        try {
+          await ragFetch(url, { json: payload, quiet: true });
+        } catch (e) { /* 捨て損ねても、サーバ側の時間切れで片付く */ }
+      },
+      /** もう捨てるものが無い（ダウンロードが終わった・自分で消した）。 */
+      clear() { live = false; },
+      /** また見張る（新しいファイルを置いたあと）。 */
+      arm() { live = true; },
+      send: () => leave(),
+    };
+  }
+
+  return { watch, send };
+})();
+
 // ---- ragSections: 1画面の中の「段」の開け閉め -------------------------------------------
 // 画面を移らず、下に段が増えていく形にする（利用者の指示 2026-09-20）。
 // 段の書き方（templates 側）:
@@ -321,12 +402,15 @@ const ragSections = (() => {
     toggle.textContent = section.classList.contains("is-open") ? "閉じる" : "開く";
   }
 
+  // 画面に data-steps-open があるときは、段を畳まず最初から全部出しておく（帳票登録など）
+  const alwaysOpen = () => !!document.querySelector("[data-steps-open]");
+
   /** その段を開く（他の開いている段は、済んだものだけ畳む）。 */
   function open(id, { scroll = true } = {}) {
     const section = el(id);
     if (!section) return null;
     list().forEach((s) => {
-      if (s !== section && s.classList.contains("is-done")) s.classList.remove("is-open");
+      if (!alwaysOpen() && s !== section && s.classList.contains("is-done")) s.classList.remove("is-open");
       setToggle(s);
     });
     section.classList.add("is-open");
@@ -341,7 +425,7 @@ const ragSections = (() => {
     const section = el(id);
     if (!section) return null;
     section.classList.add("is-done");
-    section.classList.remove("is-open");
+    if (!alwaysOpen()) section.classList.remove("is-open");
     const label = section.querySelector("[data-step-summary]");
     if (label && summary !== undefined && summary !== null) {
       label.textContent = String(summary);
@@ -412,4 +496,6 @@ ragSections.refresh();
 // 他のスクリプトから使う
 window.ragFetch = ragFetch;
 window.ragSections = ragSections;
-window.App = { toast, postJson, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox, ragFetch, ragSections };
+window.ragDiscard = ragDiscard;
+window.App = { toast, postJson, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox, ragFetch, ragSections,
+               ragDiscard };

@@ -130,6 +130,9 @@ def test_form_type_samples_status_and_delete(app, client, sample_dir, tmp_path):
     # 見本の追加（Excel でないファイルはエラー）
     res = _upload(client, f"/form-types/{pattern_id}/samples", sample_dir / "shifted.xlsx", "samples")
     assert res.status_code == 200 and "見本ファイルを1件追加しました" in res.get_json()["message"]
+    # 使用開始の時点で見本の Excel は消える（design.md 3.3）ので、残るのはこのあと足した分だけ
+    res = _upload(client, f"/form-types/{pattern_id}/samples", sample_dir / "table.xlsx", "samples")
+    assert res.status_code == 200, res.get_json()
     before = _upload_files(tmp_path)
     res = client.post(f"/form-types/{pattern_id}/samples",
                       data={"samples": (io.BytesIO(b"not excel"), "x.xlsx")},

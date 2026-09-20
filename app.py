@@ -1,7 +1,9 @@
 import os
 import secrets
+import socket
 import sys
 import threading
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -54,16 +56,6 @@ _NO_DEBUG_MSG = (
     "  通常の起動: python app.py\n"
     "  詳しいエラーを見たいとき: app.py の DEBUG を True にして python app.py\n"
 )
-_NO_REMOTE_MSG = (
-    "\n[app] このアプリにはログイン機能が無いため、このPC以外から届くアドレスでは起動しません。\n"
-    "  いまの設定: HOST = {host}\n"
-    "  他のPCから開くと、APIキーの設定を含むすべての画面を誰でも操作できてしまいます。\n"
-)
-
-
-def _is_loopback(host) -> bool:
-    # 空文字は 0.0.0.0 と同じで全てのネットワークから届くので loopback に含めない
-    return str(host or "").strip().lower() in ("127.0.0.1", "localhost", "::1")
 
 
 def _refuse_debugger() -> None:
@@ -71,6 +63,138 @@ def _refuse_debugger() -> None:
         raise SystemExit(_NO_DEBUG_MSG)
     if any(a in _DEBUG_ARGS for a in sys.argv[1:]):
         raise SystemExit(_NO_DEBUG_MSG)
+
+
+# --- 待ち受け先と、受け付ける宛先の名前 -------------------------------------------------
+# サーバ（JupyterLab のターミナルなど）で起動し、社内LANの他のPCから数人で開いて使う（design.md 0）。
+# 既定はこのサーバの中からだけ開ける 127.0.0.1。LAN に出すときは起動時に環境変数で渡す:
+#   HOST=0.0.0.0 PORT=5000 python app.py
+_ALL_ADDRESSES = ("", "0.0.0.0", "::")
+
+
+def _env_port(default: int = 5000) -> int:
+    raw = (os.environ.get("PORT") or "").strip()
+    if not raw:
+        return default
+    try:
+        port = int(raw)
+    except ValueError:
+        raise SystemExit(f"\n[app] PORT が数字ではありません: {raw!r}\n  例: PORT=5000 python app.py\n") from None
+    if not 1 <= port <= 65535:
+        raise SystemExit(f"\n[app] PORT が範囲外です: {port}（1〜65535）\n")
+    return port
+
+
+HOST = (os.environ.get("HOST") or "127.0.0.1").strip() or "127.0.0.1"
+PORT = _env_port()
+
+
+def _is_loopback(host) -> bool:
+    # 空文字は 0.0.0.0 と同じで全てのネットワークから届くので loopback に含めない
+    return str(host or "").strip().lower() in ("127.0.0.1", "localhost", "::1")
+
+
+def _hostname_only(value) -> str:
+    """"mypc:5000" や "[::1]:5000" から、宛先の名前だけを取り出す（小文字・末尾のドットは落とす）。"""
+    try:
+        name = urlsplit(f"//{str(value or '').strip()}").hostname or ""
+    except ValueError:
+        return ""
+    return name.rstrip(".").lower()
+
+
+def _lan_address() -> str:
+    """LAN の他のPCから届くこのサーバのアドレス。取れなければ空（通信はしない）。"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("192.0.2.1", 9))   # TEST-NET-1。UDP なので何も送らず、どの口から出るかだけ決めさせる
+        return sock.getsockname()[0]
+    except OSError:
+        return ""
+    finally:
+        sock.close()
+
+
+@lru_cache(maxsize=1)
+def _machine_names() -> tuple[str, ...]:
+    """このサーバ自身の名前とアドレス（LAN から届く宛先）。起動中は変わらない前提で1回だけ調べる。"""
+    names: set[str] = set()
+    try:
+        hostname = socket.gethostname()
+    except OSError:
+        hostname = ""
+    if hostname:
+        names.update({hostname.lower(), hostname.split(".")[0].lower()})
+        try:
+            canonical, aliases, addresses = socket.gethostbyname_ex(hostname)
+        except OSError:
+            pass
+        else:
+            names.update(n.lower() for n in (canonical, *aliases) if n)
+            names.update(addresses)
+    lan = _lan_address()
+    if lan:
+        names.add(lan)
+    # 日本語のPC名のときブラウザは punycode（xn--…）で送ってくるので、その形も受け付ける
+    for name in list(names):
+        try:
+            names.add(name.encode("idna").decode("ascii").lower())
+        except (UnicodeError, ValueError):
+            pass
+    return tuple(sorted(n for n in names if n))
+
+
+def allowed_hosts(host: str | None = None) -> set[str]:
+    """受け付ける宛先の名前（Host ヘッダー）。
+
+    ログインが無いので、宛先の名前まで確かめる。攻撃者のドメインがこのサーバのアドレスを指していると、
+    そのページとこのアプリが同一オリジンになり、画面の中身を読み取られてしまう（DNSリバインディング）。
+    受け付けるのは、ループバックと、LAN に出しているときはこのサーバ自身の名前・アドレス。
+    ロードバランサや別名で開くときは ALLOWED_HOSTS（`;` か `,` 区切り）で足す。`*` ですべて受け付ける。
+    """
+    bound = (HOST if host is None else host).strip().lower()
+    names = {"127.0.0.1", "localhost", "::1"}
+    for entry in (os.environ.get("ALLOWED_HOSTS") or "").replace(",", ";").split(";"):
+        entry = entry.strip()
+        if entry == "*":
+            return {"*"}
+        if entry:
+            names.add(_hostname_only(entry) or entry.lower())
+    if bound not in _ALL_ADDRESSES:
+        names.add(_hostname_only(bound) or bound)
+    if bound in _ALL_ADDRESSES or not _is_loopback(bound):
+        names.update(_machine_names())   # LAN に出しているときだけ、PC名・LANのアドレスでも開ける
+    return names
+
+
+def _home_host() -> str:
+    """画面や起動時の案内に出す「開けるアドレス」の宛先。"""
+    bound = HOST.strip().lower()
+    if _is_loopback(bound):
+        return "127.0.0.1"
+    if bound in _ALL_ADDRESSES:
+        return _lan_address() or (_machine_names()[0] if _machine_names() else "127.0.0.1")
+    return bound
+
+
+def startup_notice(port: int | None = None) -> str:
+    """起動したときに出す案内。LAN に出しているときは、ログインが無いことを必ず知らせる。"""
+    url = f"http://{_home_host()}:{port or PORT}/"
+    if _is_loopback(HOST):
+        return f"[app] {url} で起動しました（このサーバの中からだけ開けます）"
+    line = "=" * 68
+    return (
+        f"\n{line}\n"
+        f"[app] 社内LANに公開して起動しました。ほかのPCからは次のアドレスを開いてください。\n"
+        f"\n      {url}\n\n"
+        f"  ・ログインはありません。このアドレスを知っている人は誰でも使えます。\n"
+        f"    いま取り込んでいる帳票・一覧表の中身も、開かれれば見えます。\n"
+        f"    信頼できる社内LANの中だけで使ってください。\n"
+        f"  ・ダウンロードするとサーバーからデータが消えます。ダウンロードしていないものも\n"
+        f"    しばらくすると捨てます。要るものはその場でダウンロードしてください。\n"
+        f"  ・止めるとき: Ctrl+C（nohup で動かしているときは kill <PID>）\n"
+        f"{line}\n"
+    )
 
 
 def create_app(overrides: dict | None = None) -> Flask:
@@ -90,6 +214,11 @@ def create_app(overrides: dict | None = None) -> Flask:
         app.config[key] = Path(app.config[key])
         app.config[key].mkdir(parents=True, exist_ok=True)
     database.init_app(app)
+    if not app.config.get("ALLOWED_HOSTS"):
+        app.config["ALLOWED_HOSTS"] = allowed_hosts()
+    else:   # 設定から渡されたものも、Host と同じ形（ポート無し・小文字）に揃え、ループバックは必ず足す
+        given = {h if h == "*" else (_hostname_only(h) or str(h).lower()) for h in app.config["ALLOWED_HOSTS"]}
+        app.config["ALLOWED_HOSTS"] = {"*"} if "*" in given else given | {"127.0.0.1", "localhost", "::1"}
 
     app.register_blueprint(home_bp)
     for module in (forms, form_types, tables):
@@ -97,18 +226,20 @@ def create_app(overrides: dict | None = None) -> Flask:
 
     @app.before_request
     def _refuse_other_host():
-        # このPCからしか開けないこと（＝ログインが要らない前提）を Host でも確かめる。
-        # 127.0.0.1 で待ち受けても、攻撃者のドメインが 127.0.0.1 を指していれば
-        # そのページと同一オリジンになり、画面の中身を読み取られてしまう（DNSリバインディング）。
+        # 宛先の名前（Host）が、運用者が意図した名前かを確かめる（allowed_hosts のとおり）。
+        # 待ち受けているアドレスを攻撃者のドメインが指していると、そのページと同一オリジンになり、
+        # 画面の中身を読み取られてしまう（DNSリバインディング）。
+        allowed = app.config["ALLOWED_HOSTS"]
         try:
             parts = urlsplit(f"//{request.host}")
             host, port = parts.hostname, parts.port   # ポート番号・[] を外したホスト名
         except ValueError:
             host, port = None, None
-        if not _is_loopback(host):
+        host = (host or "").rstrip(".").lower()
+        if "*" not in allowed and host not in allowed:
             # 汎用の 400 画面（ホームへ = 同じアドレスの / ）では、また断られるだけで開き方が分からない。
             # 開けるアドレスを示す（ポートは送られてきた Host のもの。読めなければ起動時の PORT）
-            home_url = f"http://127.0.0.1:{port or PORT}/"
+            home_url = f"http://{_home_host()}:{port or PORT}/"
             text = f"このアドレスでは開けません。このアプリは {home_url} で開いてください"
             if request.accept_mimetypes.best == "application/json" or request.is_json:
                 return jsonify(error=text), 400
@@ -146,7 +277,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         # ダウンロード済みでデータが消えたあとに、開いたままの画面が途中保存・プレビューを送ると
         # ここに来る。HTML を返すとトーストに「通信に失敗しました」としか出ず、理由が伝わらない。
         if request.accept_mimetypes.best == "application/json" or request.is_json:
-            return jsonify(error="このデータはこのPCに残っていません（ダウンロード済みか、削除されています）。"
+            return jsonify(error="このデータはサーバーに残っていません（ダウンロード済みか、削除されています）。"
                                  "取り込みの画面からやり直してください"), 404
         return render_template("errors/404.html"), 404
 
@@ -181,8 +312,14 @@ def create_app(overrides: dict | None = None) -> Flask:
 
 
 # 途中で放り出されたものを捨てる間隔（design.md 3.3）。起動時に全部捨て、動いている間は
-# SWEEP_HOURS より古いものを SWEEP_INTERVAL ごとに捨てる（ブラウザを閉じたまま開きっぱなしのサーバ向け）。
-SWEEP_INTERVAL_SECONDS = 60 * 60
+# core.purge.STALE_HOURS より古いものをこの間隔で捨てる（数人で使うサーバーに置きっぱなしになるため）。
+# 捨てるまでの時間（STALE_HOURS）を短くしたときは、見回りもそれに合わせて短くする。
+# 見回りの間隔だけ延びると「2時間で捨てます」と言いながら3時間残ることになるので、上限は10分にする。
+SWEEP_INTERVAL_SECONDS = 10 * 60
+
+
+def _sweep_interval(stale_hours: float) -> int:
+    return max(60, min(SWEEP_INTERVAL_SECONDS, int(stale_hours * 3600 / 2) or SWEEP_INTERVAL_SECONDS))
 
 
 def _purge_pending(app: Flask) -> None:
@@ -194,8 +331,11 @@ def _purge_pending(app: Flask) -> None:
     try:
         with app.app_context():
             forms_removed, tables_removed = purge.purge_all_pending()
+            samples_removed = purge.purge_all_samples()
         if forms_removed or tables_removed:
             print(f"[app] 途中だった取り込みを捨てました（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
+        if samples_removed:
+            print(f"[app] 帳票登録の見本ファイルを捨てました（{samples_removed} 件・設定は残ります）")
     except Exception as exc:  # 起動は止めない
         print(f"[app] 途中だった取り込みの片付けに失敗しました（{exc.__class__.__name__}: {exc}）")
 
@@ -206,9 +346,11 @@ def _start_sweeper(app: Flask) -> None:
         return
     from core import purge
 
+    interval = _sweep_interval(getattr(purge, "STALE_HOURS", 24))
+
     def loop() -> None:
         while True:
-            _stop.wait(SWEEP_INTERVAL_SECONDS)
+            _stop.wait(interval)
             try:
                 with app.app_context():
                     forms_removed, tables_removed = purge.sweep_stale(purge.STALE_HOURS)
@@ -268,10 +410,8 @@ def _recover_jobs(app: Flask) -> None:
         print(f"[app] 中断したジョブの整理に失敗しました（{exc.__class__.__name__}: {exc}）")
 
 
-# --- 待ち受け先 -------------------------------------------------------------
-# ログイン機能が無い（1人で使う）ため、このPCからだけ開ける 127.0.0.1 で起動する。
-HOST = "127.0.0.1"
-PORT = 5000
+# --- 起動の設定 -------------------------------------------------------------
+# 待ち受け先（HOST・PORT）はファイルの上のほうで環境変数から読む。
 THREADS = 8
 # waitress が応答の本文を先読みして溜める上限（既定は 16MB）。
 # 溜められる分はアプリ側では「送り終えた」ように見えるため、既定のままだと 16MB 未満の zip は
@@ -287,11 +427,16 @@ DEBUG = False
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        sys.exit(f"不明な引数: {sys.argv[1]}（起動は引数なしの python app.py）")
-    if not _is_loopback(HOST):
-        raise SystemExit(_NO_REMOTE_MSG.format(host=HOST))
+        sys.exit(f"不明な引数: {sys.argv[1]}（起動は引数なしの python app.py。"
+                 f"待ち受け先は環境変数 HOST・PORT で渡します）")
+    if DEBUG and not _is_loopback(HOST):
+        # DEBUG=True の Flask はデバッガを開く。LAN に出す起動では絶対に開かせない（_NO_DEBUG_MSG と同じ理由）
+        raise SystemExit("\n[app] DEBUG = True のまま LAN のアドレス（HOST=%s）では起動しません。\n"
+                         "  理由: デバッガが開くと、例外が出たときにブラウザからこのサーバの Python を実行できます。\n"
+                         "  詳しいエラーを見たいときは HOST を外して（127.0.0.1 で）起動してください。\n" % HOST)
 
     application = create_app()
+    print(startup_notice())
     if DEBUG:
         application.run(host=HOST, port=PORT, debug=True, use_reloader=False)
     else:
@@ -301,5 +446,4 @@ if __name__ == "__main__":
             print("[app] waitress が無いため Flask の開発サーバで起動します（pip install waitress を推奨）")
             application.run(host=HOST, port=PORT, debug=False)
         else:
-            print(f"[app] http://localhost:{PORT} で起動しました")
             serve(application, host=HOST, port=PORT, **WAITRESS_OPTIONS)

@@ -280,8 +280,8 @@ def test_delete_is_refused_while_an_ai_trial_is_running(ai_app, ai_client, monke
     seen = {}
 
     def slow_trial(*_a, **_k):
-        other = ai_app.test_client()
-        seen["delete"] = other.post(f"/tables/imports/{import_id}/delete").get_json()
+        # 同じブラウザの別のタブから消しに来る（別のブラウザからは、そもそもこの取り込みが見えない）
+        seen["delete"] = ai_client.post(f"/tables/imports/{import_id}/delete").get_json()
         raise runner.AIJobError("止めました")
 
     monkeypatch.setattr(runner, "trial_row", slow_trial)

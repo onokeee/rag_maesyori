@@ -35,7 +35,7 @@
   <div class="sub-block">
     <h3 class="sub-title">2. 試し実行（10行）</h3>
     <p class="hint">先頭の10行を1行ずつAIに送り、抜き出した項目と Markdown を確かめます。結果は保存され、全件実行でも使われます。<br>
-      モデル: {{ model }}{% if external %}（外部のAIサービス）{% else %}（このPC・社内のサーバー）{% endif %}</p>
+      モデル: {{ model }}{% if external %}（外部のAIサービス）{% else %}（社内のAIサーバー）{% endif %}</p>
     {% if external %}<label class="check"><input type="checkbox" data-trial-external> 試し実行の10行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
     <div class="btn-row"><button type="button" class="btn" data-trial-run {{ 'disabled' if not trial_keys }}>10行を試す</button></div>
     <p class="progress-text" data-trial-status aria-live="polite"></p>

@@ -340,10 +340,24 @@ def _m7_llm_calls_owner(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_import ON llm_calls(import_id)")
 
 
+def _m8_session_scope(conn: sqlite3.Connection) -> None:
+    """取り込んだものに「どのブラウザのものか」を持たせる（社内LANで数人が同時に使うため）。
+
+    ログインは無いので利用者は分からないが、セッションのクッキー（views.current_session_id）で
+    ブラウザごとの作業場所は分けられる。ほかのブラウザの帳票・取り込みは見えない（404）。
+    古いDBの行は NULL（持ち主が分からない）のままで、これまでどおり扱う（起動時の片付けで消える）。
+    帳票の種類・取り込み設定は「設定」なので分けない（みんなで使う）。
+    """
+    _add_column(conn, "documents", "session_id", "TEXT")
+    _add_column(conn, "table_imports", "session_id", "TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_table_imports_session ON table_imports(session_id)")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
                                                           _m5_purge_scope, _m6_ai_items_per_import,
-                                                          _m7_llm_calls_owner]
+                                                          _m7_llm_calls_owner, _m8_session_scope]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -589,12 +603,21 @@ def delete_sample(sample_id: int) -> None:
 # confirmed_json != data_json→modified、それ以外→confirmed
 
 def create_document(file_name: str, file_hash: str, stored_path: str, pattern_id: int | None = None,
-                    batch_id: str = "", batch_order: int = 0) -> int:
+                    batch_id: str = "", batch_order: int = 0, session_id: str | None = None) -> int:
+    """帳票を1件作る。session_id は取り込んだブラウザ（views.current_session_id）。"""
     return _exec(
-        "INSERT INTO documents (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, now()),
+        "INSERT INTO documents (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, session_id, "
+        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, session_id, now()),
     )
+
+
+# 持ち主で絞る条件。持ち主の分からない行（この仕組みより前のDBの行）は、これまでどおり誰からでも扱える
+_OWNED = "(d.session_id IS NULL OR d.session_id = ?)"
+
+
+def _owner_where(session_id: str | None) -> tuple[str, list]:
+    return (_OWNED, [session_id]) if session_id else ("", [])
 
 
 def get_document(doc_id: int) -> dict | None:
@@ -608,7 +631,7 @@ def get_document(doc_id: int) -> dict | None:
 
 _LIST_COLUMNS = f"""
         SELECT d.id, d.file_name, d.file_hash, d.stored_path, d.pattern_id, d.title, d.batch_id, d.batch_order,
-               d.created_at, d.confirmed_at, {_STATE_SQL} AS state,
+               d.session_id, d.created_at, d.confirmed_at, {_STATE_SQL} AS state,
                p.name AS pattern_name, p.version AS pattern_version,
                -- 帳票の種類が削除されても、読み取ったときの種類名を表示に使う
                CASE WHEN json_valid(d.data_json) THEN json_extract(d.data_json, '$.pattern.name') END
@@ -626,24 +649,32 @@ def list_documents(state: str | None = None, limit: int = 50) -> list[dict]:
     return _all(f"{_LIST_COLUMNS} {where} ORDER BY d.id DESC LIMIT ?", (*args, limit))
 
 
-def list_batch_documents(batch_id: str) -> list[dict]:
-    """まとめ取り込み（1回の選択で複数ファイル）の帳票を、選んだ順に返す。"""
+def list_batch_documents(batch_id: str, session_id: str | None = None) -> list[dict]:
+    """まとめ取り込み（1回の選択で複数ファイル）の帳票を、選んだ順に返す。
+
+    session_id を渡すと、そのブラウザの帳票だけを返す（ほかの人のまとまりは見えない）。
+    """
     if not batch_id:
         return []
-    return _all(f"{_LIST_COLUMNS} WHERE d.batch_id = ? ORDER BY d.batch_order, d.id", (batch_id,))
+    owner, args = _owner_where(session_id)
+    where = "WHERE d.batch_id = ?" + (f" AND {owner}" if owner else "")
+    return _all(f"{_LIST_COLUMNS} {where} ORDER BY d.batch_order, d.id", (batch_id, *args))
 
 
-def list_confirmed_documents(ids: list[int] | None = None) -> list[dict]:
-    """確定済みの版を持つ帳票（修正中も確定済みの版を持つ）。ids 指定で絞り込み。"""
+def list_confirmed_documents(ids: list[int] | None = None, session_id: str | None = None) -> list[dict]:
+    """確定済みの版を持つ帳票（修正中も確定済みの版を持つ）。ids・session_id 指定で絞り込み。"""
     sql = f"""SELECT d.*, {_STATE_SQL} AS state, p.name AS pattern_name, p.version AS pattern_version
               FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id
               WHERE d.confirmed_json IS NOT NULL"""
+    owner, args = _owner_where(session_id)
+    if owner:
+        sql += f" AND {owner}"
     if ids is not None:
         if not ids:
             return []
         sql += f" AND d.id IN ({', '.join('?' for _ in ids)})"
-        return _all(sql + " ORDER BY d.id", tuple(ids))
-    return _all(sql + " ORDER BY d.id")
+        return _all(sql + " ORDER BY d.id", (*args, *ids))
+    return _all(sql + " ORDER BY d.id", tuple(args))
 
 
 def save_draft(doc_id: int, data_json, title: str | None = None) -> None:
@@ -686,12 +717,16 @@ def reset_document(doc_id: int, pattern_id: int | None, data_json) -> None:
           (pattern_id, None if data_json is None else _dumps(data_json), doc_id))
 
 
-def find_confirmed_by_hash(file_hash: str, exclude_id: int | None = None) -> dict | None:
-    return _one(
-        "SELECT id, file_name, title FROM documents WHERE file_hash = ? AND confirmed_json IS NOT NULL AND id != ? "
-        "ORDER BY id LIMIT 1",
-        (file_hash, exclude_id if exclude_id is not None else -1),
-    )
+def find_confirmed_by_hash(file_hash: str, exclude_id: int | None = None,
+                           session_id: str | None = None) -> dict | None:
+    """同じ中身の確定済みの帳票（取り込み直しの注意に出す）。ほかの人の帳票は知らせない。"""
+    owner, args = _owner_where(session_id)
+    sql = ("SELECT d.id, d.file_name, d.title FROM documents d WHERE d.file_hash = ? "
+           "AND d.confirmed_json IS NOT NULL AND d.id != ?")
+    if owner:
+        sql += f" AND {owner}"
+    return _one(sql + " ORDER BY d.id LIMIT 1",
+                (file_hash, exclude_id if exclude_id is not None else -1, *args))
 
 
 def update_document(doc_id: int, **columns) -> None:

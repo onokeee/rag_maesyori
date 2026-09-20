@@ -99,9 +99,18 @@
   const ids = () => docs.map((d) => d.id).join(",");
   const setStatus = (text) => { if (el.saveStatus) el.saveStatus.textContent = text; };
 
+  // ダウンロードしないまま画面を離れたら、この画面で取り込んだ分は捨てる（利用者の指示 2026-09-20）。
+  // docs に残っているものが「まだダウンロードしていない分」そのもの（ダウンロード・削除で docs から抜ける）。
+  const guard = (window.ragDiscard || { watch: () => ({ now: async () => {}, clear() {}, arm() {} }) })
+    .watch(page.dataset.discardUrl || "/forms/discard", () => ({ doc_ids: docs.map((d) => d.id) }));
+
   // ---- 1 ファイルを置く ----
   const uploadForm = document.getElementById("uploadForm");
   if (uploadForm) {
+    // 置いた（またはクリックで選んだ）時点でそのまま読み取る。ボタンは押さなくてよい
+    uploadForm.querySelector("input[type=file]")?.addEventListener("change", (event) => {
+      if (event.target.files && event.target.files.length) uploadForm.requestSubmit();
+    });
     uploadForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const input = uploadForm.querySelector("input[type=file]");
@@ -111,6 +120,8 @@
       if (button) button.disabled = true;
       work("upload", files.length > 1 ? files.length + "件のファイルを取り込んでいます…" : "ファイルを取り込んでいます…");
       try {
+        // 新しいファイルを置いたら、前の分（ダウンロードしていない帳票）はその場で捨てる
+        if (docs.length) { await guard.now(); resetPage(); }
         const data = new FormData();
         files.forEach((f) => data.append("file", f));
         const res = await send(page.dataset.uploadUrl, { method: "POST", body: data });
@@ -604,15 +615,15 @@
     }
   }
 
-  // ダウンロードすると、渡した帳票のデータはこのPCから消えるので、画面も片付ける
+  // ダウンロードすると、渡した帳票のデータはサーバーから消えるので、画面も片付ける
   page.addEventListener("click", (event) => {
     const link = event.target.closest("a[data-download][data-confirmed='1']");
     if (!link) return;
     const rest = docs.filter((d) => d.state !== "confirmed" && d.state !== "modified");
     setTimeout(async () => {
-      toast("ダウンロードしました。渡した分のデータはこのPCから消えました", "ok");
+      toast("ダウンロードしました。渡した分のデータはサーバーから消えました", "ok");
       if (!rest.length) { resetPage(); return; }
-      docs = rest;                   // 未確定の帳票はこのPCに残っているので、続けて読み取れる
+      docs = rest;                   // 未確定の帳票はサーバーに残っているので、続けて読み取れる
       renderDocTabs();
       await openDoc(docs[0].id);
     }, 1500);

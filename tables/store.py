@@ -155,12 +155,16 @@ def _decode_import(row) -> dict | None:
 
 
 def create_import(file_name: str, file_hash: str, stored_path: str, source: dict | None = None,
-                  template_id: int | None = None, template_version_id: int | None = None, conn=None) -> int:
+                  template_id: int | None = None, template_version_id: int | None = None, conn=None,
+                  session_id: str | None = None) -> int:
+    """取り込みを1件作る。session_id は置いたブラウザ（views.current_session_id）。"""
     db = _db(conn)
     ts = database.now()
     cur = db.execute("""INSERT INTO table_imports (template_id, template_version_id, file_name, file_hash, stored_path,
-                        source_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)""",
-                     (template_id, template_version_id, file_name, file_hash, stored_path, _dumps(source or {}), ts, ts))
+                        source_json, session_id, status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)""",
+                     (template_id, template_version_id, file_name, file_hash, stored_path, _dumps(source or {}),
+                      session_id, ts, ts))
     db.commit()
     return cur.lastrowid
 
@@ -193,11 +197,20 @@ def update_import(import_id: int, conn=None, commit: bool = True, **columns) -> 
 # 取り込み1件を消すのは core/purge.py の purge_table_import（ファイルと DB の行をまとめて消す。design.md 3.3）
 
 
-def list_imports(template_id: int | None = None, status: str | list | None = None, limit: int = 100, conn=None) -> list[dict]:
+def list_imports(template_id: int | None = None, status: str | list | None = None, limit: int = 100, conn=None,
+                 session_id: str | None = None) -> list[dict]:
+    """取り込みの一覧。session_id を渡すとそのブラウザの分だけ（持ち主の分からない古い行は含む）。
+
+    取り込み設定を消せるかの確認（views.tables.delete_template）では、ほかの人が使っている取り込みも
+    数えないといけないので session_id を渡さない（設定はみんなで使うもの）。
+    """
     where, args = [], []
     if template_id is not None:
         where.append("i.template_id = ?")
         args.append(template_id)
+    if session_id:
+        where.append("(i.session_id IS NULL OR i.session_id = ?)")
+        args.append(session_id)
     if status:
         statuses = [status] if isinstance(status, str) else list(status)
         where.append(f"i.status IN ({','.join('?' * len(statuses))})")

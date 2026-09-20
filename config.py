@@ -41,6 +41,10 @@ class Config:
     TABLE_MAX_UPLOAD_BYTES = int(os.environ.get("TABLE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
     # Excel のセル数の上限（これを超えるシートは読み込まない）
     EXCEL_MAX_CELLS = int(os.environ.get("EXCEL_MAX_CELLS", "500000"))
+    # 読み込み・下書き・AI整形を同時に動かす本数（列ごと。core/jobs.py）。
+    # 社内LANのサーバーで数人が同時に使うので、1本だと誰かの長い読み込みでほかの人が待たされる。
+    # 1〜8 に丸められる。列ごとの本数はプロセス内でその列を最初に使ったときに決まり、あとから減らない
+    JOB_WORKERS = int(os.environ.get("JOB_WORKERS", "3"))
 
     # ---- LLM（OpenAI互換API） ----
     OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")

@@ -2,20 +2,15 @@
 {% import "components/_ui.html" as ui %}
 <div data-layout-page data-detect-url="{{ url_for('tables.layout_detect', import_id=imp.id) }}">
   <p class="hint">{% if imp.source.kind == 'excel' %}シート: {{ sheet }}／{% endif %}
-    行番号をクリックすると、見出し行やデータの終わりを指定できます。</p>
+    行番号をクリックすると見出し行になります（Shift を押しながらで2段）。データの終わりは右の欄で指定できます。</p>
 
-  <div class="grid-3">
+  <div class="grid-2">
     <label>見出し行（2段なら「6,7」）
       <input type="text" name="header_rows" class="input" value="{{ layout.header_rows | join(',') }}" data-header-input>
     </label>
     <label>データの終わりの行（空欄＝自動）
       <input type="text" name="data_end_row" class="input" value="{{ data_end_saved }}" placeholder="自動（{{ layout.data_end }}行目）" data-end-input>
     </label>
-    <div class="field" role="radiogroup" aria-label="行番号をクリックしたときの動作">
-      <span>行番号をクリックしたとき</span>
-      <label class="check"><input type="radio" name="pick" value="header" checked> 見出し行にする（Shift で2段）</label>
-      <label class="check"><input type="radio" name="pick" value="end"> データの終わりにする</label>
-    </div>
   </div>
   <dl class="tbl-summary">
     <div><dt>表の形</dt><dd data-kind>{{ info.table_kind_label }}</dd></div>

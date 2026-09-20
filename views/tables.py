@@ -37,7 +37,7 @@ from tables.source import open_source
 from tables.spec import (
     COLUMN_ROLES, COLUMN_TYPES, MD_MODES, LogStageSpec, resolve_columns, spec_from_suggestions, validate_spec,
 )
-from views import set_download_name
+from views import current_session_id, owns, set_download_name
 
 bp = Blueprint("tables", __name__, url_prefix="/tables")
 
@@ -62,10 +62,10 @@ SCOPE_LABELS = {"pending": "まだ整形していない行と、内容が変わ�
 MATCHED_LABELS = {"template": "設定", "dictionary": "辞書", "similar": "似た見出し", "none": "", "": ""}
 # CSV の文字コード・区切り文字は画面の選択肢だけを受け付ける（他の値は読み込みで落ちて画面が開けなくなるため）
 # ダウンロードでデータが消えることの案内（design.md 3.3）
-DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この取り込みのデータはこのPCから消えます"
+DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この取り込みのデータはサーバーから消えます"
                            "（もう一度ダウンロードすることはできません）。正規化CSVは zip の"
                            "「管理用_RAGには入れない」フォルダにも入っています。")
-DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込みのデータはこのPCから消えます。"
+DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込みのデータはサーバーから消えます。"
                               "もう一度ダウンロードすることはできません。")
 ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
                     ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16"),
@@ -78,8 +78,13 @@ NEW_TEMPLATE_NAME_NOTE = "新しい取り込み設定の名前を入力してく
 # ---- 共通 ---------------------------------------------------------------------------------
 
 def _load_import(import_id: int) -> dict:
+    """この画面（このブラウザ）の取り込みを返す。ほかの人の取り込みは「無い」として扱う（404）。
+
+    社内LANで数人が同時に使うので、番号を打ち替えただけでほかの人の表を読めてはいけない。
+    403 にすると「その番号の取り込みはある」ことが分かってしまうので、404 にそろえる。
+    """
     imp = store.get_import(import_id)
-    if imp is None:
+    if imp is None or not owns(imp):
         abort(404)
     return imp
 
@@ -261,6 +266,7 @@ def _locked(reason: str, **extra):
 @bp.get("/new")
 def new():
     """表の取り込みの画面（1枚）。段の中身はここでは出さず、ファイルを置いたあとに取りに来る。"""
+    current_session_id()   # 画面を開いた時点で作業場所（クッキー）を決めておく（同時に置かれても取り違えない）
     return render_template("tables/page.html")
 
 
@@ -311,10 +317,34 @@ def upload():
     except Exception:
         remove_upload(stored.stored_path)   # 思わぬエラーでもアップロードしたファイルを残さない（design.md 3.3）
         raise
-    import_id = store.create_import(stored.file_name, stored.file_hash, stored.stored_path, source=source_info)
+    import_id = store.create_import(stored.file_name, stored.file_hash, stored.stored_path, source=source_info,
+                                    session_id=current_session_id())
     if source_info.get("kind") == "excel":
         pipeline.import_source(store.get_import(import_id), real=source).sheets()  # シート一覧を控えに入れる
     return jsonify({"import_id": import_id, "file_name": stored.file_name, "urls": _urls(import_id)})
+
+
+# ---- 画面を離れたので捨てる ------------------------------------------------------------------
+# 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）。
+# 画面を閉じた・隠したときに static/app.js の ragDiscard がここへ「捨てて」と送ってくる。
+# navigator.sendBeacon で届くので中身の型は text/plain（get_json(force=True) で読む）。
+# 応答は読めず、やり直しもできないので、いつでも 204 を返す（もう無い番号・ほかの人の番号・
+# 処理中のものは core.purge 側で黙って外れる）。
+
+@bp.post("/discard")
+def discard():
+    """この画面（このブラウザ）の、まだダウンロードしていない取り込みを捨てる。"""
+    payload = request.get_json(force=True, silent=True) or {}
+    ids = payload.get("import_ids") or []
+    sid = current_session_id()
+    try:
+        if ids:
+            purge.discard_table_imports(ids, sid)
+        else:
+            purge.purge_session(sid, documents=False)   # 帳票取り込み（別のタブ）は巻き込まない
+    except Exception as exc:   # 捨て損ねてもブラウザには伝えられない。時間切れの片付けに任せる
+        current_app.logger.warning("取り込みの片付けに失敗しました: %s", exc.__class__.__name__)
+    return "", 204
 
 
 # ---- 読み取り方（文字コード・区切り・シート・取り込み設定） -------------------------------------------------
@@ -1378,9 +1408,20 @@ _PANELS = {"source": _panel_source, "layout": _panel_layout, "columns": _panel_c
 
 # ---- ジョブの進捗（JSON） ------------------------------------------------------------------------------
 
+def _job_visible(job: dict) -> bool:
+    """このブラウザの取り込みのジョブか（ほかの人のジョブは進み具合も見せない）。
+
+    取り込みが消えている（ダウンロード済み・削除済み）ジョブは、持ち主が分からないので見せない。
+    """
+    if (job.get("ref_type") or "") != "table_import" or job.get("ref_id") is None:
+        return False
+    imp = store.get_import(job["ref_id"])
+    return imp is not None and owns(imp)
+
+
 def api_job(job_id: int):
     job = jobs.get_job(job_id)
-    if job is None:
+    if job is None or not _job_visible(job):
         return _json_error("ジョブが見つかりません", 404)
     return jsonify({k: job.get(k) for k in ("id", "kind", "status", "status_label", "progress", "message", "result",
                                             "finished")})

@@ -6,7 +6,7 @@
     <h1 class="card-title">このページは開けません</h1>
   </div>
   {% if host_refused %}
-  {#- このPC以外の名前（PC名・hosts の別名など）で開かれた。同じアドレスのホームへ戻しても断られるので、開けるアドレスを示す -#}
+  {#- サーバーが待ち受けていない名前（別名・hosts の書き換えなど）で開かれた。同じアドレスのホームへ戻しても断られるので、開けるアドレスを示す -#}
   <p>このアドレスでは開けません。このアプリは <strong>{{ home_url }}</strong> で開いてください。</p>
   <div class="btn-row">
     <a class="btn primary" href="{{ home_url }}">{{ home_url }} を開く</a>
