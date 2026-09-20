@@ -12,8 +12,8 @@ from datetime import date
 from excel.extractor import label_hits, scan_below, scan_right
 from excel.tables import (SAME_COLUMNS_RATIO, Table, detect_tables, legend_text, section_of, seq_header,
                           table_header_keys, table_text_lines, table_title)
-from excel.text import (MAX_LABEL_LENGTH, cell_text, normalize_label, normalize_sheet_name, split_code_name,
-                        split_label_unit, to_date, value_unit)
+from excel.text import (MAX_LABEL_LENGTH, cell_text, nfkc_value, normalize_label, normalize_sheet_name,
+                        split_code_name, split_label_unit, to_date, value_unit)
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
 from pattern.dictionary import (BY_FIELD_NAME, COMBINED_EQUIPMENT_NORMS, COMBINED_EQUIPMENT_PARTS,
                                 DICTIONARY_NORMS, LOOKUP, is_person_field)
@@ -29,6 +29,12 @@ _DASH_ONLY = {"-", "－", "ー", "―", "‐", "/", "／"}
 _ID_LABEL_RE = re.compile(r"^[a-z0-9]{1,3}(?:no|番号)$")
 # 日付らしい見出しの末尾（見本の値が日付として読めるときだけ日付型にする）
 _DATE_LABEL_SUFFIXES = ("日", "日付", "日時", "期限", "予定日", "年月日")
+# 値そのものが日付だけで書かれているか（見出しからは日付と分からない「発生」欄などのため）。
+# 日付を含むだけの文（「2026-09-14 に発生」「ロットNo. 2026-09-14-3」）を日付にしないよう、値の全体が
+# 日付（＋時刻・曜日）の表記のときだけとする。年の無い「2/12」は to_date が警告を返すので日付にしない。
+_DATE_VALUE_RE = re.compile(r"^(?:令和|平成|昭和|[RHS])?\s*(?:\d{1,4}|元)\s*[年/\-.]\s*\d{1,2}\s*[月/\-.]\s*\d{1,2}\s*日?"
+                            r"(?:\s*\([日月火水木金土]\))?"
+                            r"(?:\s*T?\s*\d{1,2}\s*(?::\d{2}(?::\d{2})?|時\s*\d{1,2}\s*分?)\s*)?$")
 # 見出しの先頭の項番（表示名から除く）: 「1. 時系列」「D1 チーム編成」「A. 機構部」
 _SECTION_PREFIX = re.compile(r"^(?:\d{1,2}\s*[.)、．]|[A-Za-zＡ-Ｚ]\s*[.．)、]|D[1-8](?![0-9])\s*[:：]?)\s*")
 
@@ -385,7 +391,20 @@ def _guess_type(value, label: str = "") -> str:
     # 見本が文字列で日付を持つ帳票（「令和5年12月5日」「2025/12/19(金)」）も日付にして、本文を ISO にそろえる
     if _date_label(label) and to_date(value, cell_text(value))[1] is None:
         return "date"
+    # 「発生」のように見出しからは日付と分からない欄も、値が日付だけで書かれていれば日付にする
+    # （文字列のままだと ISO＋「（2024年7月）」の注記が付かず、同じ md の中で日付の書き方が混ざる）
+    if _date_value(value):
+        return "date"
     return "text" if "\n" in text or len(text) > 40 else "string"
+
+
+def _date_value(value) -> bool:
+    """値そのものが日付だけで書かれているか（年月日がそろい、警告なしに ISO にできる）。
+
+    見本ごとの多数決はしない（この候補を作ったセルの値だけで見る。別シートの同名ラベルの値が混ざるため）。
+    """
+    text = cell_text(value)
+    return bool(_DATE_VALUE_RE.match(nfkc_value(text))) and to_date(value, text)[1] is None
 
 
 def _date_label(label: str) -> bool:

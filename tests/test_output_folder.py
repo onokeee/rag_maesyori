@@ -157,6 +157,7 @@ def test_check_button_revalidates_the_folder(client, out_dir):
 def test_save_buttons_are_hidden_until_a_folder_is_set(app, client, out_dir):
     doc_id, _path = _add_confirmed_document(app, "報告書.xlsx")
     first, _p = _add_confirmed_document(app, "1.xlsx", value="EQ-101", batch_id="B", order=0)
+    _add_confirmed_document(app, "2.xlsx", value="EQ-102", batch_id="B", order=1)  # 2件以上でまとまりになる
     for url in (f"/forms/{doc_id}/done", f"/forms/{doc_id}", f"/forms/{first}/done", "/"):
         page = client.get(url).get_data(as_text=True)
         assert "save-to-folder" not in page and "保存先フォルダに保存" not in page, url

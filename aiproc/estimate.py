@@ -11,6 +11,7 @@ import math
 from aiproc import cache, items
 from aiproc.runner import assign_keys, cached_usable, load_rows_for_ai, prepare_works, selected
 from core.mdtext import estimate_tokens
+from models import database
 
 DEFAULT_SEC_PER_CALL = {"local": 15.0, "cloud": 8.0}
 
@@ -89,42 +90,48 @@ def estimate(import_id: int, trial_stats: list[dict] | None = None, *, scope: st
     data = load_rows_for_ai(import_id)
     works = prepare_works(data, stage_ids)
     template_id = data.template_id or 0
-    existing = {sid: items.items_by_key(template_id, sid, import_id=import_id) for sid in {w.stage_id for w in works}}
-    counts = {"ai": 0, "rule_only": 0, "skipped": 0, "already": 0, "duplicates": 0, "cached": 0}
-    targets = []
-    for w in works:
-        if not selected(w, existing[w.stage_id].get(w.row_key), data.template_version_id, scope, False):
-            counts["already"] += 1
-            continue
-        if w.route != "ai":
-            counts[w.route] += 1
-            continue
-        counts["ai"] += 1
-        targets.append(w)
-
-    uniq: dict[str, object] = {}
-    if settings:
-        modes = [structured_mode] if structured_mode else ["json_schema", "json_object", "prompt_only"]
-        for w in targets:
-            keys = []
-            for m in modes:
-                assign_keys([w], settings, m)
-                keys.append((m, w.key))
-            dedupe = keys[0][1]
-            if dedupe in uniq:
-                counts["duplicates"] += 1
+    # DBは1回だけ開いて使い回す（行ごとに開き直すと1万行規模で数十秒かかる）
+    conn = database.connect()
+    try:
+        existing = {sid: items.items_by_key(template_id, sid, conn, import_id=import_id)
+                    for sid in {w.stage_id for w in works}}
+        counts = {"ai": 0, "rule_only": 0, "skipped": 0, "already": 0, "duplicates": 0, "cached": 0}
+        targets = []
+        for w in works:
+            if not selected(w, existing[w.stage_id].get(w.row_key), data.template_version_id, scope, False):
+                counts["already"] += 1
                 continue
-            uniq[dedupe] = w
-            # 保存済みでも、使えない応答（壊れたJSON・打ち切り）や再依頼の応答が無いものは実行時に AI を呼ぶ
-            if any(cache.exists(k) and cached_usable(w, settings, m, k) for m, k in keys):
-                counts["cached"] += 1
-    else:
-        for w in targets:
-            dedupe = "\n".join(m["content"] for m in w.messages)
-            if dedupe in uniq:
-                counts["duplicates"] += 1
-            else:
+            if w.route != "ai":
+                counts[w.route] += 1
+                continue
+            counts["ai"] += 1
+            targets.append(w)
+
+        uniq: dict[str, object] = {}
+        if settings:
+            modes = [structured_mode] if structured_mode else ["json_schema", "json_object", "prompt_only"]
+            for w in targets:
+                keys = []
+                for m in modes:
+                    assign_keys([w], settings, m)
+                    keys.append((m, w.key))
+                dedupe = keys[0][1]
+                if dedupe in uniq:
+                    counts["duplicates"] += 1
+                    continue
                 uniq[dedupe] = w
+                # 保存済みでも、使えない応答（壊れたJSON・打ち切り）や再依頼の応答が無いものは実行時に AI を呼ぶ
+                if any(cache.exists(k, conn) and cached_usable(w, settings, m, k, conn) for m, k in keys):
+                    counts["cached"] += 1
+        else:
+            for w in targets:
+                dedupe = "\n".join(m["content"] for m in w.messages)
+                if dedupe in uniq:
+                    counts["duplicates"] += 1
+                else:
+                    uniq[dedupe] = w
+    finally:
+        conn.close()
     calls = len(uniq) - counts["cached"]
     to_call = list(uniq.values())
     avg_in = (sum(estimate_tokens("".join(m["content"] for m in w.messages)) for w in to_call) / len(to_call)

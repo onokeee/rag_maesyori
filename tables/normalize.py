@@ -80,7 +80,8 @@ class RecordRow:
 
 # 「上と同じ」の記号。セル全体がこれだけなら直前のデータ行の値で補う（NFKC で ″ は ′′ になる）
 DITTO_MARKS = {"〃", "″", "′′", "同上", "々", "仝"}
-DITTO_ROLES = ("date", "entity", "entity_label", "category", "attribute")
+# 記録番号（key）と担当者（person）も補う。key が「〃」のままだと見出し・出典・記録キーが「〃」になる
+DITTO_ROLES = ("key", "date", "entity", "entity_label", "category", "attribute", "person")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 

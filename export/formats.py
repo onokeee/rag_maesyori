@@ -15,7 +15,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from excel.tables import TOTAL_LABEL_RE, is_table_value, table_row_items
+from excel.tables import TOTAL_LABEL_RE, drop_seq_column, is_table_value, table_row_items
 from excel.text import nfkc_value as _excel_nfkc_value, normalize_label as _normalize_label
 from pattern.dictionary import is_person_field, is_person_label
 from pattern.model import DEFAULT_MD_OPTIONS, DEFAULT_TITLE_KEYS
@@ -33,6 +33,10 @@ except ImportError:  # pragma: no cover - core 未導入時
 # LightRAG が帳票を2つ以上の断片に切りうる大きさ（サーバー既定の固定窓 1,200トークン）に合わせる。
 # 推定式が実トークン以上になったので、1,200 未満の帳票＝1断片に収まる帳票には識別子を入れない。
 HEADING_IDENTIFIER_TOKENS = 1200
+# 明細表の1節（`## 見出し` から次の見出しまで）の推定トークン数の上限。
+# これを超えると、明細表の途中で切れた断片に識別番号も設備名も1文字も入らないことがあるので、
+# 識別子を入れる帳票では「（続き）」の見出しで分ける（固定窓 1,200 に対して余裕を取った値）。
+TABLE_SECTION_TOKENS = 800
 # 値が見出し語かどうかを見るのは短い値だけ（長い本文にたまたま同じ語が入っていても消さない）
 MAX_LABEL_VALUE_CHARS = 20
 AI_MARK = "（AI入力）"
@@ -114,7 +118,14 @@ def build_markdown(doc: dict, extraction: dict) -> str:
                 lines = table_markdown_lines(f["value"], omit_person)
                 if f.get("ai_filled") and lines:
                     lines[-1] += AI_MARK
-                blocks.append([f"## {_escape_line(heading)}", *lines])
+                if not (with_identifier and identifier):
+                    blocks.append([f"## {_escape_line(heading)}", *lines])
+                    continue
+                # 長い明細表は「（続き）」の見出しで分ける（どの断片にも識別子が入るように）
+                base = _one_line(f["display_name"])
+                for i, part in enumerate(_split_table_lines(lines)):
+                    part_heading = heading if i == 0 else f"{base}（続き）（{identifier}）"
+                    blocks.append([f"## {_escape_line(part_heading)}", *part])
                 continue
             lines = [line for line in _format_value(f).split("\n") if line.strip()]
             blocks.append([f"## {_escape_line(heading)}", *(_escape_line(line) for line in lines)])
@@ -125,6 +136,27 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     if long_fields and identifier and _estimate_tokens(text) > HEADING_IDENTIFIER_TOKENS:
         text = render(True)
     return text
+
+
+def _split_table_lines(lines: list[str]) -> list[list[str]]:
+    """明細表の行を、1節が TABLE_SECTION_TOKENS に収まるまとまりに分ける。
+
+    分けないと、明細表の行だけで埋まった断片（LightRAG のチャンク）ができ、
+    その断片の中に識別番号も設備名も日付も1文字も無くなる（docs/research/LightRAGオフライン評価.md 8.5）。
+    """
+    parts: list[list[str]] = []
+    current: list[str] = []
+    tokens = 0
+    for line in lines:
+        n = _estimate_tokens(line)
+        if current and tokens + n > TABLE_SECTION_TOKENS:
+            parts.append(current)
+            current, tokens = [], 0
+        current.append(line)
+        tokens += n
+    if current or not parts:
+        parts.append(current)
+    return parts
 
 
 def markdown_filename(doc: dict, extraction: dict) -> str:
@@ -329,6 +361,8 @@ def table_markdown_lines(value, omit_person: bool = False) -> list[str]:
     lines = []
     if not is_table_value(value):
         return lines
+    # 手で入れた行の「No: 1」を、読み取った表と同じように落とす（読み取り側の Table.to_value と同じ決まり）
+    value = drop_seq_column(value)
     for row in value["rows"]:
         items = [(_one_line(k), _one_line(v)) for k, v in table_row_items(value, row)]
         items = [(k, v) for k, v in items if v]

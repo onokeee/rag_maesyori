@@ -526,6 +526,25 @@ def clean_table_value(value) -> dict | None:
     return {"columns": columns, "rows": rows}
 
 
+def drop_seq_column(value):
+    """連番だけの No 列を落とした表の値（読み取りの Table.to_value と同じ決まり）。
+
+    読み取れなかった明細表は、帳票の種類の列見出し（No を含む）のまま入力欄に出るので、
+    手で入れた行だけ Markdown が「- No.: 1／…」になってしまう。出すときに読み取った表と形をそろえる。
+    値が 1,2,3… の連番でない No 列（本当の品番・項番）は、読み取り側と同じく残す。
+    """
+    if not is_table_value(value):
+        return value
+    rows = [r for r in value["rows"] if isinstance(r, list)]
+    columns = [str(c if c is not None else "") for c in (value.get("columns") or [])]
+    if len(columns) < 2 or not rows or any(len(r) < 2 for r in rows):
+        return value
+    cells = [[str(c if c is not None else "") for c in r] for r in rows]
+    if not _is_seq_column(columns[0], [r[0] for r in cells]):
+        return value
+    return {**value, "columns": columns[1:], "rows": [_drop_seq_cell(r) for r in cells]}
+
+
 def parse_table_text(text: str) -> tuple[dict | None, str | None]:
     """確認画面の入力（JSON）を表の値にする。戻り値: (値, 警告)。空なら (None, None)。"""
     import json

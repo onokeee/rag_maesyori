@@ -516,7 +516,8 @@ class ExcelSource:
         style_of = self._style
         # 列が多いシート（遠くの列に値が1つあるだけのことが多い）は、行を最後の列まで埋めない
         # （CSV と同じく行ごとに長さが違う。読む側は範囲外を空として扱う）
-        trim = max_col > PAD_MAX_COLUMNS
+        # 遠くの行に値が1つあるだけのシート（行×列がセル数の上限を超える＝ほとんどが空）も同じく埋めない
+        trim = max_col > PAD_MAX_COLUMNS or meta["max_row"] * max_col > self.max_cells
         anchor_last: dict[int, int] = {}
         extra_last: dict[int, int] = {}
         if trim:

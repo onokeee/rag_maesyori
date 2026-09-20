@@ -502,8 +502,9 @@ def _table_width(by_index: dict[int, SourceRow], rows_h: list[int], levels: list
             if far - gap >= _FAR_HEADER_GAP and not (data_rows and used > 0.1 * len(data_rows)):
                 from openpyxl.utils import get_column_letter
 
+                # 列の範囲を指定する画面は無いので、Excel 側で直す手順を案内する
                 return gap, (f"見出しから大きく離れた {get_column_letter(far + 1)}列 の値は表に含めません。"
-                             "表の一部なら範囲を指定して取り込んでください")
+                             "表の一部なら、Excel でその列を表の右隣に移してから取り込んでください")
         if right < 2:
             continue
         used = sum(1 for r in data_rows if gap < len(r.cells) and r.cells[gap].text)
@@ -511,8 +512,9 @@ def _table_width(by_index: dict[int, SourceRow], rows_h: list[int], levels: list
             continue
         from openpyxl.utils import get_column_letter
 
+        # 列の範囲を指定する画面は無いので、Excel 側で分ける手順を案内する
         return gap, (f"見出しの右側（{get_column_letter(gap + 2)}列以降）に別の表があるようです。"
-                     "最初の表だけを読み取ります。右側の表は範囲を指定して取り込んでください")
+                     "最初の表だけを読み取ります。右側の表は、Excel で別のシートか別のファイルに分けてから取り込んでください")
     # 右端の見出しが空欄でも、その列に値が続いていれば表の列に含める（黙って捨てない。見出しは「列N」になる）
     while data_rows and sum(1 for r in data_rows if last < len(r.cells) and r.cells[last].text) > 0.1 * len(data_rows):
         last += 1

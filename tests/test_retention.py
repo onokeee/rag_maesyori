@@ -12,6 +12,7 @@ from pathlib import Path
 from core import jobs, purge
 from models import database as db
 from tables import pipeline, store
+from tests.test_aiproc import ROWS, _make_import, ai_app, fake  # noqa: F401  (fixture)
 from tests.test_tables_flow import COLUMNS, CSV_TEXT, _preview_page, _wait_import_job
 
 EXTRACTION = {
@@ -466,9 +467,9 @@ def test_ai_results_of_an_import_that_is_gone_are_swept(app, client, tmp_path):
         assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
 
 
-def _llm_call(conn, cache_key: str) -> None:
-    conn.execute("INSERT INTO llm_calls (cache_key, raw_text, created_at) VALUES (?, 'あ', '2026-09-19')",
-                 (cache_key,))
+def _llm_call(conn, cache_key: str, import_id: int | None = None) -> None:
+    conn.execute("INSERT INTO llm_calls (cache_key, raw_text, created_at, import_id) "
+                 "VALUES (?, 'あ', '2026-09-19', ?)", (cache_key, import_id))
 
 
 def _llm_keys(conn) -> list[str]:
@@ -494,6 +495,89 @@ def test_purging_one_import_keeps_the_unreferenced_responses_another_import_stil
         assert _llm_keys(db.get_db()) == ["K2-first", "K2-repair"]   # 消した取り込みの K1 だけ消える
         purge.purge_table_import(other)
         assert _llm_keys(db.get_db()) == []
+
+
+def test_purging_one_import_keeps_a_response_another_import_paid_for(app, client):
+    """消す取り込みがキャッシュとして引いていただけの応答（払ったのは、まだある別の取り込み）は消さない。
+
+    同じ文面の行は同じキーになるので、あとの取り込みは AI を呼ばずに前の応答を使う（llm_calls.import_id は
+    払った取り込みのまま）。払った側は、一時停止・中断で ai_items の行を書く前に終わると、その応答を
+    どこからも参照していない。消す取り込みの使ったキーだからと巻き添えで消すと、払った取り込みの
+    再開・再実行で同じ応答をもう一度買うことになる（design.md 3.3）。
+    """
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        template_id = store.get_import(import_id)["template_id"]
+        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"}, template_id,
+                                    store.get_template(template_id)["current_version_id"])
+        conn = db.get_db()
+        _ai_row(conn, template_id, import_id, "TR-001", "K")      # 消す取り込みはキャッシュとして引いただけ
+        conn.execute("UPDATE llm_calls SET import_id = ? WHERE cache_key = 'K'", (other,))   # 払ったのは別の取り込み
+        _ai_row(conn, template_id, other, "TR-900", "K9")         # 別の取り込みは AI整形の作業中
+        conn.commit()
+
+    assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
+    with app.app_context():
+        assert _llm_keys(db.get_db()) == ["K", "K9"]
+        purge.purge_table_import(other)      # 払った取り込みを消せば、その応答も残らない
+        assert _llm_keys(db.get_db()) == []
+
+
+def test_purging_an_import_deletes_its_own_unreferenced_responses(app, client, tmp_path):
+    """消した取り込みが払った応答は、どの ai_items からも参照されていなくても一緒に消す（design.md 3.3）。
+
+    再依頼で直した行は ai_items が再依頼の応答のキーしか覚えていないので、1回目の応答はどこからも
+    参照されない。ほかの取り込みで AI整形が動いていると、これまでは残ったままだった。
+    ほかの取り込みが払った分（再実行で引くキャッシュ）は、これまでどおり残す。
+    """
+    from app import create_app
+    from tests.conftest import make_config
+
+    import_id = _confirmed_import(app, client)
+    with app.app_context():
+        template_id = store.get_import(import_id)["template_id"]
+        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"}, template_id,
+                                    store.get_template(template_id)["current_version_id"])
+        conn = db.get_db()
+        _ai_row(conn, template_id, import_id, "TR-001", "K1-repair")
+        _llm_call(conn, "K1-first", import_id)          # 消す取り込みの、再依頼で直した行の1回目の応答
+        _ai_row(conn, template_id, other, "TR-900", "K2-repair")
+        _llm_call(conn, "K2-first", other)              # 別の取り込みの分（再実行で引く。残す）
+        conn.execute("UPDATE llm_calls SET import_id = ? WHERE cache_key = 'K1-repair'", (import_id,))
+        conn.execute("UPDATE llm_calls SET import_id = ? WHERE cache_key = 'K2-repair'", (other,))
+        conn.commit()
+        config = {"DATABASE": app.config["DATABASE"], "UPLOAD_DIR": app.config["UPLOAD_DIR"],
+                  "DATA_DIR": app.config["DATA_DIR"], "TABLES_DIR": app.config["TABLES_DIR"]}
+
+    assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
+    with app.app_context():
+        assert _llm_keys(db.get_db()) == ["K2-first", "K2-repair"]
+
+    restarted = create_app(make_config(tmp_path, **config))   # 起動時の片付けでも戻らない・巻き添えにしない
+    with restarted.app_context():
+        assert _llm_keys(db.get_db()) == ["K2-first", "K2-repair"]
+        purge.purge_table_import(other)
+        assert _llm_keys(db.get_db()) == []
+
+
+def test_the_ai_run_records_which_import_paid_for_each_response(ai_app, fake):
+    """実際に AI を呼んだとき、生の応答に持ち主の取り込みを記録する（design.md 3.3）。
+
+    型番違いの行は照合で引っかかって再依頼になり、ai_items は再依頼の応答のキーだけを覚える。
+    1回目の応答も持ち主が分かるので、その取り込みを消せば残らない。
+    """
+    from aiproc import runner
+
+    iid = _make_import(ai_app, rows={"R2": ROWS["R2"]})
+    with ai_app.app_context():
+        runner.trial_row(iid, "R2", stage_ids=["log"])
+        conn = db.get_db()
+        rows = conn.execute("SELECT cache_key, import_id FROM llm_calls").fetchall()
+        assert len(rows) == 2 and {r["import_id"] for r in rows} == {iid}   # 1回目と再依頼
+        assert len({r["cache_key"] for r in rows} -
+                   {r[0] for r in conn.execute("SELECT cache_key FROM ai_items")}) == 1   # 1回目は参照されない
+        purge.purge_table_import(iid)
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
 
 
 def test_a_response_saved_just_before_a_pause_survives_the_startup_sweep(app, client, tmp_path):

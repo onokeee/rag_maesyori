@@ -507,3 +507,85 @@ def test_precheck_accepts_a_workbook_with_a_few_images(tmp_path):
     path = tmp_path / "images.xlsx"
     wb.save(path)
     precheck_excel(path)
+
+
+_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_WORKSHEET_REL = f"{_R_NS}/worksheet"
+_COMMENTS_REL = f"{_R_NS}/comments"
+_PKG_RELS = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+
+def _rels(entries: str) -> str:
+    return f'<?xml version="1.0"?><Relationships xmlns="{_PKG_RELS}">{entries}</Relationships>'
+
+
+def _xlsx_sharing_one_sheet_part(path, sheets: int, merge_ref: str):
+    """複数の <sheet> が同じ1つのシートの部品を指すブック（Excel は作らないが、手で書けば openpyxl は開く）。
+
+    openpyxl は <sheet> の数だけその部品を読み直すので、結合セルもセルもその回数だけ作られる。
+    """
+    sheet_xml = (f'<?xml version="1.0"?><worksheet xmlns="{_MAIN_NS}"><sheetData/>'
+                 f'<mergeCells count="1"><mergeCell ref="{merge_ref}"/></mergeCells></worksheet>')
+    tabs = "".join(f'<sheet name="S{i}" sheetId="{i}" r:id="rId{i}"/>' for i in range(1, sheets + 1))
+    links = "".join(f'<Relationship Id="rId{i}" Type="{_WORKSHEET_REL}" Target="worksheets/sheet1.xml"/>'
+                    for i in range(1, sheets + 1))
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("_rels/.rels", _rels(""))
+        zf.writestr("xl/workbook.xml", f'<?xml version="1.0"?><workbook xmlns="{_MAIN_NS}" xmlns:r="{_R_NS}">'
+                                       f"<sheets>{tabs}</sheets></workbook>")
+        zf.writestr("xl/_rels/workbook.xml.rels", _rels(links))
+        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    return path
+
+
+def test_precheck_multiplies_one_sheet_part_by_the_sheets_that_share_it(tmp_path):
+    """同じシートの部品を多数の <sheet> が指すブックは、部品1つ分だけ数えると上限をすり抜ける（1シートあたり約4秒）。"""
+    one = _xlsx_sharing_one_sheet_part(tmp_path / "one.xlsx", sheets=1, merge_ref="A1:XFD1")   # 16,384 セル
+    precheck_excel(one, max_merged=files.FORM_MAX_MERGED_CELLS)          # 1シート分は通す
+    many = _xlsx_sharing_one_sheet_part(tmp_path / "many.xlsx", sheets=20, merge_ref="A1:XFD1")
+    assert many.stat().st_size < 10_000
+    started = time.monotonic()
+    with pytest.raises(UploadError, match="結合セルの範囲が大きすぎます"):
+        precheck_excel(many, max_merged=files.FORM_MAX_MERGED_CELLS)     # 20シート分＝約33万セル
+    assert time.monotonic() - started < 2
+
+
+def test_precheck_multiplies_one_comments_part_by_the_sheets_that_share_it(tmp_path):
+    """1つのコメントの部品を多数のシートが参照すると、コメントの範囲のセルもシートの数だけ作られる。"""
+    comments = (f'<?xml version="1.0"?><comments xmlns="{_MAIN_NS}"><commentList>'
+                f'<comment ref="A1:D2500" authorId="0"/></commentList></comments>')   # 10,000 セル
+    sheets = 6
+    tabs = "".join(f'<sheet name="S{i}" sheetId="{i}" r:id="rId{i}"/>' for i in range(1, sheets + 1))
+    links = "".join(f'<Relationship Id="rId{i}" Type="{_WORKSHEET_REL}" Target="worksheets/sheet{i}.xml"/>'
+                    for i in range(1, sheets + 1))
+    path = tmp_path / "comments.xlsx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("_rels/.rels", _rels(""))
+        zf.writestr("xl/workbook.xml", f'<?xml version="1.0"?><workbook xmlns="{_MAIN_NS}" xmlns:r="{_R_NS}">'
+                                       f"<sheets>{tabs}</sheets></workbook>")
+        zf.writestr("xl/_rels/workbook.xml.rels", _rels(links))
+        for i in range(1, sheets + 1):
+            zf.writestr(f"xl/worksheets/sheet{i}.xml", f'<?xml version="1.0"?><worksheet xmlns="{_MAIN_NS}">'
+                                                       "<sheetData/></worksheet>")
+            zf.writestr(f"xl/worksheets/_rels/sheet{i}.xml.rels",
+                        _rels(f'<Relationship Id="rIdC" Type="{_COMMENTS_REL}" Target="../comments1.xml"/>'))
+        zf.writestr("xl/comments1.xml", comments)
+    with pytest.raises(UploadError, match="コメントの範囲が大きすぎます"):
+        precheck_excel(path)   # 6シート分＝60,000 セル（MAX_LINKED_CELLS 50,000 超え）
+
+
+def test_precheck_refuses_a_small_file_that_expands_to_hundreds_of_megabytes(tmp_path, monkeypatch):
+    """展開後が大きくなりすぎるブックは断る（部品ごとの圧縮率の確認は、小さい部品を見ないためすり抜ける）。"""
+    monkeypatch.setattr(files, "ZIP_RATIO_MIN_BYTES", 200_000)   # 本物は 16MB。同じ形を小さく作る
+    path = tmp_path / "many_small_parts.xlsx"
+    part = b"<si/>" * 20_000                                     # 100,000 バイト（1部品ずつは上の値未満）
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("xl/workbook.xml", f'<?xml version="1.0"?><workbook xmlns="{_MAIN_NS}"><sheets/></workbook>')
+        for i in range(30):
+            zf.writestr(f"xl/pad{i}.xml", b"<sst>" + part + b"</sst>")
+    assert path.stat().st_size < 20_000                          # 20KB が 3MB に展開される（150倍）
+    with pytest.raises(UploadError, match="圧縮率"):
+        precheck_excel(path)

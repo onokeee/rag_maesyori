@@ -328,9 +328,22 @@ def _m6_ai_items_per_import(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_items_import ON ai_items(import_id)")
 
 
+def _m7_llm_calls_owner(conn: sqlite3.Connection) -> None:
+    """AI の生の応答に「どの取り込みが払ったか」を持たせる（design.md 3.3）。
+
+    ai_items が覚えているのは最後に使った応答のキーだけなので、再依頼で直した行の1回目の応答や、
+    一時停止の直前に受け取った応答は、どの ai_items からも参照されない。持ち主が分からないと、
+    その取り込みを消しても（ほかの取り込みが作業中の間は）生の応答が残ってしまう。
+    古いDBの行は NULL（持ち主が分からない）のまま、これまでどおり扱う。
+    """
+    _add_column(conn, "llm_calls", "import_id", "INTEGER")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_import ON llm_calls(import_id)")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
-                                                          _m5_purge_scope, _m6_ai_items_per_import]
+                                                          _m5_purge_scope, _m6_ai_items_per_import,
+                                                          _m7_llm_calls_owner]
 
 
 def migrate(conn: sqlite3.Connection) -> int:

@@ -32,7 +32,8 @@ _MAX_FIX = 4
 
 _clients: dict[tuple[str, str, float], OpenAI] = {}
 _catalog_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
-_QUIRKS: dict[str, dict] = {}
+# モデルが受け付けない引数の覚え書き。接続先×モデルごと（同じモデル名でも別のサーバーなら別の癖）
+_QUIRKS: dict[tuple[str, str], dict] = {}
 # ジョブの並列呼び出しから _clients / _QUIRKS / 方式判定を同時に更新するためのロック
 _lock = threading.RLock()
 
@@ -162,6 +163,7 @@ def reset_llm_client() -> None:
         _clients.clear()
         _job_clients.clear()
         _catalog_cache.clear()
+        _QUIRKS.clear()   # 接続先・キーを変えたら引数の覚え書きも捨てる（再起動なしで効かせる）
 
 
 def model_catalog(refresh: bool = False) -> list[str]:
@@ -277,37 +279,62 @@ def save_admin(data: dict) -> dict:
 # ---- 呼び出し ------------------------------------------------------------------
 
 def _fix_for(message: str, kwargs: dict) -> tuple | None:
-    """400エラーの文面から、引数の直し方 (set, drop) を決める。"""
+    """400エラーの文面から、引数の直し方 (set, drop, rename) を決める。
+
+    rename は「引数の名前だけを付け替える」（値は毎回の呼び出しの値をそのまま使う）。
+    max_tokens → max_completion_tokens をこの形で覚えないと、最初の1回の値が以後ずっと固定されてしまう。
+    """
     low = message.lower()
     if "reasoning_effort" in low and "does not support" in low:
-        return ({"reasoning_effort": "none"}, None)
+        return ({"reasoning_effort": "none"}, None, None)
     if "reasoning_effort" in low and "unrecognized" in low:
-        return (None, "reasoning_effort")
+        return (None, "reasoning_effort", None)
     for name in ("temperature", "top_p"):
         if f"'{name}'" in low and ("does not support" in low or "only the default" in low or "unsupported" in low):
-            return (None, name)
+            return (None, name, None)
     if "max_tokens" in low and "max_completion_tokens" in low:
-        v = kwargs.get("max_tokens")
-        if v is not None:
-            return ({"max_completion_tokens": v}, "max_tokens")
+        if kwargs.get("max_tokens") is not None:
+            return (None, None, {"max_tokens": "max_completion_tokens"})
     return None
 
 
-def _learn(model: str, set_: dict | None = None, drop: str | None = None) -> None:
+def _quirk_key(endpoint: str, model: str) -> tuple[str, str]:
+    return (str(endpoint or "").strip().rstrip("/"), str(model or ""))
+
+
+def _learn(key: tuple[str, str], set_: dict | None = None, drop: str | None = None,
+           rename: dict | None = None) -> None:
     with _lock:
-        quirk = _QUIRKS.setdefault(model, {"set": {}, "drop": set()})
+        quirk = _QUIRKS.setdefault(key, {"set": {}, "drop": set(), "rename": {}})
         if set_:
             quirk["set"].update(set_)
         if drop:
             quirk["drop"].add(drop)
             quirk["set"].pop(drop, None)
+            quirk["rename"].pop(drop, None)
+        if rename:
+            quirk["rename"].update(rename)
 
 
-def _apply_quirks(kwargs: dict) -> dict:
+def _no_progress(attempt: dict, set_: dict | None, drop: str | None, rename: dict | None) -> bool:
+    """この直し方ではもう変わらない（＝投げ直しても同じ）か。"""
+    if set_ and all(attempt.get(k) == v for k, v in set_.items()):
+        return True
+    if drop and drop not in attempt:
+        return True
+    if rename and all(old not in attempt or new in attempt for old, new in rename.items()):
+        return True
+    return False
+
+
+def _apply_quirks(kwargs: dict, endpoint: str = "") -> dict:
     attempt = dict(kwargs)
     with _lock:
-        quirk = _QUIRKS.get(str(kwargs.get("model") or ""))
+        quirk = _QUIRKS.get(_quirk_key(endpoint, str(kwargs.get("model") or "")))
         if quirk:
+            for old, new in quirk.get("rename", {}).items():
+                if old in attempt:
+                    attempt[new] = attempt.pop(old)
             for name in quirk["drop"]:
                 attempt.pop(name, None)
             attempt.update(quirk["set"])
@@ -339,8 +366,9 @@ def _rate_limit_wait(e: Exception, attempt: int) -> float:
 
 def _create(**kwargs):
     """chat.completions.create の呼び出し口。受け付けない引数はエラーを見て直しながら投げ直す。"""
-    model = str(kwargs.get("model") or "")
-    attempt = _apply_quirks(kwargs)
+    endpoint = llm_chat_url()
+    key = _quirk_key(endpoint, str(kwargs.get("model") or ""))
+    attempt = _apply_quirks(kwargs, endpoint)
     fixes = waits = 0
     waited_total = 0.0
     while fixes < _MAX_FIX:
@@ -361,13 +389,11 @@ def _create(**kwargs):
             fix = _fix_for(str(e), attempt)
             if fix is None:
                 raise
-            set_, drop = fix
-            if set_ and all(attempt.get(k) == v for k, v in set_.items()):
+            set_, drop, rename = fix
+            if _no_progress(attempt, set_, drop, rename):
                 raise
-            if drop and drop not in attempt:
-                raise
-            _learn(model, set_=set_, drop=drop)
-            attempt = _apply_quirks(kwargs)
+            _learn(key, set_=set_, drop=drop, rename=rename)
+            attempt = _apply_quirks(kwargs, endpoint)
     return client().chat.completions.create(**attempt)
 
 
@@ -611,7 +637,7 @@ def _job_fix_for(message: str, kwargs: dict) -> tuple | None:
         return fix
     low = message.lower()
     if "seed" in low and ("unsupported" in low or "unrecognized" in low or "not support" in low):
-        return (None, "seed")
+        return (None, "seed", None)
     return None
 
 
@@ -634,9 +660,11 @@ def chat_raw(settings: dict, messages: list[dict], response_format: dict | None 
     if max_tokens:
         kwargs["max_tokens"] = int(max_tokens)
     cli = _job_client(settings, base_timeout)
+    endpoint = str(settings.get("chat_url") or settings.get("base_url") or "")
+    quirk_key = _quirk_key(endpoint, model)
     fixes = 0
     while True:
-        attempt = _apply_quirks(kwargs)
+        attempt = _apply_quirks(kwargs, endpoint)
         started = time.monotonic()
         try:
             raw = cli.chat.completions.with_raw_response.create(**attempt, **per_request)
@@ -646,11 +674,11 @@ def chat_raw(settings: dict, messages: list[dict], response_format: dict | None 
             fix = _job_fix_for(str(e), attempt) if err.kind == "row" and fixes < _MAX_FIX else None
             if fix is None:
                 raise err from e
-            set_, drop = fix
-            if (set_ and all(attempt.get(k) == v for k, v in set_.items())) or (drop and drop not in attempt):
+            set_, drop, rename = fix
+            if _no_progress(attempt, set_, drop, rename):
                 raise err from e
             fixes += 1
-            _learn(model, set_=set_, drop=drop)
+            _learn(quirk_key, set_=set_, drop=drop, rename=rename)
             continue
         latency = int((time.monotonic() - started) * 1000)
         if not hasattr(resp, "choices"):

@@ -149,6 +149,13 @@ def _json_error(message: str, status: int = 400, **extra):
     return jsonify({"error": message, **extra}), status
 
 
+def _save_conflict_message(exc: sqlite3.IntegrityError, name: str) -> str:
+    """取り込み設定の保存が UNIQUE で断られた理由。名前の重複でなければ、名前を変えても直らない"""
+    if "table_templates.name" in str(exc):
+        return f"「{name}」という名前の取り込み設定がすでにあります。別の名前にしてください"
+    return "保存が他の操作と重なりました。もう一度保存してください"
+
+
 def _payload() -> dict:
     data = request.get_json(silent=True)
     return data if isinstance(data, dict) else {}
@@ -254,7 +261,10 @@ def cancel_job(import_id: int):
         return redirect(url_for("tables.preview", import_id=import_id))
     jobs.request_cancel(job["id"])
     after = jobs.get_job(job["id"])
-    if after and after["status"] == "cancelled" and imp["status"] in ("reading", "confirming"):
+    # 取り込みの状態は読み直す（この間にジョブが成功して preview/confirmed を書いていたら、巻き戻してはいけない）
+    fresh = store.get_import(import_id)
+    if (after and after["status"] == "cancelled" and fresh is not None
+            and fresh["status"] in ("reading", "confirming")):
         # 待機中のまま中止されたときは本体が動かないので、ここで取り込みの状態を戻す
         store.update_import(import_id, status=CANCELLABLE_JOBS[job["kind"]])
     flash("処理を中止しました", "success")
@@ -488,8 +498,10 @@ def layout(import_id: int):
         flash(str(exc), "error")
         return redirect(url_for("tables.source", import_id=import_id))
     src = imp.get("source") or {}
+    # 断られた「データの終わりの行」は入力欄に戻す（保存していないので source には入っていない）
+    rejected_end = _row_no(request.args.get("data_end_row"))
     return render_template("tables/layout.html", imp=imp, layout=guess, info=_layout_json(guess), rows=rows,
-                           width=width, sheet=sheet, data_end_saved=src.get("data_end_row") or "",
+                           width=width, sheet=sheet, data_end_saved=rejected_end or src.get("data_end_row") or "",
                            kind_labels=TABLE_KIND_LABELS, **_steps_ctx(3))
 
 
@@ -525,9 +537,19 @@ def save_layout(import_id: int):
     if guess.table_kind == "crosstab":
         flash("月別集計のようなクロス集計の表には対応していません。1行＝1件の一覧表を選んでください", "error")
         return redirect(url_for("tables.layout", import_id=import_id))
-    if not guess.headers or guess.data_end < guess.data_start:
+    if not guess.headers:
         flash("見出し行とデータの範囲が見つかりません。見出し行の番号を指定してください", "error")
-        return redirect(url_for("tables.layout", import_id=import_id))
+        return redirect(url_for("tables.layout", import_id=import_id, data_end_row=data_end or None))
+    if guess.data_end < guess.data_start:
+        # 見出しは見つかっている。直すのは見出し行ではなくデータの範囲なので、そう伝える
+        last_header = guess.header_rows[-1] if guess.header_rows else 0
+        if data_end:
+            flash(f"データの終わりに{data_end}行目を指定すると、データの行が1行もありません"
+                  f"（見出しは{last_header}行目）。空欄にするか、見出し行より下の行を指定してください", "error")
+        else:
+            flash(f"見出し行（{last_header}行目）より下にデータの行が1行もありません。"
+                  "見出し行の番号を確かめるか、データのある表を選んでください", "error")
+        return redirect(url_for("tables.layout", import_id=import_id, data_end_row=data_end or None))
     src = dict(imp.get("source") or {})
     src.update(sheet=sheet, header_rows=guess.header_rows, header_row=None, data_end_row=data_end or None)
     src.pop("headers_changed", None)
@@ -730,7 +752,7 @@ def _build_spec(payload: dict, base_spec=None):
     spec.markdown["dedupe_timeline"] = bool(payload.get("dedupe_timeline", True))
     if base_spec is not None:
         # 画面で扱わない細かい設定は前の設定から引き継ぐ
-        for attr in ("name_patterns", "file_types", "na_tokens", "fiscal_year_start_month", "data_end", "exclude",
+        for attr in ("name_patterns", "file_types", "na_tokens", "fiscal_year_start_month", "exclude",
                      "continuation_rows", "checks", "custom_stages"):
             setattr(spec, attr, copy.deepcopy(getattr(base_spec, attr)))
         header = copy.deepcopy(base_spec.header or {})
@@ -832,9 +854,9 @@ def save_columns(import_id: int):
             template_id = template["id"]
         else:
             template_id, version_id = store.create_template(spec.name, spec)
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as exc:
         database.get_db().rollback()
-        return _json_error(f"「{spec.name}」という名前の取り込み設定がすでにあります。別の名前にしてください")
+        return _json_error(_save_conflict_message(exc, spec.name))
     src = dict(imp.get("source") or {})
     src.pop("headers_changed", None)
     store.update_import(import_id, template_id=template_id, template_version_id=version_id, source=src)
@@ -1299,9 +1321,9 @@ def save_template(template_id: int):
         return _json_error(errors[0], errors=errors)
     try:
         store.save_template_version(template_id, spec)
-    except sqlite3.IntegrityError:
+    except sqlite3.IntegrityError as exc:
         database.get_db().rollback()
-        return _json_error(f"「{spec.name}」という名前の取り込み設定がすでにあります")
+        return _json_error(_save_conflict_message(exc, spec.name))
     flash("取り込み設定を保存しました。次の取り込みから使われます", "success")
     return jsonify({"ok": True, "redirect": url_for("settings.table_templates")})
 

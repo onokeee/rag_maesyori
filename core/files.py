@@ -62,6 +62,12 @@ MAX_DRAWING_BYTES = 20 * 1024 * 1024
 # 図形（アンカー）として数える要素の名前（DrawingML の spreadsheetDrawing）
 _ANCHOR_NAMES = ("absoluteAnchor", "oneCellAnchor", "twoCellAnchor")
 _DRAWING_REL_SUFFIX = "/drawing"
+# openpyxl がシートの数だけ読み直す部品の関係の種類。シートの部品（worksheet）は <sheet> 1つにつき1回、
+# コメントの部品（comments）はそれを参照するシートを読むたびに読み直される。1つの部品を複数のシートから
+# 参照させると（Excel は作らないが、手で作れば開ける）、結合セル・セル・行・コメントの範囲もその回数だけ
+# 作られるので、部品1つ分だけ数えていた上限をいくらでもすり抜けられる。参照される回数を掛けて数える。
+_REREAD_REL_SUFFIXES = ("/worksheet", "/comments")
+_RELS_SUFFIX = ".rels"
 _DRAWING_ERROR = "図形や画像の数が多すぎるため読み込めません。不要な図形・画像を削除して保存し直してください"
 # セルとして数える要素の名前空間（SpreadsheetML 本体の <c> だけ。グラフの <c:chart> などは名前空間が違う）
 _SHEET_NAMESPACES = ("http://schemas.openxmlformats.org/spreadsheetml/2006/main", STRICT_NS)
@@ -218,15 +224,17 @@ class _PartCounter:
     """
 
     def __init__(self, merged: int, cells: int, max_cells: int, max_merged: int | None = None, *,
-                 rows: int = 0, linked: int = 0, max_rows: int | None = None):
+                 rows: int = 0, linked: int = 0, max_rows: int | None = None, factor: int = 1):
         from xml.parsers import expat
 
         self.merged, self.cells, self.max_cells = merged, cells, max_cells
         self.max_merged = max_merged or MAX_MERGED_CELLS
         self.rows, self.linked = rows, linked
         self.max_rows = max_rows or self.max_merged
+        self.factor = max(int(factor), 1)   # この部品が openpyxl に読み直される回数（その回数だけ数える）
         self.anchors = 0              # この部品の図形（アンカー）の数
         self.drawing_targets = []     # この部品（.rels）が参照する描画部品の Target
+        self.reread_targets = []      # この部品（.rels）が参照する、シートごとに読み直される部品の Target
         self.parser = expat.ParserCreate(namespace_separator=" ")
         self.parser.StartElementHandler = self._start
         # DTD で実体を定義して大量に展開させる細工は、正しいブックには無いので断る
@@ -235,29 +243,36 @@ class _PartCounter:
     def _start(self, name: str, attrs: dict) -> None:
         namespace, _, local = name.rpartition(" ")
         if local == "mergeCell":
-            self.merged += _merged_area(attrs.get("ref"))
+            self.merged += _merged_area(attrs.get("ref")) * self.factor
             if self.merged > self.max_merged:
                 raise UploadError("結合セルの範囲が大きすぎます（シート全体・列全体の結合など）。"
                                   "不要な結合を解除して保存し直してください")
         elif local == "c" and namespace in _SHEET_NAMESPACES:
-            self.cells += 1
+            self.cells += self.factor
             if self.cells > self.max_cells:
                 raise UploadError(f"セル数が上限（{self.max_cells:,} セル）を超えています。"
                                   "不要なシート・範囲を削除して保存し直してください")
         elif local == "row" and namespace in _SHEET_NAMESPACES:
-            self.rows += 1
+            self.rows += self.factor
             if self.rows > self.max_rows:
                 raise UploadError(f"行数が上限（{self.max_rows:,} 行）を超えています（高さなどの書式だけの行も数えます）。"
                                   "不要な行を削除して保存し直してください")
         elif local in ("hyperlink", "comment") and namespace in _SHEET_NAMESPACES:
-            self.linked += _merged_area(attrs.get("ref"))
+            self.linked += _merged_area(attrs.get("ref")) * self.factor
             if self.linked > MAX_LINKED_CELLS:
                 raise UploadError("ハイパーリンクまたはコメントの範囲が大きすぎます（シート全体・列全体を指すリンクなど）。"
                                   "不要なリンク・コメントを削除して保存し直してください")
         elif local in _ANCHOR_NAMES:
             self.anchors += 1
-        elif local == "Relationship" and str(attrs.get("Type", "")).endswith(_DRAWING_REL_SUFFIX)                 and attrs.get("TargetMode") != "External":
-            self.drawing_targets.append(str(attrs.get("Target", "")))
+        elif local == "Relationship" and attrs.get("TargetMode") != "External":
+            rel_type = str(attrs.get("Type", ""))
+            if rel_type.endswith(_DRAWING_REL_SUFFIX):
+                self.drawing_targets.append(str(attrs.get("Target", "")))
+            else:
+                for suffix in _REREAD_REL_SUFFIXES:
+                    if rel_type.endswith(suffix):
+                        self.reread_targets.append((suffix, str(attrs.get("Target", ""))))
+                        break
 
     def _entity(self, *_args) -> None:
         raise UploadError("Excelファイルとして読み込めません（不正なファイルの可能性があります）")
@@ -271,31 +286,70 @@ def _check_sheet_parts(zf: zipfile.ZipFile, parts: list[str], max_cells: int, ma
     XML として読めなくなった部品は、そこまでの分だけ数える（画像などの XML でない部品はすぐ終わる）。
     openpyxl も同じ expat で読むので、読めない部品のその先の結合・セルは作られない（開くこと自体が失敗する）。
     """
-    from xml.parsers import expat
-
     merged = 0
     cells = 0
     rows = 0
     linked = 0
     anchors: dict[str, int] = {}       # 部品 → 図形の数
     references: dict[str, int] = {}    # 描画部品 → 参照される回数（シートごとに読み直されるため）
+    rereads = _reread_counts(zf, parts)
     for part in parts:
-        counter = _PartCounter(merged, cells, max_cells, max_merged, rows=rows, linked=linked, max_rows=max_rows)
-        with zf.open(part) as f:
-            try:
-                while True:
-                    chunk = f.read(CHUNK_SIZE)
-                    counter.parser.Parse(chunk, not chunk)
-                    if not chunk:
-                        break
-            except expat.ExpatError:
-                pass
+        counter = _PartCounter(merged, cells, max_cells, max_merged, rows=rows, linked=linked, max_rows=max_rows,
+                               factor=rereads.get(part, 1))
+        _parse_part(zf, part, counter)
         merged, cells, rows, linked = counter.merged, counter.cells, counter.rows, counter.linked
         anchors[part] = counter.anchors
         for target in counter.drawing_targets:
             drawing = _resolve_rel_target(part, target)
-            references[drawing] = references.get(drawing, 0) + 1
+            # 参照元のシートの部品を複数の <sheet> が指していれば、その描画もその回数だけ読み直される
+            references[drawing] = references.get(drawing, 0) + rereads.get(_rels_owner(part), 1)
     _check_drawings(zf, anchors, references)
+
+
+def _parse_part(zf: zipfile.ZipFile, part: str, counter: "_PartCounter") -> None:
+    """部品1つを分割して読み、counter に数えさせる（XML として読めなくなったら、そこまでの分で終わる）。"""
+    from xml.parsers import expat
+
+    with zf.open(part) as f:
+        try:
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                counter.parser.Parse(chunk, not chunk)
+                if not chunk:
+                    break
+        except expat.ExpatError:
+            pass
+
+
+def _reread_counts(zf: zipfile.ZipFile, parts: list[str]) -> dict[str, int]:
+    """部品 → openpyxl がそれを読む回数（シートの部品・コメントの部品だけ。ふつうのブックはどれも1回）。
+
+    シートの部品は <sheet>（workbook.xml.rels の worksheet の関係）1つにつき1回、コメントの部品は
+    それを参照するシートを読むたびに1回読まれる。関係を書いた .rels は小さいので、本体を数える前に先に読む。
+    """
+    targets: list[tuple[str, str, str]] = []    # (関係の種類, .rels の部品名, 参照先の部品名)
+    for part in parts:
+        if not part.endswith(_RELS_SUFFIX):
+            continue
+        counter = _PartCounter(0, 0, MAX_CELLS)
+        _parse_part(zf, part, counter)
+        targets += [(kind, part, _resolve_rel_target(part, t)) for kind, t in counter.reread_targets]
+    counts: dict[str, int] = {}
+    for kind, _rels_part, target in targets:
+        if kind == "/worksheet":
+            counts[target] = counts.get(target, 0) + 1
+    # コメントの部品は、それを参照するシートを読むたびに読み直される（そのシートの部品を複数の <sheet> が
+    # 指していれば、その回数だけ増える）ので、持ち主のシートの回数を足す
+    for kind, rels_part, target in targets:
+        if kind == "/comments":
+            counts[target] = counts.get(target, 0) + max(counts.get(_rels_owner(rels_part), 0), 1)
+    return counts
+
+
+def _rels_owner(rels_part: str) -> str:
+    """.rels の持ち主の部品（xl/worksheets/_rels/sheet1.xml.rels → xl/worksheets/sheet1.xml）。"""
+    folder = posixpath.dirname(posixpath.dirname(rels_part))
+    return posixpath.normpath(posixpath.join(folder, posixpath.basename(rels_part)[:-len(_RELS_SUFFIX)]))
 
 
 def _resolve_rel_target(rels_part: str, target: str) -> str:
@@ -321,14 +375,21 @@ def _check_drawings(zf: zipfile.ZipFile, anchors: dict[str, int], references: di
 
 def _check_zip_limits(infos: list[zipfile.ZipInfo]) -> None:
     total = 0
+    compressed = 0
     for info in infos:
         total += info.file_size
+        compressed += info.compress_size
         if info.file_size > ZIP_MAX_PART:
             raise UploadError(f"ブックの中身が大きすぎます（1つの部品が展開後 {_format_size(info.file_size)}、上限 {_format_size(ZIP_MAX_PART)}）")
         if info.file_size >= ZIP_RATIO_MIN_BYTES and info.file_size > ZIP_MAX_RATIO * max(info.compress_size, 1):
             raise UploadError("ブックの圧縮率が異常に高いため読み込みを中止しました（壊れているか、不正なファイルの可能性があります）")
     if total > ZIP_MAX_TOTAL:
         raise UploadError(f"ブックの中身が大きすぎます（展開後の合計 {_format_size(total)}、上限 {_format_size(ZIP_MAX_TOTAL)}）")
+    # 圧縮率はブック全体でも見る。部品ごとの確認は小さい部品を見ないので、上の大きさに足りない部品を
+    # 並べるだけで、小さいファイルをいくらでも大きく展開させられる（700KB が 465MB ＝ 事前チェックだけで30秒以上）。
+    # ふつうのブックは5〜7倍程度なので、部品ごとと同じ100倍で断る（小さいブックは見ない点も同じ）。
+    if total >= ZIP_RATIO_MIN_BYTES and total > ZIP_MAX_RATIO * max(compressed, 1):
+        raise UploadError("ブックの圧縮率が異常に高いため読み込みを中止しました（壊れているか、不正なファイルの可能性があります）")
 
 
 def remove_upload(stored_path: str | None) -> bool:

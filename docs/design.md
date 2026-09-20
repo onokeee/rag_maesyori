@@ -49,7 +49,7 @@
 ### 2.2 ホーム `GET /`
 - 大きな入口カード2枚（図＋1文）：「帳票を取り込む（1ファイル＝1件の報告書・記録票）」「一覧表を取り込む（Excel/CSV、1行＝1件の一覧・台帳・集計表）」。
 - データを残さないこと（3.3）の案内文。
-- 「作業中の帳票」（読み取り前・確認中）「作業中の一覧表」（読み込み前・読み込み中・確認中・失敗）：続きを開く／削除。
+- 「作業中の帳票」（読み取り前・確認中）「作業中の一覧表」（読み込み前・読み込み中・確認中・確定処理中・失敗）：続きを開く／削除。
 - 「ダウンロード待ちの帳票」「ダウンロード待ちの一覧表」（確定済みでまだダウンロードしていないもの）：ダウンロード（押すと消える確認つき）。
   まとめ取り込みは**まとまり1行**にまとめ、zip のボタン（全件確定なら全部、未確定が残っていれば「確定済みN件だけ」）と
   中の帳票を出す。1件だけの `.md` には「この帳票だけがまとまりから消えます」の確認を付ける。
@@ -172,7 +172,8 @@ table_imports(id PK, template_id FK NULL, template_version_id FK NULL, file_name
 jobs(id PK, kind TEXT, ref_type TEXT, ref_id INTEGER, status TEXT,  -- queued/running/paused/done/failed/cancelled/interrupted
      params_json, progress_json, message, cancel_requested INTEGER DEFAULT 0, pause_requested INTEGER DEFAULT 0,
      heartbeat_at, created_at, updated_at)
-llm_calls(cache_key PK, raw_text, parsed_json, model, params_json, structured_mode, finish_reason, tokens_in, tokens_out, latency_ms, created_at)
+llm_calls(cache_key PK, raw_text, parsed_json, model, params_json, structured_mode, finish_reason, tokens_in, tokens_out, latency_ms, created_at,
+          import_id)   -- この応答を払った取り込み（マイグレーション _m7_llm_calls_owner。古いDBの行は NULL）
 ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, source_hash, context_hash, segments_hash, cache_key,
          status TEXT,   -- pending/ok/flagged/rule_only/error/skipped/outdated/excluded
          result_json, checks_json, override TEXT, attempts INTEGER, error TEXT, job_id, updated_at,
@@ -225,7 +226,8 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 - **消せなかったファイル**：`remove_upload` は他のプロセスに掴まれていて消せないとき（ウイルス対策のスキャン、Excel で
   開いたまま、同期ソフト）、中身を 0 バイトに切り詰めて `False` を返す。名前は残っても元のデータは残さない。
 - **AI整形の控え**：`ai_items`・`llm_calls` も取り込んだ内容そのものなので一緒に消す。消すのは `ai_items.import_id` が
-  その取り込みの分だけで、同じ設定で作業中の別の取り込みの結果と応答キャッシュは残す（巻き添えの再課金を避ける）。
+  その取り込みの分と、その取り込みが払った `llm_calls`（`llm_calls.import_id`。どの `ai_items` からも参照されていないもの）
+  だけで、同じ設定で作業中の別の取り込みの結果と応答キャッシュは残す（巻き添えの再課金を避ける）。
   同じ表を取り込み直すと AI に再度課金される（承知のうえ）。
   取り込み設定を消したときは、その設定の `ai_items` と、それで参照されなくなった `llm_calls` をその場で消す
   （`tables/store.delete_template` → `core/purge.sweep_orphan_ai`。起動時の片付けでも同じ掃除をする）。
@@ -275,11 +277,12 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 class UploadError(Exception): ...
 @dataclass class StoredFile: stored_path: str; file_name: str; file_hash: str; size: int
 def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> StoredFile   # 分割読みで sha256
-def precheck_excel(path, max_cells=None, max_merged=None, max_rows=None) -> None   # OLE(D0CF11E0)=パスワード付き/xls、xl/workbook.bin=xlsb、Strict名前空間、zip展開上限(合計500MB/1パーツ200MB/圧縮率100)、
+def precheck_excel(path, max_cells=None, max_merged=None, max_rows=None) -> None   # OLE(D0CF11E0)=パスワード付き/xls、xl/workbook.bin=xlsb、Strict名前空間、zip展開上限(合計500MB/1パーツ200MB/圧縮率100。圧縮率はブック全体でも見る＝小さいパーツを並べて展開させない)、
                                       # 結合セルの面積の合計(200万セル。帳票・見本は FORM_MAX_MERGED_CELLS=20万。通常モードで開くと結合1つごとに全セルをたどるため)、セル数（<c> の数。帳票・見本は EXCEL_MAX_CELLS=50万、省略時 100万）、
                                       # ハイパーリンク・コメントの範囲（ref）の面積の合計(ブック全体で MAX_LINKED_CELLS=5万。A1:XFD1048576 で固まらないように)、
                                       # <row> の数(max_rows。省略時は max_merged と同じ。帳票・見本は20万行、一覧表は200万行)、
-                                      # シートが1つも無いブック、壊れた圧縮データ(zlib.error/EOFError) → UploadError(日本語。ファイル名・例外の種類名は入れない)
+                                      # 図形(描画パーツの図形数・大きさ×参照するシート数)、シートが1つも無いブック、壊れた圧縮データ(zlib.error/EOFError) → UploadError(日本語。ファイル名・例外の種類名は入れない)
+                                      # 上の結合・セル・行・リンクの数え方: 1つのパーツを複数の <sheet> が指していると openpyxl はその回数だけ読み直すので、参照される回数を掛けて数える
 def upload_path(stored_path) -> Path;  def remove_upload(stored_path) -> bool   # 消せたら True。掴まれて消せないときは中身を0バイトにして False
 def remove_orphan_uploads(upload_dir, known: set[str]) -> int;  def remove_orphan_import_dirs(tables_dir, import_ids: set[int]) -> int
 
@@ -374,8 +377,8 @@ def match_templates(headers: list[str], sheet_or_file_name: str, specs: list[Tab
 @dataclass class TableSpec:
     name: str; description: str = ""; file_types: list[str]; name_patterns: list[str]
     kind: str = "list"   # list / crosstab
-    header: {anchors, rows(1|2), search_rows} ; data_end: {blank_rows:3, stop_first_col:[合計,総計], stop_prefix:[※,注]}
-    exclude: {aggregate_keywords:[小計,計,合計,平均], hidden_rows:"exclude_with_warning", strike_rows:"exclude_with_warning"}
+    header: {anchors, rows(1|2)}   # 見出しを探す行数・データの終わりの条件・集計行の語は detect.py が決める（設定では変えない）
+    exclude: {hidden_rows:"exclude_with_warning", strike_rows:"exclude_with_warning"}
     continuation_rows: str = "merge_into_previous"   # or "keep"
     na_tokens: list[str]; fiscal_year_start_month: int = 4
     columns: list[ColumnSpec]
@@ -489,7 +492,8 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - 値（正規化後20文字以内・1行）が、その種類の他の欄の候補ラベル・表示名・明細表の列見出しと一致する項目は、読み取り誤りとみなして Markdown に出さない（タイトル・ファイル名にも使わない。JSON には残す。手修正した値は対象外）。
 - AI入力の値には（AI入力）、手修正は印なし（確定時に人が確認済みのため）。
 - 画像のセル座標・種類の版・DBの文書IDは出さない（JSON側に残す）。
-- 明細表（型「明細表」の項目）は長文項目と同じく `## 見出し` の下に1行1明細で書く：`- 品番: PW48-1591／品名: ベアリング／数量: 2`。空のセルは書かない。合計行は `- 合計: 投入数: 50枚／…`。パイプ表は使わない。
+- 明細表（型「明細表」の項目）は長文項目と同じく `## 見出し` の下に1行1明細で書く：`- 品番: PW48-1591／品名: ベアリング／数量: 2`。空のセルは書かない。合計行は `- 合計: 投入数: 50枚／…`。パイプ表は使わない。連番だけの `No` 列は書かない（読み取った表・手で入れた行のどちらも）。
+  - 見出しに識別子を入れる帳票では、明細表1節の推定トークン数が 800 を超えたところで `## {見出し}（続き）（{識別子}）` に分ける（分けないと、明細表の行だけで埋まった断片に識別番号も設備名も入らない）。
   - 読み取り：探す見出し（「■ 交換部品」「使用部品」など）の下2行以内、または縦に結合した見出しの右にある列見出しの行から、空行・列見出しと同じ色のセル・表の左端の色付きの項目欄・合計行まで。縦結合のデータセルは各行に同じ値。見出しが見つからなければ、保存した列見出しと半分以上同じ表を探す。
   - 見本からの候補：列見出しの上（または左）に見出しのある表で、行を足せる形（2行以上／No だけの空き行／「■」「1.」の見出し／縦結合の見出しに余りの行）のものを明細表の項目にし、その列見出しは1つの値の項目にしない。「影響｜停止時間｜影響ロット」のような見出しの行＋値の行1つは項目の並びとして読む。列見出しが半分以上同じ表は、見本ごとに見出しの書き方が違っても1つの候補にまとめる。
   - **積み重なった列見出し（2026-09-19 の利用者の判断）**：読み取った範囲のすぐ下（2行以内）に、同じ列位置・同じ塗りつぶし色の列見出しの行が続くときは、その組も同じ明細表として読み、1つの値にまとめる（`excel/tables.stacked_tables` → `merge_table_values`）。組の数は N 組まで同じ扱い（特定の帳票に合わせた作りにしない）。
@@ -634,10 +638,12 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   使い終わったら画面から削除する必要がある。自動で消すには「読み取りテストのたびに見本を選び直す」形に変える必要があり、未実施。
 - `instance/app.db` のファイル自体は残る（中身は `secure_delete` + `VACUUM` で消える）。`.flask_secret`・`data/model_settings.yaml`
   （APIキーを平文で持つ）・`env` も残る。
-- AI の応答のキャッシュ（`llm_calls`）のうち、どの行の結果にも結び付いていないもの（作り直しで置き換わった最初の応答、
-  一時停止の直前に保存された応答）は、AI整形の作業（`ai_items` の行か `ai_format` のジョブ）が残っている取り込みが
-  1つでもある間は消さない（別の取り込みの再開で使うかもしれないため。`core/purge._ai_work_alive`）。消した取り込み自身の
-  キャッシュは、他の行が使っていなければすぐ消す。行ごとに使ったキーを全部記録すれば正確に消せるが、未実施。
+- AI の応答のキャッシュ（`llm_calls`）は、払った取り込み（`import_id`）を持つ。どの行の結果にも結び付いていないもの
+  （作り直しで置き換わった最初の応答、一時停止の直前に保存された応答）も、その取り込みを消すときに一緒に消える。
+  持ち主の分からない行（`import_id` が NULL。この列を足す前の古いDB）だけは、AI整形の作業（`ai_items` の行か
+  `ai_format` のジョブ）が残っている取り込みが1つでもある間は消さない（別の取り込みの再開で使うかもしれないため。
+  `core/purge._ai_work_alive`）。同じ文面の行で別の取り込みが同じ応答を使っているときは、その応答は使っている側が
+  消えるまで残る（消すと巻き添えの再課金になるため。持ち主は「持ち主なし」に戻す）。
 - ジョブが待機中・実行中・一時停止中の間は `VACUUM` を省く（`secure_delete` で空いたページは上書き済み。ファイルの縮小は
   次にジョブが無いときの削除で行う）。
 
@@ -664,7 +670,7 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
 
 **4巡目の不具合探しで変えた動き（2026-09-19）**
 - 「上の行と同じ」の記号（セル全体が 〃・″（NFKC で ′′）・同上・仝、一覧表では 々 も）は、上の行の同じ列の値に置き換える。
-  帳票の明細表は `excel/tables._resolve_ditto`（先頭行や上が空のときは書かれたまま）。一覧表は日付・設備・設備名・分類・属性の役割の列だけで、
+  帳票の明細表は `excel/tables._resolve_ditto`（先頭行や上が空のときは書かれたまま）。一覧表は記録番号・日付・設備・設備名・分類・属性・担当者の役割の列だけで（`tables/normalize.DITTO_ROLES`。6巡目に記録番号・担当者を追加）、
   「fill_down_blank」の設定に関係なく前のデータ行の値で埋め、まとめて1件の警告（`ditto_filled`）にする。上に値が無ければ書かれたまま残して
   行ごとの問題（`ditto_unfilled`）にし、設備としては扱わない。
 - 合計行とみなす見出しは「合計・小計・総計・総合計・合計数・計、〜合計・〜小計、〜費計・工数計・個数計・件数計・台数計・本数計・枚数計・金額計・額計」
@@ -693,8 +699,11 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   種類の項目が設備だけで識別子にならないときの「- 出典:」の行は、H1 と同じ項目（番号の項目、無ければ日付）を添える。
 - 帳票・帳票の見本のアップロードは、結合セルの面積の合計が 20万セル（`core/files.FORM_MAX_MERGED_CELLS`）を超えるブックを断る
   （行全体の結合 13個以上・列全体の結合など。一覧表は読み取り専用で開き結合を展開しないので、従来の 200万セルのまま）。
-- 一覧表: 大文字・小文字だけ違う設備のファイル名には `_2` を付ける（Windows のフォルダで上書きし合わない）。256列を超えるシートは行を
-  最終列まで埋めない。表から20列以上離れた、下にデータの無い見出しセル1つ（XFD1 のメモなど）は表に入れず警告にする。
+- 一覧表: 大文字・小文字だけ違う設備のファイル名には `_2` を付ける（Windows のフォルダで上書きし合わない）。256列を超えるシートと、
+  「行×列」がセル数の上限（`tables/excel_source.DEFAULT_MAX_CELLS` 50万。中身のほとんどが空）を超えるシートは、行を最終列まで埋めない
+  （CSV と同じく行ごとに長さが違う。読む側は範囲外を空として扱う）。遠くの行のセル1つ（`IV1048576` のメモなど）で
+  全行に何十万個のセルを作って読み込みが何十秒も止まるのを防ぐため。
+  表から20列以上離れた、下にデータの無い見出しセル1つ（XFD1 のメモなど）は表に入れず警告にする。
   時間の単位の数値列では「1:30」「1時間30分」の文字も分として読む。確定の処理の途中で消えた取り込みのフォルダを作り直さない。
   設定名を変えたとき、手で入れた「ファイル名の先頭」が前の名前と同じでも消さない。
 - 一覧表の md: 時系列の重複の削除で「(1)」「①」「⑴」「・」の行頭も外して比べ、1件だけのログも対象にする。見出しの1行目がタグと日付だけ
@@ -733,8 +742,30 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
 - アップロード: ハイパーリンク・コメントの範囲の合計が5万セルを超えるブック、帳票では 20万行を超えるブックを開く前に断る（5.1）。
   JSON の 404 にも「保存先フォルダに保存済み」を出す。帳票の取り込みの画面と一覧表の確認の画面にも、保存先フォルダに保存したときも消えることを出す。
 
+**6巡目の見直しで変えた動き（2026-09-20）**
+- 帳票: 値が「2024年7月28日 22:46」のように日付だけで書かれていれば、ラベルに日付の語が無くても（「発生」など）日付の項目にする
+  （`pattern/builder._date_value`。値の全体が元号・年月日（＋曜日・時刻）で、`to_date` が警告なしで読めるときだけ。
+  「2/12」「12:30」「2026-09-14 に復旧」は文字列のまま）。まとめ取り込みが1件だけになったら、まとまりとして扱わない
+  （確認文から「残りの帳票はまとまりに残ります」が消え、ホームにも1件の帳票として出る）。
+- 一覧表: 記録番号・担当者の列の「〃」「同上」も直前のデータ行の値で補う（`ditto_filled` の警告にまとめる。
+  重複キーの警告が「〃」ではなく本当の伝票番号を指すようになる）。取り込み設定の記録キーは「列:文字数」の書き方も受け取り、
+  手で書いた `record.fallback_key` の列も確かめる。右側の別表・遠くの見出しの警告は、無い「列の範囲指定」ではなく
+  「Excel で分ける／右隣に移す」を案内する。データの行が0行のときは、見出し行ではなく指定した「終わりの行」を理由として知らせる。
+  取り込み設定の保存が UNIQUE で断られたとき、名前の重複でなければ「別の名前にしてください」と言わない（版番号は INSERT の中で数える）。
+  中止は、押す直前に読み込みが終わっていれば状態を巻き戻さない。取り込みの［削除］の確認文と、処理中は出さない規則は
+  `templates/components/_ui.html` の `table_import_delete_form` に1か所化した。
+- AI: 対応していない引数の学習は「値を固定する」ではなく「名前を置き換える」（`max_tokens` → `max_completion_tokens`）。
+  接続テストの 20 トークンがそのあとの全行に残らない。学習は（接続先URL, モデル）ごとで、AI接続を保存すると忘れる。
+  見積もりは DB 接続を1本で通す（8,000行で約24秒短縮）。基準日の決め方は `tables/spec.base_date_from` の1か所にまとめ、
+  分割プレビュー・試し実行・送る文面・できる md で同じ日付になる。AI接続が外れていても、動いている AI整形は［中止］できる。
+- AI整形の試し実行の片付けは、まだある別の取り込みが払った応答を消さない（`core/purge.NO_LIVE_OWNER` を `aiproc/runner._ensure_trial_import`
+  でも使う。消すと払った取り込みの再開・再実行で再課金になる）。
+- 画面: 列の対応づけの保存が複数の理由で断られたら全部並べる（`static/app.js` の `postJson` が `errors` を例外に載せる）。
+  AI整形の［見積もる］は答えが返るまで押せない。待ち画面のポーリングは、ジョブが消えた（404）ら止まって画面を読み直す。
+  ホームの「作業中の一覧表」の副題は、そこに出る状態（`views.TABLE_IMPORT_ACTIVE`）をすべて言う。
+
 **Markdown の断片**
-- 明細表を読むようになったため、帳票の md が 1,200トークン（LightRAG の既定の固定窓）を超えて2つ以上の断片に分かれる様式がある（サンプルでは F2・F3・F4）。長文項目の見出しには識別子が入るが、明細表の行だけで埋まった断片には識別番号が出ない。明細表の各行への設備番号の付与・帳票へのヒント付与は、出力仕様の変更になるため入れていない（`docs/research/LightRAGオフライン評価.md` 8.5/8.7）。
+- 明細表を読むようになったため、帳票の md が 1,200トークン（LightRAG の既定の固定窓）を超えて2つ以上の断片に分かれる様式がある（サンプルでは F2・F3・F4）。長文項目の見出しには識別子が入る。明細表の行だけで埋まった断片には識別番号も設備名も出なかったので、識別子を入れる帳票では明細表1節が 800トークンを超えたところで `## {見出し}（続き）（{識別子}）` に分けるようにした（6.1）。明細表の各行への設備番号の付与・帳票へのヒント付与は、出力仕様の変更になるため入れていない（`docs/research/LightRAGオフライン評価.md` 8.5/8.7）。
 
 ### 8.1 後回し（2026-09-16 の範囲の見直しで外したもの）
 統合時に、次の機能のコード・ルート・画面・テストを削除した。必要になったら 2.4・2.6・3.2・5.3・6.2〜6.4 の記述をもとに作り直す。
@@ -743,6 +774,10 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
 - **名寄せ辞書**（`/settings/aliases`、`alias_entries` の参照、`ColumnSpec.alias_dictionary`）。値は NFKC と空白の畳み込みだけで揃える。
 - **取り込み設定の版の履歴画面**（版は内部で保持: 確定に使った版は上書きせず次の版を作る）。
 - **構築後のレビュー・評価フェーズ、LightRAG へのオフライン評価**（利用者が後で行う）。
+- **表の読み取り方を取り込み設定で変える項目**（`header.search_rows`、`data_end`（`blank_rows` / `stop_first_col` / `stop_prefix`）、
+  `exclude.aggregate_keywords`）。判定は `tables/detect.py` が持つ（合計・小計の語は「設計」「稼働時間累計」などと混ざらないよう
+  細かく調整してあり、設定で差し替えると誤判定に戻る）。古い JSON にこれらの項目があっても読み捨てる（`tables/spec.py` の `RETIRED_KEYS`）。
+  見出しの行・データの終わりの行は、取り込みごとに［範囲の確認］の画面で指定する。
 
 DB のスキーマ（3.2）にあった `table_outputs`・`table_downloads`・`alias_entries`・`table_template_samples` は、取り込みを指す列
 （`document_id` / `import_id`）を持たず purge の探索から漏れるため、マイグレーション `_m5` で削除した（どこからも書いていなかった）。

@@ -57,26 +57,32 @@ def get(key: str, conn=None) -> dict | None:
 
 def put(key: str, raw_text: str, *, model: str, params: dict | None = None, structured_mode: str = "",
         parsed: dict | None = None, finish_reason: str | None = None, tokens_in: int | None = None,
-        tokens_out: int | None = None, latency_ms: int | None = None, conn=None) -> None:
-    """応答を保存してすぐコミットする（同じキーは上書き）。"""
+        tokens_out: int | None = None, latency_ms: int | None = None, import_id: int | None = None,
+        conn=None) -> None:
+    """応答を保存してすぐコミットする（同じキーは上書き）。
+
+    import_id は「この応答を払った取り込み」。ai_items から参照されない応答（再依頼で直した行の1回目・
+    一時停止の直前に受け取った分）も、この列があればその取り込みを消すときに一緒に消せる（design.md 3.3）。
+    """
     def run(c):
         c.execute(
             """INSERT OR REPLACE INTO llm_calls (cache_key, raw_text, parsed_json, model, params_json, structured_mode,
-                   finish_reason, tokens_in, tokens_out, latency_ms, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   finish_reason, tokens_in, tokens_out, latency_ms, created_at, import_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (key, raw_text, json.dumps(parsed, ensure_ascii=False) if parsed is not None else None, model,
              json.dumps(params or {}, ensure_ascii=False, default=str), structured_mode, finish_reason,
-             tokens_in, tokens_out, latency_ms, database.now()),
+             tokens_in, tokens_out, latency_ms, database.now(), int(import_id) if import_id else None),
         )
         c.commit()
     _run(conn, run)
 
 
-def put_result(key: str, result, *, model: str, structured_mode: str, parsed: dict | None = None, conn=None) -> None:
+def put_result(key: str, result, *, model: str, structured_mode: str, parsed: dict | None = None,
+               import_id: int | None = None, conn=None) -> None:
     """services.llm.ChatResult をそのまま保存する。"""
     put(key, result.text, model=model, params=result.params, structured_mode=structured_mode, parsed=parsed,
         finish_reason=result.finish_reason, tokens_in=result.tokens_in, tokens_out=result.tokens_out,
-        latency_ms=result.latency_ms, conn=conn)
+        latency_ms=result.latency_ms, import_id=import_id, conn=conn)
 
 
 def exists(key: str, conn=None) -> bool:

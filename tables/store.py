@@ -78,10 +78,12 @@ def save_template_version(template_id: int, spec: TableSpec, note: str = "", con
                        (spec_json(spec), spec_hash(spec), note or current["note"], current["id"]))
         version_id = current["id"]
     else:
-        last = db.execute("SELECT COALESCE(MAX(version), 0) FROM table_template_versions WHERE template_id = ?",
-                          (template_id,)).fetchone()[0]
-        cur = db.execute("INSERT INTO table_template_versions (template_id, version, spec_json, spec_hash, note, created_at) "
-                         "VALUES (?, ?, ?, ?, ?, ?)", (template_id, last + 1, spec_json(spec), spec_hash(spec), note, ts))
+        # 版番号は INSERT の中で数える（別の保存と重なっても UNIQUE (template_id, version) で衝突しない）
+        cur = db.execute(
+            "INSERT INTO table_template_versions (template_id, version, spec_json, spec_hash, note, created_at) "
+            "VALUES (?, (SELECT COALESCE(MAX(version), 0) + 1 FROM table_template_versions WHERE template_id = ?), "
+            "?, ?, ?, ?)",
+            (template_id, template_id, spec_json(spec), spec_hash(spec), note, ts))
         version_id = cur.lastrowid
     db.execute("UPDATE table_templates SET current_version_id = ?, name = ?, description = ?, updated_at = ? WHERE id = ?",
                (version_id, spec.name, spec.description or "", ts, template_id))

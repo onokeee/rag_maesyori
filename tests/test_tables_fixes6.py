@@ -483,3 +483,205 @@ def test_too_long_md_path_gives_a_clear_message(tmp_path, monkeypatch):
     with pytest.raises(pipeline.PipelineError, match="ファイル名が長すぎ"):
         pipeline._write_md_dir(target, files)
     assert not target.exists()
+
+
+# ---- R6-T-01: 記録番号・担当者の列の「〃」「同上」も直前の行の値で補う ------------------------------------------
+
+def test_ditto_in_the_record_number_and_person_columns_is_filled(tmp_path):
+    from tables.markdown import render_all
+    from tests.test_tables_fixes3 import _auto
+    from tests.test_tables_fixes4 import _csv
+
+    lines = ["管理No,発生日,設備ID,現象,対応者,停止時間(分)",
+             "TR-001,2025-03-01,CMP-101,異音,田中,30",
+             "〃,〃,〃,追加調査,〃,20",
+             "〃,〃,〃,部品交換,同上,10",
+             "TR-002,2025-03-02,ETC-301,停止,佐藤,40",
+             "〃,2025-03-02,ETC-301,復旧,佐藤,5"]
+    src = _csv(tmp_path, "ditto_key.csv", lines)
+    _layout, spec, records, stats = _auto(src, src.sheets()[0].name)
+    assert {c.key: c.role for c in spec.columns}["record_no"] == "key"
+    # 2行目以降は直前の伝票番号で補われ、同じ伝票の続きとして #2・#3 になる
+    assert [r.key for r in records] == ["TR-001", "TR-001#2", "TR-001#3", "TR-002", "TR-002#2"]
+    assert stats.ditto_filled.get("record_no") == 3 and stats.ditto_filled.get("worker") == 2
+    assert "〃" not in stats.duplicate_keys
+    text = "\n".join(f.text for f in render_all(spec, [r.to_dict() for r in records], {}, {}))
+    assert "〃" not in text and "同上" not in text
+
+
+# ---- R6-T-02: 記録キーの「列:文字数」を認める／記録キーの代わりの列も確かめる ------------------------------------
+
+def _key_spec(**record):
+    return spec_from_dict({"name": "x", "columns": [
+        {"key": "occurred_at", "display": "発生日", "type": "date", "role": "date"},
+        {"key": "equipment_id", "display": "設備番号", "type": "code", "role": "entity"},
+        {"key": "symptom", "display": "現象", "type": "text", "role": "text"},
+    ], "record": record})
+
+
+def test_record_key_accepts_a_truncated_column():
+    assert validate_spec(_key_spec(key=["occurred_at", "equipment_id", "symptom:20"])) == []
+    assert validate_spec(_key_spec(key=["symptom:20"], fallback_key=["occurred_at"])) == []
+
+
+def test_record_key_with_a_missing_column_or_a_bad_length_is_refused():
+    assert validate_spec(_key_spec(key=["missing"])) == ["記録キーの列「missing」がありません"]
+    assert validate_spec(_key_spec(key=["missing:20"])) == ["記録キーの列「missing」がありません"]
+    errors = validate_spec(_key_spec(key=["symptom:あ"]))
+    assert errors and "記録キーの「symptom:あ」の文字数" in errors[0]
+
+
+def test_fallback_key_columns_are_checked_when_they_are_written_by_hand():
+    errors = validate_spec(_key_spec(key=["equipment_id"], fallback_key=["equipment_no_typo"]))
+    assert errors == ["記録キーの代わりの列「equipment_no_typo」がありません"]
+    # 既定のままの代わりのキーは、その表に無い列名でも問題にしない（既定は一般的な列名）
+    assert validate_spec(_key_spec(key=["equipment_id"])) == []
+
+
+# ---- R6-T-03: 列の範囲は指定できないので、Excel 側で直す案内にする --------------------------------------------
+
+def test_right_hand_table_warning_tells_what_can_actually_be_done(tmp_path):
+    from tables.detect import guess_layout
+    from tests.test_tables_fixes4 import _csv
+
+    lines = ["管理No,発生日,現象,,設備No,点検日,結果"]
+    for i in range(10):
+        lines.append(f"TR-{i:03d},2025-03-{i + 1:02d},停止,,EQ-{i:03d},2025-03-{i + 1:02d},良")
+    src = _csv(tmp_path, "two_tables.csv", lines)
+    layout = guess_layout(src, src.sheets()[0].name)
+    warning = next(w for w in layout.warnings if "別の表があるようです" in w)
+    assert "別のシートか別のファイルに分けて" in warning and "範囲を指定して取り込んで" not in warning
+    assert layout.headers == ["管理No", "発生日", "現象"]
+
+
+def test_far_memo_column_warning_tells_what_can_actually_be_done(tmp_path):
+    from tables.detect import guess_layout
+    from tests.test_tables_fixes4 import _csv
+
+    blanks = "," * 22
+    lines = [f"管理No,発生日,現象{blanks},メモ"] + [f"TR-{i:03d},2025-03-{i + 1:02d},停止{blanks}," for i in range(10)]
+    src = _csv(tmp_path, "far_memo.csv", lines)
+    layout = guess_layout(src, src.sheets()[0].name)
+    warning = next(w for w in layout.warnings if "大きく離れた" in w)
+    assert "表の右隣に移してから" in warning and "範囲を指定して取り込んで" not in warning
+
+
+# ---- R6-T-04: 判定に使っていない項目は取り込み設定に持たない ----------------------------------------------------
+
+def test_settings_that_never_changed_the_reading_are_dropped():
+    from tables.spec import spec_to_dict
+
+    col = {"key": "a", "display": "a", "type": "string", "role": "attribute"}
+    spec = spec_from_dict({"name": "x", "columns": [col],
+                           "header": {"rows": 1, "anchors": ["管理No"], "search_rows": 50},
+                           "data_end": {"blank_rows": 9, "stop_first_col": ["おわり"]},
+                           "exclude": {"aggregate_keywords": ["計"], "hidden_rows": "include"}})
+    assert spec.header == {"rows": 1, "anchors": ["管理No"]}
+    assert not hasattr(spec, "data_end")
+    assert spec.exclude == {"hidden_rows": "include", "strike_rows": "exclude_with_warning"}
+    d = spec_to_dict(spec)
+    assert "data_end" not in d and "search_rows" not in d["header"] and "aggregate_keywords" not in d["exclude"]
+    assert validate_spec(spec) == []
+
+
+# ---- ux6-2: データの行が無いときは、見出し行ではなくデータの範囲のことを言う ----------------------------------------
+
+def _csv_import(client, name: str, text: str) -> int:
+    res = client.post("/tables/upload", data={"file": (io.BytesIO(text.encode("utf-8")), name)},
+                      content_type="multipart/form-data")
+    import_id = int(res.headers["Location"].split("/")[3])
+    client.post(f"/tables/imports/{import_id}/source",
+                data={"encoding": "utf-8", "delimiter": ",", "template": "new", "new_template_name": name})
+    return import_id
+
+
+def test_a_table_with_no_data_rows_does_not_blame_the_header_row(client):
+    import_id = _csv_import(client, "empty.csv", "管理No,発生日,設備番号,現象,対応内容\r\n")
+    page = client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": ""},
+                       follow_redirects=True).get_data(as_text=True)
+    assert "データの行が1行もありません" in page
+    assert "見出し行の番号を指定してください" not in page
+
+
+def test_a_data_end_above_the_header_is_echoed_back_with_its_own_message(client):
+    text = "管理No,発生日,現象\r\n" + "".join(f"TR-{i},2026/08/{i + 1:02d},停止\r\n" for i in range(10))
+    import_id = _csv_import(client, "rows.csv", text)
+    page = client.post(f"/tables/imports/{import_id}/layout", data={"header_rows": "1", "data_end_row": "1"},
+                       follow_redirects=True).get_data(as_text=True)
+    assert "データの終わりに1行目を指定すると、データの行が1行もありません" in page
+    assert "見出し行の番号を指定してください" not in page
+    assert 'name="data_end_row" class="input" value="1"' in page   # 入力した値は消さない
+
+
+# ---- r6-c1: 成功して終わったばかりの読み込みを［中止］が巻き戻さない --------------------------------------------
+
+def test_cancel_does_not_undo_a_read_that_just_finished(app, client, monkeypatch):
+    from core import jobs
+    from models import database
+
+    with app.app_context():
+        _template_id, import_id = _new_import(app)
+        pipeline.run_read(FakeCtx(), import_id)
+        db = database.get_db()
+        ts = database.now()
+        cur = db.execute(
+            "INSERT INTO jobs (kind, ref_type, ref_id, status, params_json, progress_json, created_at, updated_at) "
+            "VALUES ('table_read', 'table_import', ?, 'running', '{}', '{}', ?, ?)", (import_id, ts, ts))
+        job_id = cur.lastrowid
+        db.commit()
+        store.update_import(import_id, status="reading", job_id=job_id)   # 画面が読んだときは「読み込み中」
+
+    def cancel_after_the_job_finished(jid):
+        # 中止を要求した瞬間に、ジョブ本体は成功して status=preview を書き終えていた
+        with app.app_context():
+            store.update_import(import_id, status="preview")
+            db = database.get_db()
+            db.execute("UPDATE jobs SET status = 'cancelled' WHERE id = ?", (jid,))
+            db.commit()
+        return True
+
+    monkeypatch.setattr(jobs, "request_cancel", cancel_after_the_job_finished)
+    res = client.post(f"/tables/imports/{import_id}/cancel")
+    assert res.status_code == 302
+    with app.app_context():
+        assert store.get_import(import_id)["status"] == "preview"
+
+
+# ---- r6-c2: 版番号は INSERT の中で数える（同時に保存しても衝突しない） -------------------------------------------
+
+def test_new_versions_are_numbered_without_a_race(app):
+    from tables.spec import ColumnSpec
+
+    with app.app_context():
+        col = {"key": "a", "display": "a", "type": "string", "role": "attribute"}
+        spec = spec_from_dict({"name": "版の確認", "columns": [col]})
+        template_id, version_id = store.create_template(spec.name, spec)
+        for i in range(2, 5):
+            store.mark_version_used(version_id)   # 確定に使われた版は上書きしない＝新しい版になる
+            spec.columns.append(ColumnSpec(f"c{i}", f"列{i}"))
+            version_id = store.save_template_version(template_id, spec)
+            assert store.get_template(template_id)["version"] == i
+
+
+def test_a_version_conflict_is_not_explained_as_a_duplicate_name():
+    import sqlite3
+
+    from views.tables import _save_conflict_message
+
+    name_taken = sqlite3.IntegrityError("UNIQUE constraint failed: table_templates.name")
+    version_clash = sqlite3.IntegrityError("UNIQUE constraint failed: table_template_versions.template_id, "
+                                           "table_template_versions.version")
+    assert "別の名前にしてください" in _save_conflict_message(name_taken, "トラブル対応一覧")
+    assert _save_conflict_message(version_clash, "トラブル対応一覧") == "保存が他の操作と重なりました。もう一度保存してください"
+
+
+# ---- ux6-6: ［取り込みを削除］の確認文は取り込みのどの画面でも同じ ------------------------------------------------
+
+def test_the_delete_confirm_text_is_the_same_on_every_table_screen():
+    root = Path(__file__).resolve().parents[1] / "templates"
+    shared = "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。"
+    found = [line.strip() for path in root.rglob("*.html")
+             for line in path.read_text(encoding="utf-8").splitlines() if "この取り込みを削除します" in line]
+    assert found  # 文言は共通のマクロ（と done.html の「ダウンロードせずに」）だけ
+    for line in found:
+        assert shared in line and "アップロードしたファイル" not in line

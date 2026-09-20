@@ -364,13 +364,23 @@ def upload():
 
 # ---- 取り込みのまとまり（複数ファイル） -------------------------------------------------------
 
+def in_batch(doc: dict) -> bool:
+    """ほかの帳票が残っているまとめ取り込みの1件か。
+
+    取り込みに失敗した・削除した・先に1件だけ渡した結果、帳票が1件だけになったまとまりは
+    「まとまり」として扱わない（zip も「残りの帳票」も無いので、1件の帳票と同じ文言・同じ画面にする）。
+    """
+    batch_id = doc.get("batch_id") or ""
+    return bool(batch_id) and len(db.list_batch_documents(batch_id)) > 1
+
+
 def _batch_info(doc: dict) -> dict | None:
     """まとめ取り込みの進み具合（3/12）と次の帳票。まとまりに属さない帳票なら None。"""
     batch_id = doc.get("batch_id") or ""
     if not batch_id:
         return None
     docs = db.list_batch_documents(batch_id)
-    if not docs:
+    if len(docs) <= 1:  # 1件だけになったまとまりは、ただの帳票として出す
         return None
     for d in docs:
         d["href"] = form_link(d)
@@ -441,12 +451,16 @@ def delete_confirm(doc: dict) -> str:
     return DELETE_ON_DOWNLOAD_CONFIRM
 
 
-def save_confirm(doc: dict) -> str:
+def save_confirm(doc: dict, batch_member: bool | None = None) -> str:
     """1件を保存先フォルダに保存するときの確認文（ダウンロードと同じく、保存するとデータが消える）。
 
     まとめ取り込みの帳票なら、この帳票だけがまとまりから消えることを伝える（ホームの各帳票のボタンと同じ文）。
+    1件だけになったまとまりでは「残りの帳票はまとまりに残ります」が嘘になるので、1件の帳票と同じ文にする。
+    batch_member: 呼ぶ側がまとまりの件数を知っているときに渡す（ホームの一覧で数え直さないため）。
     """
-    text = BATCH_MEMBER_SAVE_CONFIRM if doc.get("batch_id") else SAVE_TO_FOLDER_CONFIRM
+    if batch_member is None:
+        batch_member = in_batch(doc)
+    text = BATCH_MEMBER_SAVE_CONFIRM if batch_member else SAVE_TO_FOLDER_CONFIRM
     if doc["state"] == "modified":
         return MODIFIED_NOTE + text
     return text

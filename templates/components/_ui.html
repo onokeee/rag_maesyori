@@ -91,6 +91,15 @@
 </form>
 {%- endmacro %}
 
+{#- 一覧表の取り込みの［削除］。読み込み中・確定処理中は views 側で断られるので、画面ごとにずれないようボタン自体を出さない -#}
+{% macro table_import_delete_form(item, next=None, label="削除", small=True) -%}
+{%- if item.status not in ("reading", "confirming") -%}
+{{ confirm_delete_form(url_for('tables.delete_import', import_id=item.id),
+     "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。",
+     label=label, next=next, small=small) }}
+{%- endif -%}
+{%- endmacro %}
+
 {#- 保存先フォルダに保存するボタン（POST。送信前に確認ダイアログ）。message はダウンロードと同じく「消える」ことを書く。
     保存先フォルダが設定されているとき（save_folder）だけ呼ぶ。folder は保存先（ボタンの説明に出す）、next は失敗・同名のときの戻り先、
     attrs はフォームに付ける属性（data-batch-save など） -#}

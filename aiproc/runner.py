@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import re
 import sqlite3
 import threading
 import time
@@ -36,9 +35,11 @@ from aiproc.verify import VerifyReport, verify_log_result
 from core import jobs
 from core.jobs import JobCancelled, JobError
 from core.mdtext import estimate_tokens
+from core.purge import NO_LIVE_OWNER
 from logproc import PeopleIndex, SplitOptions, mask_text, parse_log, render_timeline, review_notes
 from models import database
 from services import llm
+from tables.spec import base_date_from
 
 LOG_STAGE_ID = "log"
 MAX_RETRIES = 5          # 429/5xx/タイムアウトの再試行回数（1呼び出しあたり）
@@ -211,22 +212,9 @@ def _labels(spec) -> dict[str, str]:
     return {key: display for key, display, _ in _columns(spec)}
 
 
-_DATE_RE = re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
-
-
 def _base_date(row: dict, spec) -> date | None:
-    period = sget(spec, "period", {}) or {}
-    keys = [sget(period, "date_column", None)] + [k for k, _, role in _columns(spec) if role == "date"] + ["occurred_at"]
-    for k in keys:
-        if not k:
-            continue
-        m = _DATE_RE.search(str(row["values"].get(k) or ""))
-        if m:
-            try:
-                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            except ValueError:
-                continue
-    return None
+    # 探し方は tables.spec.base_date_from に1本化してある（md と AI で同じ基準日を使う）
+    return base_date_from(row["values"], spec)
 
 
 def _entity_label(row: dict, spec) -> str:
@@ -582,7 +570,8 @@ def _cache_db(fn, default=None):
 
 
 def _one_call(work: StageWork, messages, key: str, settings: dict, mode: str, stop_event, out: Outcome,
-              max_tokens, use_cache: bool = True, deadline: float | None = None) -> tuple[str, str | None]:
+              max_tokens, use_cache: bool = True, deadline: float | None = None,
+              import_id: int | None = None) -> tuple[str, str | None]:
     """キャッシュを見て、無ければ呼んで即時保存する。(text, finish_reason) を返す。"""
     hit = _cache_db(lambda: cache.get(key)) if use_cache else None
     if hit is not None:
@@ -601,8 +590,9 @@ def _one_call(work: StageWork, messages, key: str, settings: dict, mode: str, st
         parsed = llm.parse_json_text(res.text)
     except ValueError:
         pass
+    # どの取り込みが払った応答かを残す（参照されなくなってもその取り込みと一緒に消せる。design.md 3.3）
     _cache_db(lambda: cache.put_result(key, res, model=settings.get("model", ""), structured_mode=mode,
-                                       parsed=parsed))
+                                       parsed=parsed, import_id=import_id))
     return res.text, res.finish_reason
 
 
@@ -614,17 +604,19 @@ def _repair_request(work: StageWork, text: str, problems: list, settings: dict, 
                                        settings.get("chat_url"))
 
 
-def cached_usable(work: StageWork, settings: dict, mode: str, key: str | None = None) -> bool:
+def cached_usable(work: StageWork, settings: dict, mode: str, key: str | None = None, conn=None) -> bool:
     """キャッシュだけで AI を呼ばずに済むか（見積もり用）。execute_work と同じ判断をする：
     キャッシュが無い・再依頼が要るのに再依頼の応答が無い・キャッシュの応答がエラー（壊れたJSON・打ち切り。
-    実行時は聞き直す）なら False。"""
-    hit = cache.get(key or work.key)
+    実行時は聞き直す）なら False。
+
+    conn を渡すと同じ接続を使い回す（行数分のDB開き直しを避ける。見積もりは1行ごとに何度も呼ぶ）。"""
+    hit = cache.get(key or work.key, conn)
     if hit is None:
         return False
     text, finish = hit.get("raw_text") or "", hit.get("finish_reason")
     status, _, _, problems, _ = _evaluate(work, text, finish)
     if problems:
-        r_hit = cache.get(_repair_request(work, text, problems, settings, mode)[1])
+        r_hit = cache.get(_repair_request(work, text, problems, settings, mode)[1], conn)
         if r_hit is None:
             return False
         r_status = _evaluate(work, r_hit.get("raw_text") or "", r_hit.get("finish_reason"))[0]
@@ -634,14 +626,17 @@ def cached_usable(work: StageWork, settings: dict, mode: str, key: str | None = 
 
 
 def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threading.Event | None = None,
-                 use_cache: bool = True, repair: bool = True) -> Outcome:
-    """1行×段を処理する（キャッシュ→呼び出し→照合→1回だけ再依頼）。app_context 内で呼ぶ。"""
+                 use_cache: bool = True, repair: bool = True, import_id: int | None = None) -> Outcome:
+    """1行×段を処理する（キャッシュ→呼び出し→照合→1回だけ再依頼）。app_context 内で呼ぶ。
+
+    import_id: この行を処理している取り込み。保存する生の応答の持ち主として記録する（design.md 3.3）。
+    """
     out = Outcome(work, key=work.key)
     # 1回目と再依頼（再試行・待機を含む）を合わせた時間の上限。過ぎたらこの行だけエラーにして次へ
     deadline = time.monotonic() + row_deadline_seconds(settings)
     try:
         text, finish = _one_call(work, work.messages, work.key, settings, mode, stop_event, out, work.max_tokens,
-                                 use_cache, deadline)
+                                 use_cache, deadline, import_id)
         out.attempts = 1
         out.raw_text = text
         status, result, checks, problems, _ = _evaluate(work, text, finish)
@@ -653,7 +648,7 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
             r_tokens = int(work.max_tokens * 1.5) if (finish == "length" and work.max_tokens) else work.max_tokens
             try:
                 r_text, r_finish = _one_call(work, r_messages, r_key, settings, mode, stop_event, out, r_tokens,
-                                             use_cache, deadline)
+                                             use_cache, deadline, import_id)
             except llm.LLMCallError as e:
                 # 再依頼だけが失敗した（文脈長超過の400・行の時間切れなど）。1回目の結果が使えるなら残す。
                 # キー拒否・接続不可などの致命的なエラーはこれまでどおりジョブを止める
@@ -681,7 +676,8 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
         if status == "error" and out.cached and use_cache:
             # キャッシュの応答だけでエラーになった（壊れたJSON・打ち切り）。同じ応答を再生しても直らないので
             # 聞き直す（「エラーだけ再実行」で直せるように）。再依頼で直った応答はこれまでどおり使い回す
-            return execute_work(work, settings, mode, stop_event, use_cache=False, repair=repair)
+            return execute_work(work, settings, mode, stop_event, use_cache=False, repair=repair,
+                                import_id=import_id)
     except _Stopped:
         out.stopped = True
     except llm.LLMCallError as e:
@@ -784,7 +780,7 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
 
         def task(w: StageWork) -> Outcome:
             with app.app_context():
-                return execute_work(w, settings, mode, stop_event)
+                return execute_work(w, settings, mode, stop_event, import_id=import_id)
 
         executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix=f"ai-job-{job_id}")
         inflight = {}
@@ -959,7 +955,7 @@ def trial_row(import_id: int, row_key: str, stage_ids=None, settings: dict | Non
             if mode is None:
                 mode = llm.detect_structured_mode(settings)
             assign_keys([w], settings, mode)
-            out = execute_work(w, settings, mode, None, use_cache=use_cache)
+            out = execute_work(w, settings, mode, None, use_cache=use_cache, import_id=import_id)
             if out.fatal is not None:
                 raise out.fatal
             _ensure_trial_import(import_id, [w.key, out.key])
@@ -998,7 +994,9 @@ def _ensure_trial_import(import_id: int, keys=()) -> None:
         if not _import_gone(conn, import_id):
             return
         for key in {k for k in keys if k}:
-            conn.execute("DELETE FROM llm_calls WHERE cache_key = ? AND NOT EXISTS "
+            # 生きている別の取り込みが払った応答は消さない（消すとその取り込みが再開・再実行で再課金になる）。
+            # その応答は、持ち主の取り込みを消すときに core.purge が一緒に消す
+            conn.execute(f"DELETE FROM llm_calls WHERE cache_key = ? AND {NO_LIVE_OWNER} AND NOT EXISTS "
                          "(SELECT 1 FROM ai_items WHERE ai_items.cache_key = llm_calls.cache_key)", (key,))
         conn.commit()
     finally:

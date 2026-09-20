@@ -23,14 +23,25 @@ async function postJson(url, body, options = {}) {
   });
   if (res.status === 204) return {};
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `通信に失敗しました（HTTP ${res.status}）`);
+  if (!res.ok) {
+    // 問題が複数あるとき（列の対応づけの保存など）は errors に全部入っている。1件だけ見せて残りを隠さない
+    const error = new Error(data.error || `通信に失敗しました（HTTP ${res.status}）`);
+    error.status = res.status;
+    error.errors = Array.isArray(data.errors) ? data.errors : null;
+    throw error;
+  }
   return data;
 }
 
 async function getJson(url) {
   const res = await fetch(url, { headers: { Accept: "application/json" } });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `通信に失敗しました（HTTP ${res.status}）`);
+  if (!res.ok) {
+    // 呼び出し側が 404（もうそのデータが無い）を通信エラーと区別できるように status を載せる
+    const error = new Error(data.error || `通信に失敗しました（HTTP ${res.status}）`);
+    error.status = res.status;
+    throw error;
+  }
   return data;
 }
 
@@ -51,6 +62,13 @@ function pollJob(url, onUpdate, { interval = 1500, maxInterval = 10000 } = {}) {
       if (JOB_FINISHED.includes(job.status)) return;
       if (job.status === "paused") wait = Math.min(interval * 3, maxInterval);
     } catch (e) {
+      // ジョブが消えている（ダウンロードや削除でデータごと片付いた）なら、待っても終わらないので画面を読み直す
+      if (e.status === 404) {
+        stopped = true;
+        clearTimeout(timer);
+        window.location.reload();
+        return;
+      }
       wait = Math.min(wait * 2, maxInterval); // 通信エラーは間隔を広げて続ける
     }
     if (!stopped) timer = setTimeout(tick, wait);

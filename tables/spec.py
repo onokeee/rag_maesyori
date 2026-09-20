@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass, field, fields
+from datetime import date
 
 COLUMN_TYPES = ("code", "string", "text", "date", "datetime", "time", "number", "enum", "status")
 COLUMN_ROLES = ("key", "date", "entity", "entity_label", "category", "measure", "text", "log", "person", "attribute")
@@ -26,16 +27,15 @@ _METRIC_RE = re.compile(r"^(count|(sum|avg|max):([A-Za-z_][A-Za-z0-9_]*))$")
 
 
 def _default_header() -> dict:
-    return {"anchors": [], "rows": 1, "search_rows": 30}
-
-
-def _default_data_end() -> dict:
-    return {"blank_rows": 3, "stop_first_col": ["合計", "総計"], "stop_prefix": ["※", "注"]}
+    return {"anchors": [], "rows": 1}
 
 
 def _default_exclude() -> dict:
-    return {"aggregate_keywords": ["小計", "計", "合計", "平均"],
-            "hidden_rows": "exclude_with_warning", "strike_rows": "exclude_with_warning"}
+    return {"hidden_rows": "exclude_with_warning", "strike_rows": "exclude_with_warning"}
+
+
+# 判定には使っていない項目（tables/detect.py が自分で判断する）。古い JSON にあっても読み捨てる
+RETIRED_KEYS = {"header": ("search_rows",), "exclude": ("aggregate_keywords",)}
 
 
 def _default_record() -> dict:
@@ -124,7 +124,6 @@ class TableSpec:
     file_types: list[str] = field(default_factory=lambda: ["xlsx", "xlsm", "csv"])
     name_patterns: list[str] = field(default_factory=list)
     header: dict = field(default_factory=_default_header)
-    data_end: dict = field(default_factory=_default_data_end)
     exclude: dict = field(default_factory=_default_exclude)
     continuation_rows: str = "merge_into_previous"
     na_tokens: list[str] = field(default_factory=lambda: list(DEFAULT_NA_TOKENS))
@@ -170,6 +169,42 @@ class TableSpec:
         return [s if isinstance(s, SummarySpec) else _summary_from(s) for s in (self.markdown or {}).get("summaries", [])]
 
 
+# ---- 追記ログの基準日 ------------------------------------------------------------------
+
+_BASE_DATE_RE = re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
+
+
+def _sget(obj, name: str, default=None):
+    """dataclass でも dict でも同じように読む（AI整形は spec を dict のまま持つことがある）。"""
+    if obj is None:
+        return default
+    value = obj.get(name, None) if isinstance(obj, dict) else getattr(obj, name, None)
+    return default if value is None else value
+
+
+def base_date_from(values: dict, spec) -> date | None:
+    """追記ログの相対日付（「翌週」など）を解くときの基準日。無ければ None（＝年不明）。
+
+    探す順: 期間の日付列 → role='date' の列すべて → occurred_at。'-' でも '/' でも読む。
+    AI整形（aiproc.runner）と Markdown（tables.markdown）で同じ日付にするため、ここ1か所に置く。
+    """
+    keys = [_sget(_sget(spec, "period", {}) or {}, "date_column", None)]
+    for col in _sget(spec, "columns", []) or []:
+        if str(_sget(col, "role", "")) == "date":
+            keys.append(str(_sget(col, "key", "")))
+    keys.append("occurred_at")
+    for key in keys:
+        if not key:
+            continue
+        m = _BASE_DATE_RE.search(str((values or {}).get(key) or ""))
+        if m:
+            try:
+                return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                continue
+    return None
+
+
 # ---- dict ⇔ dataclass ----------------------------------------------------------------
 
 def _pick(cls, d: dict) -> dict:
@@ -177,10 +212,12 @@ def _pick(cls, d: dict) -> dict:
     return {k: copy.deepcopy(v) for k, v in (d or {}).items() if k in names}
 
 
-def _merged(default: dict, value) -> dict:
+def _merged(default: dict, value, drop: tuple = ()) -> dict:
     out = copy.deepcopy(default)
     if isinstance(value, dict):
         out.update(copy.deepcopy(value))
+    for name in drop:
+        out.pop(name, None)
     return out
 
 
@@ -247,9 +284,8 @@ def spec_from_dict(d: dict) -> TableSpec:
                                                       "data_end", "exclude", "record", "period", "checks")}))
     spec.name = str(spec.name or "")
     spec.columns = [_column_from(c) for c in _as_list(data.get("columns"))]
-    spec.header = _merged(_default_header(), data.get("header"))
-    spec.data_end = _merged(_default_data_end(), data.get("data_end"))
-    spec.exclude = _merged(_default_exclude(), data.get("exclude"))
+    spec.header = _merged(_default_header(), data.get("header"), RETIRED_KEYS["header"])
+    spec.exclude = _merged(_default_exclude(), data.get("exclude"), RETIRED_KEYS["exclude"])
     spec.record = _merged(_default_record(), data.get("record"))
     spec.period = _merged(_default_period(), data.get("period"))
     spec.checks = _merged(_default_checks(), data.get("checks"))
@@ -321,9 +357,21 @@ def validate_spec(spec: TableSpec) -> list[str]:
 
     all_keys = set(keys)
     record = spec.record or {}
-    for part in _as_list(record.get("key")):
-        if str(part) not in all_keys:
-            errors.append(f"記録キーの列「{part}」がありません")
+
+    def _check_key_parts(parts: list, label: str, check_missing: bool = True) -> None:
+        # 記録キーの部品は「列」または「列:文字数」（normalize._key_part が切り詰める）
+        for part in parts:
+            base, _, length = str(part).partition(":")
+            if length and not length.isdigit():
+                errors.append(f"{label}の「{part}」の文字数は「列:20」のように数字で指定してください")
+            elif check_missing and base not in all_keys:
+                errors.append(f"{label}の列「{base}」がありません")
+
+    _check_key_parts(_as_list(record.get("key")), "記録キー")
+    # fallback_key の既定はよくある列名なので、既定のままのときはその表に無くても問題にしない
+    fallback = _as_list(record.get("fallback_key"))
+    _check_key_parts(fallback, "記録キーの代わり",
+                     check_missing=[str(p) for p in fallback] != _default_record()["fallback_key"])
     date_column = (spec.period or {}).get("date_column")
     col = spec.column(date_column) if date_column else None
     if col is not None and col.type not in ("date", "datetime"):
@@ -333,10 +381,9 @@ def validate_spec(spec: TableSpec) -> list[str]:
     if spec.continuation_rows not in CONTINUATION_POLICIES:
         errors.append("継続行の扱いが正しくありません")
     header = spec.header if isinstance(spec.header, dict) else {}
-    for name, label in (("rows", "見出しの行数（header.rows）"), ("search_rows", "見出しを探す行数（header.search_rows）")):
-        value = header.get(name)
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1000:
-            errors.append(f"{label}は1以上の整数で指定してください")
+    value = header.get("rows")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 1000:
+        errors.append("見出しの行数（header.rows）は1以上の整数で指定してください")
     for name in ("hidden_rows", "strike_rows"):
         if (spec.exclude or {}).get(name) not in ROW_POLICIES:
             errors.append("非表示行・取り消し線の行の扱いが正しくありません")

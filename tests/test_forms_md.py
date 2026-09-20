@@ -326,3 +326,61 @@ def test_stacked_table_rows_keep_their_own_column_headings(standard):
             "- 人: ①日常点検での見落とし／機械: 軸受の摩耗\n"
             "- 方法: 点検手順に記載なし／環境: 室温の変動\n") in md
     assert "|" not in md
+
+
+# ---- R6-F1: 手で入れた明細表の連番「No」列 ----
+
+def test_a_hand_entered_row_drops_the_sequence_no_column(standard):
+    """読み取れなかった明細表に手で入れた行も、読み取った表と同じ形で書く（「- No.: 1」を出さない）。
+
+    読み取った表は Table.to_value で連番の No 列を落とすが、読めなかった表の入力欄には
+    帳票の種類の列見出し（No を含む）がそのまま出るので、出すときに形をそろえる。
+    """
+    info, _, extraction = standard
+    value = {"columns": ["No.", "品名", "品番", "数量"],
+             "rows": [["1", "走行部", "目視", "-"], ["2", "駆動部", "PW-1", "1"], ["合計", "", "", "2"]]}
+    extraction["fields"].insert(5, _table_field(value))
+    refresh_summary(extraction)
+    md = build_markdown(_doc(info), extraction)
+    assert ("\n## 交換部品\n"
+            "- 品名: 走行部／品番: 目視／数量: -\n"
+            "- 品名: 駆動部／品番: PW-1／数量: 1\n"
+            "- 合計: 数量: 2\n") in md
+    assert "No.:" not in md
+
+
+def test_a_no_column_that_is_not_a_sequence_is_kept(standard):
+    """連番でない「No」列（本当の項番・品番）は、読み取り側と同じく残す。"""
+    info, _, extraction = standard
+    value = {"columns": ["No.", "品名"], "rows": [["12", "走行部"], ["7", "駆動部"]]}
+    extraction["fields"].insert(5, _table_field(value))
+    refresh_summary(extraction)
+    md = build_markdown(_doc(info), extraction)
+    assert "- No.: 12／品名: 走行部\n- No.: 7／品名: 駆動部\n" in md
+
+
+# ---- R6-MD-02: 長い明細表の断片にも識別子を入れる ----
+
+def test_a_long_detail_table_is_split_so_every_part_carries_the_identifier(standard):
+    """明細表1節が固定窓（1,200トークン）を超えると、識別番号も設備名も無い断片ができる。
+
+    識別子を入れる帳票（長い帳票）では、明細表を「（続き）」の見出しで分ける。
+    """
+    from export.formats import _estimate_tokens
+
+    info, _, extraction = standard
+    rows = [[f"部位{i}", "目視", "○", "異常なし。次回も同じ手順で確認すること"] for i in range(1, 41)]
+    extraction["fields"].insert(5, _table_field({"columns": ["点検部位", "方法", "判定", "所見"], "rows": rows},
+                                                name="checks", display="点検結果"))
+    refresh_summary(extraction)
+    md = build_markdown(_doc(info), extraction)
+
+    identifier = "R2026-00123／EQ-001 CMP装置／2026-09-14"
+    heads = [ln for ln in md.split("\n") if ln.startswith("## ")]
+    assert len(heads) > 1 and all(identifier in h for h in heads)
+    assert f"## 点検結果（続き）（{identifier}）" in md
+    # 見出しから次の見出しまでは固定窓に収まる（＝どの断片にも識別子付きの見出しが入る）
+    assert all(_estimate_tokens(part) < 1200 for part in md.split("\n## ")[1:])
+    # 行は1つも落ちず、順番も変わらない
+    assert all(f"- 点検部位: 部位{i}／" in md for i in range(1, 41))
+    assert md.index("部位1／") < md.index("部位40／") and "|" not in md

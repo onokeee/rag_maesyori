@@ -11,9 +11,7 @@
       色分けで、見出し・データ・小計・注記・除外される行を確かめてください。行番号をクリックすると見出し行やデータの終わりを指定できます。</p>
   </div>
   <div class="btn-row">
-    {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=imp.id),
-        "この取り込みを削除します。アップロードしたファイルも消えます（取り込み設定は残ります）。元に戻せません。",
-        label="この取り込みを削除", small=False, next=url_for('tables.new')) }}
+    {{ ui.table_import_delete_form(imp, next=url_for('tables.new'), label="この取り込みを削除", small=False) }}
   </div>
 </div>
 

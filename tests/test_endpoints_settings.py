@@ -96,7 +96,8 @@ def test_saving_the_template_editor_unchanged_keeps_json_only_settings(app, clie
     assert after["markdown"]["summaries"] == before["markdown"]["summaries"]
     assert after["markdown"]["dataset_card"] is False
     assert after["markdown"]["title_columns"] == ["equipment_name", "symptom"]
-    assert after["header"]["search_rows"] == 50 and after["header"]["anchors"] == ["管理No"]
+    # search_rows は判定に使っていないので読み捨てる（R6-T-04）。anchors は残る
+    assert "search_rows" not in after["header"] and after["header"]["anchors"] == ["管理No"]
     assert after["custom_stages"] == before["custom_stages"]
     assert after["log_stage"] == before["log_stage"]
     assert after["period"]["grain"] == "month"

@@ -94,7 +94,8 @@
     {{ more_note(hidden.forms_working) }}
   {% endcall %}
 
-  {% call ui.card("作業中の一覧表", subtitle="読み込み前・読み込み中・確認中のもの") %}
+  {# 副題は views/__init__.py の TABLE_IMPORT_ACTIVE に出てくる状態をすべて並べる（tests/test_ui_fixes6.py で確認） #}
+  {% call ui.card("作業中の一覧表", subtitle="読み込み前・読み込み中・確認中・確定処理中・失敗のもの") %}
     {% if tables_working %}
     <ul class="list-plain list-rows">
       {% for t in tables_working %}
@@ -104,11 +105,7 @@
           <span class="item-sub">{{ t.template_name or "取り込み設定未選択" }} ・ {{ (t.updated_at or t.created_at or "") | replace("T", " ") }}</span>
         </div>
         <div class="cluster">{{ ui.badge(t.status) }}<a class="btn small" href="{{ t.href }}">続きを開く</a>
-          {% if t.status not in ("reading", "confirming") %}
-            {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=t.id),
-                 "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。",
-                 label="削除", next=url_for('home.index')) }}
-          {% endif %}</div>
+          {{ ui.table_import_delete_form(t, next=url_for('home.index')) }}</div>
       </li>
       {% endfor %}
     </ul>
@@ -204,9 +201,7 @@
         <a class="btn small" href="{{ url_for('tables.download_zip', import_id=t.id) }}"
            data-confirm="ダウンロードすると、この取り込みのデータはこのPCから消えます。もう一度ダウンロードすることはできません。"
            data-confirm-ok="ダウンロードして消す">zipをダウンロード</a>
-        {{ ui.confirm_delete_form(url_for('tables.delete_import', import_id=t.id),
-             "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。",
-             label="削除", next=url_for('home.index')) }}
+        {{ ui.table_import_delete_form(t, next=url_for('home.index')) }}
       </li>
       {% endfor %}
     </ul>

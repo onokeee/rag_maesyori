@@ -175,8 +175,10 @@
           const res = await postJson(editor.dataset.saveUrl, collect());
           window.location.href = res.redirect;
         } catch (e) {
-          errors.replaceChildren(el("li", { text: e.message }));
-          toast(e.message, "err");
+          // 問題が複数あれば全部並べる（1件だけ直して保存し直す、を繰り返さずに済む）
+          const messages = e.errors && e.errors.length ? e.errors : [e.message];
+          errors.replaceChildren(...messages.map((m) => el("li", { text: m })));
+          toast(messages.length > 1 ? `${messages.length}件の問題があります` : messages[0], "err");
           button.disabled = false;
         }
       });
@@ -277,8 +279,10 @@
       concurrency: Number(aiPage.querySelector("[data-run-concurrency]")?.value || 1),
     });
 
-    aiPage.querySelector("[data-estimate-run]")?.addEventListener("click", async () => {
+    aiPage.querySelector("[data-estimate-run]")?.addEventListener("click", async (event) => {
+      const button = event.currentTarget;  // await のあとでは event.currentTarget が null になる
       const out = aiPage.querySelector("[data-estimate]");
+      button.disabled = true;
       out.textContent = "見積もっています…";
       try {
         const r = await postJson(aiPage.dataset.estimateUrl, { ...runOptions(), trials });
@@ -288,6 +292,8 @@
       } catch (e) {
         out.textContent = "";
         toast(e.message, "err");
+      } finally {
+        button.disabled = false;
       }
     });
 

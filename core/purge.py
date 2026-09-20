@@ -27,12 +27,16 @@ log = logging.getLogger(__name__)
 # 取り込み1件を指す外部キーの列名（この列を持つ表は、その取り込みと一緒に消す）
 DOCUMENT_REF_COLUMNS = ("document_id",)
 IMPORT_REF_COLUMNS = ("import_id", "table_import_id")
+# 取り込みを指す列があっても、まとめては消さない表。llm_calls は AI の生の応答で、同じ文面の行なら
+# 別の取り込みの ai_items が同じ応答を使っていることがある（消すと再実行で再課金になる）。
+# 持ち主が消えた分は _delete_orphan_llm_calls が「参照されていなければ消す」で扱う。
+SHARED_TABLES = ("llm_calls",)
 
 
 def _tables_with_column(db, column: str) -> list[str]:
     names = []
     for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
-        if table.startswith("sqlite_"):
+        if table.startswith("sqlite_") or table in SHARED_TABLES:
             continue
         if column in {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}:
             names.append(table)
@@ -52,6 +56,8 @@ def _delete_jobs(db, ref_type: str, ref_id: int) -> int:
 
 
 _UNREFERENCED_LLM_CALLS = ("cache_key NOT IN (SELECT cache_key FROM ai_items WHERE cache_key IS NOT NULL)")
+# 持ち主の取り込みがもう無い応答（持ち主の分からない古いDBの分＝NULL も含む）
+NO_LIVE_OWNER = "(import_id IS NULL OR import_id NOT IN (SELECT id FROM table_imports))"
 
 
 def _ai_work_alive(db) -> bool:
@@ -60,7 +66,8 @@ def _ai_work_alive(db) -> bool:
     ai_items が覚えているのは最後に使った応答のキーだけで、再依頼で直した行の1回目の応答や、
     一時停止の直前に受け取った応答（ai_items の行がまだ無い）は、どこからも参照されない。
     それでも再実行・再開ではキャッシュとして引く（引けないと再課金になる）ので、
-    AI整形が残っている取り込みがある間は、参照されない応答を「持ち主なし」とみなして消さない。
+    AI整形が残っている取り込みがある間は、持ち主の分からない（import_id が NULL の古いDBの）
+    参照されない応答を消さない。持ち主の分かる応答は、その取り込みを消すときに一緒に消える。
     """
     return db.execute(
         "SELECT 1 FROM ai_items WHERE import_id IN (SELECT id FROM table_imports) "
@@ -71,16 +78,31 @@ def _ai_work_alive(db) -> bool:
 def _delete_orphan_llm_calls(db, keys=()) -> int:
     """どの ai_items からも参照されていない AI の生の応答を消す（試し実行の分もここで消える）。
 
-    keys: 消した取り込みが使っていた応答のキー。ほかの行が使っていなければ、いつでもすぐ消す。
-    それ以外の参照されない応答は、AI整形が残っている取り込みが1件も無いときだけ消す（_ai_work_alive）。
+    keys: 消した取り込みが使っていた応答のキー。ほかの行が使っておらず、まだある取り込みが払った分でも
+    なければ、いつでもすぐ消す。消す取り込みは、別の取り込みが払った応答をキャッシュとして引いている
+    ことがある（同じ文面なら同じキーになる）ので、払った取り込みがまだあるうちは消さない
+    （消すと、その取り込みの再開・再実行で同じ応答をもう一度買うことになる）。その応答は、払った
+    取り込みを消すときに下の「持ち主の取り込みがもう無い分」で消えるので、残り続けることはない。
+    もう無い取り込みが払った応答（llm_calls.import_id）も、ほかから使われていなければすぐ消す。
+    ai_items は最後に使った応答のキーしか覚えていないので、再依頼で直した行の1回目の応答や、
+    一時停止の直前に受け取った応答は keys に入らない。持ち主の列があれば、それも一緒に消せる。
+    持ち主の分からない応答（古いDBの分）は、AI整形が残っている取り込みが1件も無いときだけ消す（_ai_work_alive）。
     """
     removed = 0
     keys = sorted({k for k in keys if k})
     for start in range(0, len(keys), 500):
         chunk = keys[start:start + 500]
         marks = ", ".join("?" for _ in chunk)
-        removed += db.execute(f"DELETE FROM llm_calls WHERE cache_key IN ({marks}) AND {_UNREFERENCED_LLM_CALLS}",
-                              chunk).rowcount
+        removed += db.execute(f"DELETE FROM llm_calls WHERE cache_key IN ({marks}) "
+                              f"AND {NO_LIVE_OWNER} AND {_UNREFERENCED_LLM_CALLS}", chunk).rowcount
+    # 持ち主の取り込みがもう無い分（design.md 3.3「取り込んだデータはダウンロードが終わった時点で消す」）
+    removed += db.execute(f"DELETE FROM llm_calls WHERE import_id IS NOT NULL "
+                          f"AND import_id NOT IN (SELECT id FROM table_imports) "
+                          f"AND {_UNREFERENCED_LLM_CALLS}").rowcount
+    # まだ使われていて残した分は、持ち主が居なくなったので「持ち主なし」に戻す
+    # （使っている取り込みを消すときに、その keys で消える）
+    db.execute("UPDATE llm_calls SET import_id = NULL WHERE import_id IS NOT NULL "
+               "AND import_id NOT IN (SELECT id FROM table_imports)")
     if not _ai_work_alive(db):
         removed += db.execute(f"DELETE FROM llm_calls WHERE {_UNREFERENCED_LLM_CALLS}").rowcount
     return removed

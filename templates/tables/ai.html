@@ -41,7 +41,9 @@
 
 {% if not ai_ready %}
 <div class="notice" role="note">AI接続が設定されていません。<a href="{{ url_for('settings.ai') }}">AI接続</a>を設定すると、試し実行と全件実行ができます。AI整形をしなくても Markdown は作れます。</div>
-{% else %}
+{% endif %}
+
+{% if ai_ready %}
 {% call ui.card("2. 試し実行（10行）", "先頭の10行を1行ずつAIに送り、抜き出した項目と Markdown を確かめます。結果は保存され、全件実行でも使われます。") %}
   <p class="hint">モデル: {{ model }}{% if external %}（外部のAIサービス）{% else %}（このPC・社内のサーバー）{% endif %}</p>
   {% if external %}<label class="check"><input type="checkbox" data-trial-external> 試し実行の10行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
@@ -49,7 +51,10 @@
   <p class="progress-text" data-trial-status aria-live="polite"></p>
   <div data-trial-result></div>
 {% endcall %}
+{% endif %}
 
+{# AI接続が外れていても、動いているジョブがある間は進み具合と［中止］を出す（中止できないと取り込みが詰む） #}
+{% if ai_ready or job %}
 {% call ui.card("3. 全件実行") %}
   {% if counts %}
   <p class="hint">これまでの結果: {% for status, n in counts.items() %}{{ item_labels.get(status, status) }} {{ n }}件{% if not loop.last %}／{% endif %}{% endfor %}</p>
@@ -63,7 +68,9 @@
     <p class="hint">先に動いている<a href="{{ url_for('tables.ai', import_id=waiting.ref_id) }}">別の取り込みのAI整形</a>が終わると始まります。</p>
     {% endif %}
     {% if job_active %}
+    {% if not ai_ready %}<p class="hint">AI接続が外れているため実行・再開はできません。中止してから進んでください。</p>{% endif %}
     <div class="btn-row">
+      {% if ai_ready %}
       {% if job.status == 'paused' or job.pause_requested %}
       {# 一時停止を頼んだ直後は、送信中の呼び出しを待つ間まだ「実行中」。そのときも再開を出す #}
       <form method="post" action="{{ url_for('tables.ai_control', import_id=imp.id, action='resume') }}" class="inline"><button class="btn">再開</button></form>
@@ -71,11 +78,12 @@
       {% else %}
       <form method="post" action="{{ url_for('tables.ai_control', import_id=imp.id, action='pause') }}" class="inline"><button class="btn">一時停止</button></form>
       {% endif %}
+      {% endif %}
       <form method="post" action="{{ url_for('tables.ai_control', import_id=imp.id, action='cancel') }}" class="inline" data-confirm="AI整形を中止します。保存済みの行の結果は残ります。" data-confirm-ok="中止する"><button class="btn danger-outline">中止</button></form>
     </div>
     {% endif %}
   {% endif %}
-  {% if not job_active %}
+  {% if ai_ready and not job_active %}
   <div class="grid-3">
     <label>範囲
       <select class="input" data-run-scope>

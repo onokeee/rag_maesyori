@@ -14,7 +14,7 @@ from datetime import date
 
 from core.mdtext import escape_md_line, estimate_tokens, join_blocks, md_bullet
 from core.naming import LIGHTRAG_HINT_RECORDS, hint_chunk_tokens, md_filename
-from tables.spec import TableSpec
+from tables.spec import TableSpec, base_date_from
 from tables.summaries import (
     category_column, dataset_counts, entity_columns, entity_display, entity_fiscal_year_summaries, entity_value,
     fmt_measure, fmt_number, is_month, measure_columns, month_first_day, month_label, month_last_day, month_summaries,
@@ -53,11 +53,8 @@ def people_index_for(spec: TableSpec, records: list[dict]):
 
 
 def _base_date(values: dict, spec: TableSpec) -> date | None:
-    s = str(values.get(spec.date_key) or "")[:10]
-    try:
-        return date.fromisoformat(s)
-    except ValueError:
-        return None
+    # AI整形（aiproc.runner）と同じ探し方にする。片方だけ日付が出て md が「年不明」になるのを防ぐ
+    return base_date_from(values, spec)
 
 
 def parse_log_cell(spec: TableSpec, values: dict, people=None):

@@ -43,21 +43,24 @@ def _forms_ready(limit: int) -> list[dict]:
         row["href"] = form_link(row)
         # 修正中なら「確定し直していない変更は入らずに消える」ことを確認文で先に伝える
         row["download_confirm"] = delete_confirm(row)
-        row["save_confirm"] = save_confirm(row)
         batch_id = row.get("batch_id") or ""
-        if not batch_id:
+        if batch_id and batch_id in seen:
+            continue
+        docs = database.list_batch_documents(batch_id) if batch_id else []
+        if len(docs) <= 1:
+            # まとまりに帳票が1件しか残っていなければ、ただの帳票として1行で出す
+            # （zip も「残りの帳票」も無いので、まとまりの文言はどれも嘘になる）
+            row["save_confirm"] = save_confirm(row, batch_member=False)
             items.append({"doc": row})
             continue
-        if batch_id in seen:
-            continue
         seen.add(batch_id)
-        docs = database.list_batch_documents(batch_id)
         ready = [d for d in docs if d["state"] in READY_STATES]
         for d in ready:
             d["href"] = form_link(d)
             d["modified_note"] = ("この帳票は修正中です。確定し直していない変更は Markdown に入らず、消えます。"
                                   if d["state"] == "modified" else "")
-            d["save_confirm"] = save_confirm(d)   # まとまりの1件だけ保存するときの文（forms と同じ文言）
+            # まとまりの1件だけ保存するときの文（forms と同じ文言）
+            d["save_confirm"] = save_confirm(d, batch_member=True)
         items.append({"batch": {"id": batch_id, "total": len(docs), "confirmed": len(ready),
                                 "all_confirmed": len(ready) == len(docs), "docs": ready,
                                 "zip_confirm": batch_zip_confirm(docs),

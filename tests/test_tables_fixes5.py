@@ -131,7 +131,6 @@ _COL = {"key": "a", "header": "a", "display": "a", "type": "string", "role": "at
     ({"columns": [_COL], "custom_stages": [{"id": "s", "inputs": 7}]}, "入力列「7」"),
     ({"columns": [_COL], "header": {"rows": "二"}}, "header.rows"),
     ({"columns": [_COL], "header": {"rows": 0}}, "header.rows"),
-    ({"columns": [_COL], "header": {"search_rows": None}}, "header.search_rows"),
 ])
 def test_malformed_spec_fields_become_japanese_errors(extra, message):
     errors = validate_spec(spec_from_dict({"name": "x", **extra}))
@@ -255,6 +254,18 @@ def test_far_stray_header_cell_does_not_widen_the_table(tmp_path):
     layout = guess_layout(source, "S")
     assert time.monotonic() - started < 10
     assert len(layout.headers) == 5 and any("XFD" in w for w in layout.warnings)
+
+
+def test_far_last_cell_in_a_near_column_does_not_pad_every_row(tmp_path):
+    from tables.source import open_source
+
+    # 256列目（PAD_MAX_COLUMNS 以下）の遠いセル。行×列で埋めると100秒近くかかっていた
+    path = _far_book(tmp_path / "far3.xlsx", "IV1048576", 20)
+    started = time.monotonic()
+    source = open_source(path, path.name)
+    widths = {len(row.cells) for row in source.rows("S")}
+    assert time.monotonic() - started < 15
+    assert widths == {0, 5, 256}
 
 
 def test_far_last_cell_upload_finishes_and_reads_the_table(app, client, tmp_path):

@@ -6,6 +6,7 @@ from excel.extractor import extract_document
 from excel.tables import section_of, sections_of
 from excel.workbook import load_workbook_info
 from models import database as db
+from pattern.builder import suggest_rows
 from pattern.forms import _section_value
 from pattern.model import FieldDef, PatternDef, SheetDef
 from tests.test_forms_fixes import _confirmed_doc
@@ -177,3 +178,54 @@ def test_saving_a_single_form_keeps_the_usual_result(app, client, out_dir):  # n
     assert "この帳票だけがまとまりから消えます" not in client.get(f"/forms/{doc_id}").get_data(as_text=True)
     page = client.post(f"/forms/{doc_id}/save-to-folder").get_data(as_text=True)
     assert "このアプリからはデータを消しました" in page and "次の帳票へ" not in page
+
+
+# ---- R6-F2: 1件だけになったまとめ取り込み -------------------------------------------------------
+
+def test_a_batch_left_with_one_form_is_no_longer_a_batch(app, client, out_dir):  # noqa: F811
+    """取り込み失敗・削除で帳票が1件だけになったまとまりは、1件の帳票として扱う。
+
+    「残りの帳票はまとまりに残ります」「zip は残りの帳票だけになります」はどれも嘘になるため。
+    """
+    import html
+
+    _set_folder(client, out_dir)
+    first = _confirmed_doc(app, "1.xlsx", batch_id="B9", order=0)
+    second = _confirmed_doc(app, "2.xlsx", batch_id="B9", order=1)
+    page = html.unescape(client.get(f"/forms/{first}/done").get_data(as_text=True))
+    assert "残りの帳票はまとまりに残ります" in page and "zip" in page
+
+    client.post(f"/forms/{second}/delete")
+    page = html.unescape(client.get(f"/forms/{first}/done").get_data(as_text=True))
+    assert "残りの帳票はまとまりに残ります" not in page
+    assert "まとめ取り込み" not in page and "zip" not in page
+    assert "保存先フォルダに保存すると、この帳票のデータはこのPCのアプリから消えます" in page
+
+    home = html.unescape(client.get("/").get_data(as_text=True))
+    assert "まとめ取り込み" not in home and "zip" not in home
+    assert "残りの帳票はまとまりに残ります" not in home
+    assert "まとまりから消えます" not in home
+
+
+# ---- R6-B1: 見出しからは日付と分からない欄（「発生」）の型 ----------------------------------------
+
+def test_a_date_value_under_a_non_date_label_becomes_a_date_field(tmp_path):
+    """値が日付だけで書かれていれば日付型にする（文字列のままだと md の日付の書き方が混ざる）。"""
+    from pattern.builder import _guess_type
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "報告書"
+    _label(ws, "A1", "発生", "B1", "2024年7月28日 22:46")
+    _label(ws, "A2", "復旧", "B2", "R5.11.16")
+    path = tmp_path / "occurred.xlsx"
+    wb.save(path)
+    types = {r["display_name"]: r["data_type"] for r in suggest_rows([load_workbook_info(path)])[1]}
+    assert types["発生"] == "date" and types["復旧"] == "date"
+
+    # 日付を含むだけの値・年の無い値・識別番号は日付にしない
+    assert _guess_type("R2026-00123", "報告No") == "string"
+    assert _guess_type("2026-09-14-3", "ロットNo") == "string"
+    assert _guess_type("2026-09-14 に復旧", "処置") == "string"
+    assert _guess_type("2/12", "発生") == "string"
+    assert _guess_type("12:30", "発生") == "string"
