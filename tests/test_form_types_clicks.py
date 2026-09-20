@@ -187,6 +187,36 @@ def test_the_name_comes_from_the_file_name_and_can_be_changed(app, client, tmp_p
     assert res.status_code == 400 and "名前を入れてください" in res.get_json()["error"]
 
 
+def test_a_field_label_can_be_typed_by_hand(app, client, tmp_path):
+    """読み取る項目の見出しは手で直せる。直るのは書き出す名前だけで、探す見出しとセルは変えない。"""
+    pattern_id = _create(client, _book(tmp_path / "click.xlsx"))
+    with app.app_context():
+        sample_id = db.list_samples(pattern_id)[0]["id"]
+    _click(client, pattern_id, sample_id, "A1", "B1")
+    _click(client, pattern_id, sample_id, "A2", "B2")
+
+    body = client.post(f"/form-types/{pattern_id}/fields/report_id/label",
+                       data={"name": "受付番号", "sample": sample_id}).get_json()
+    assert body["message"] == "見出しを「受付番号」にしました"
+    assert "- 受付番号: R-001" in body["html"]      # 読み取りテストの Markdown に新しい名前で書き出す
+    with app.app_context():
+        field = db.load_pattern(pattern_id).fields[0]
+    assert field.display_name == "受付番号"
+    assert field.candidates[0] == "報告番号" and field.cell == "B1"   # 探す先は変わらない
+
+    # 開き直しても直した見出しのまま。見本での書き方は「探す見出し」として残る
+    panel = _panel(client, pattern_id)
+    assert 'value="受付番号"' in panel and "探す見出し: 報告番号" in panel
+
+    # ほかの項目が書き出す名前とは重ねられない（空の見出しも断る）。どちらも元の見出しのまま残る
+    res = client.post(f"/form-types/{pattern_id}/fields/report_id/label", json={"name": "設備番号"})
+    assert res.status_code == 400 and "ほかの項目が使っています" in res.get_json()["error"]
+    assert client.post(f"/form-types/{pattern_id}/fields/report_id/label", json={"name": " "}).status_code == 400
+    with app.app_context():
+        assert [f.display_name for f in db.load_pattern(pattern_id).fields] == ["受付番号", "設備番号"]
+    assert client.post(f"/form-types/{pattern_id}/fields/zzz/label", json={"name": "x"}).status_code == 404
+
+
 def test_a_field_found_by_its_cell_when_the_label_is_missing(app, client, tmp_path):
     """見出しの無い「値だけ」の項目は、見本でクリックしたセルの番地から読む。"""
     path = _book(tmp_path / "click.xlsx")

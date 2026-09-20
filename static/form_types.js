@@ -167,6 +167,32 @@
     catch (e) { toast(e.message, "err"); }
   });
 
+  // ---- 読み取る項目の見出しを直す（入力欄から離れる／Enter で保存、Escape で戻す） ----
+  // 直るのは Markdown に書く名前だけ。探す見出しと読み取るセルはクリックしたときのまま
+  page.addEventListener("keydown", (event) => {
+    const input = event.target.closest("[data-field-label]");
+    if (!input) return;
+    if (event.key === "Enter" || event.key === "Escape") {
+      event.preventDefault();
+      if (event.key === "Escape") input.value = input.dataset.saved || "";
+      input.blur();
+    }
+  });
+
+  page.addEventListener("focusout", async (event) => {
+    const input = event.target.closest("[data-field-label]");
+    if (!input) return;
+    const was = input.dataset.saved || "";
+    const value = input.value.trim();
+    if (!value || value === was) { input.value = was; return; }
+    const root = input.closest("#cellBuilder");
+    const data = new FormData();
+    data.append("name", value);
+    data.append("sample", (root && root.dataset.sample) || "");
+    try { apply(await postForm(input.dataset.fieldLabel, data)); }
+    catch (e) { input.value = was; toast(e.message, "err"); }
+  });
+
   // ---- 名前を直す（入力欄から離れたら保存） ----
   page.addEventListener("focusout", async (event) => {
     const input = event.target.closest("[data-rename]");

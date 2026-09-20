@@ -293,6 +293,35 @@ def delete_field(pattern_id: int, field_name: str):
                    list_html=_list_html(), message="項目を削除しました")
 
 
+@bp.post("/<int:pattern_id>/fields/<field_name>/label")
+def rename_field(pattern_id: int, field_name: str):
+    """読み取る項目の見出しを手で直す（fetch）。
+
+    直すのは Markdown に書き出す名前だけ。探す見出し（クリックしたときの見出しの言葉）と
+    読み取るセルはそのままにする。書き出す名前は項目どうしで重ならないようにする。
+    """
+    pattern = _get_pattern(pattern_id)
+    payload = request.get_json(force=True, silent=True) or {}
+    name = " ".join(str(payload.get("name") or request.form.get("name", "")).split())
+    if not name:
+        return jsonify(error="見出しを入れてください"), 400
+    sheet_rows, field_rows = pattern_to_rows(pattern)
+    target = next((r for r in field_rows if r["field_name"] == field_name), None)
+    if target is None:
+        abort(404)
+    if any(r["display_name"] == name for r in field_rows if r is not target):
+        return jsonify(error=f"「{name}」はほかの項目が使っています。別の見出しにしてください"), 400
+    # 探す見出しを持たない項目（見出しのない表など）は、書き出す名前をそのまま探していた。
+    # 書き替えで探す先が変わらないよう、いまの見出しを探す見出しとして控えてから名前を変える
+    if not target["candidates"] and not target["cell"]:
+        target["candidates"] = target["display_name"]
+    target["display_name"] = name
+    _save_rows(pattern, sheet_rows, field_rows)
+    sample = payload.get("sample") or request.form.get("sample")
+    return jsonify(html=_build_html(pattern_id, int(sample) if str(sample or "").isdigit() else None),
+                   list_html=_list_html(), message=f"見出しを「{name}」にしました")
+
+
 @bp.post("/<int:pattern_id>/name")
 def rename(pattern_id: int):
     pattern = _get_pattern(pattern_id)

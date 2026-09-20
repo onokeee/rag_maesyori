@@ -61,6 +61,7 @@
         {% if not rows %}
           <p class="muted">まだ項目がありません。左のシートで、読み取りたい欄の見出しと値をクリックしてください。</p>
         {% else %}
+        <p class="hint">見出しはクリックすると手で直せます。直るのはMarkdownに書く名前だけで、シートの読み取る場所は変わりません。</p>
         <div class="table-wrap">
         <table class="table compact">
           <thead><tr><th>見出し</th><th>見本での値</th><th></th></tr></thead>
@@ -68,9 +69,12 @@
           {% for r in rows %}
             <tr data-field="{{ r.field.field_name }}" data-sheet="{{ r.sheet or '' }}"
                 data-label-cell="{{ r.label_cell or '' }}" data-value-cell="{{ r.value_cell or '' }}">
-              <th scope="row">{{ r.field.display_name }}
-                {% if r.label != r.field.display_name %}<br><small class="muted">{{ r.label }}</small>{% endif %}
-                {% if r.field.data_type == 'table' %}<br><small class="muted">表（1行＝1明細）</small>{% endif %}</th>
+              <th scope="row">
+                <input class="name-edit" value="{{ r.field.display_name }}" data-saved="{{ r.field.display_name }}"
+                       aria-label="見出し（Markdownに書く名前）"
+                       data-field-label="{{ url_for('form_types.rename_field', pattern_id=pattern.id, field_name=r.field.field_name) }}">
+                {% if r.label != r.field.display_name %}<small class="muted">探す見出し: {{ r.label }}</small>{% endif %}
+                {% if r.field.data_type == 'table' %}<small class="muted">表（1行＝1明細）</small>{% endif %}</th>
               <td>
                 {% if r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
                 {% else %}<span class="pre">{{ r.value | field_text | truncate(120) }}</span>{% if r.field.unit %} {{ r.field.unit }}{% endif %}{% endif %}

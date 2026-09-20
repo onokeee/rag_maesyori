@@ -366,6 +366,18 @@ fieldset.plain > legend { font-size: .95rem; font-weight: 700; color: var(--text
 .build-top { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-4); }
 .build-top .input { min-width: 16rem; }
 
+/* 読み取る項目の見出し（その場で手打ちで直せる。ふだんは文字に見せて、触ると入力欄に見せる） */
+.name-edit {
+  width: 100%; min-width: 6rem; font: inherit; font-weight: 600; color: inherit;
+  padding: .15rem .3rem; border: 1px solid transparent; border-radius: 4px; background: transparent;
+}
+.name-edit:hover { border-color: var(--border-strong); background: var(--surface); }
+.name-edit:focus {
+  border-color: var(--focus); background: var(--surface);
+  outline: 3px solid rgba(47, 125, 225, .3); outline-offset: 0;
+}
+.table th .name-edit + small { display: block; font-weight: normal; }
+
 /* 段の中で動いている処理の進み具合（同じ画面に出す。別画面には移らない） */
 .step-working { display: flex; align-items: center; gap: var(--sp-2); color: var(--muted); font-size: .9rem; }
 .step-working[hidden] { display: none; }
