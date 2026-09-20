@@ -378,11 +378,21 @@ def _m10_drop_unused(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE table_imports DROP COLUMN period_json")
 
 
+def _m11_document_touch(conn: sqlite3.Connection) -> None:
+    """帳票に「最後にさわった時刻」を持たせる（見回りが作業中の帳票を消さないように）。
+
+    一覧表（table_imports）は updated_at を持っていて、design.md 3.3 の「2時間さわられて
+    いないものを捨てる」どおりに動く。帳票だけ取り込んだ時刻で切られていた。
+    """
+    _add_column(conn, "documents", "updated_at", "TEXT")
+    conn.execute("UPDATE documents SET updated_at = COALESCE(confirmed_at, created_at) WHERE updated_at IS NULL")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
                                                           _m5_purge_scope, _m6_ai_items_per_import,
                                                           _m7_llm_calls_owner, _m8_session_scope, _m9_import_spec,
-                                                          _m10_drop_unused]
+                                                          _m10_drop_unused, _m11_document_touch]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -511,6 +521,7 @@ def _field_def(row: dict) -> FieldDef:
     fd.sheet_name = rule.get("sheet_name") or ""
     fd.label_cell = rule.get("label_cell") or ""
     fd.cell = rule.get("cell") or ""
+    fd.renamed = bool(rule.get("renamed"))
     return fd
 
 
@@ -527,6 +538,8 @@ def _extraction_rule(f: FieldDef) -> dict:
         value = getattr(f, key, "") or ""
         if value:
             rule[key] = value
+    if getattr(f, "renamed", False):
+        rule["renamed"] = 1   # 見出しを手で直した項目
     return rule
 
 
@@ -631,8 +644,8 @@ def create_document(file_name: str, file_hash: str, stored_path: str, pattern_id
     """帳票を1件作る。session_id は取り込んだブラウザ（views.current_session_id）。"""
     return _exec(
         "INSERT INTO documents (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, session_id, "
-        "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, session_id, now()),
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, session_id, now(), now()),
     )
 
 
@@ -694,14 +707,16 @@ def list_confirmed_documents(ids: list[int] | None = None, session_id: str | Non
 def save_draft(doc_id: int, data_json, title: str | None = None) -> None:
     """作業中の値を保存する（dict も可）。title は検索用（タイトル項目の値）。"""
     if title is None:
-        _exec("UPDATE documents SET data_json = ? WHERE id = ?", (_dumps(data_json), doc_id))
+        _exec("UPDATE documents SET data_json = ?, updated_at = ? WHERE id = ?",
+              (_dumps(data_json), now(), doc_id))
     else:
-        _exec("UPDATE documents SET data_json = ?, title = ? WHERE id = ?", (_dumps(data_json), title, doc_id))
+        _exec("UPDATE documents SET data_json = ?, title = ?, updated_at = ? WHERE id = ?",
+              (_dumps(data_json), title, now(), doc_id))
 
 
 def confirm_document(doc_id: int, title: str | None = None) -> bool:
     """作業中の値を確定済みの版にする。読み取り前（data_json なし）なら False。"""
-    sets, args = ["confirmed_json = data_json", "confirmed_at = ?"], [now()]
+    sets, args = ["confirmed_json = data_json", "confirmed_at = ?", "updated_at = ?"], [now(), now()]
     if title is not None:
         sets.append("title = ?")
         args.append(title)
@@ -714,8 +729,8 @@ def confirm_document(doc_id: int, title: str | None = None) -> bool:
 
 def reset_document(doc_id: int, pattern_id: int | None, data_json) -> None:
     """選び直して再読み取り：作業中の値を置き換える（確定済みの版は残る→修正中になる）。"""
-    _exec("UPDATE documents SET pattern_id = ?, data_json = ? WHERE id = ?",
-          (pattern_id, None if data_json is None else _dumps(data_json), doc_id))
+    _exec("UPDATE documents SET pattern_id = ?, data_json = ?, updated_at = ? WHERE id = ?",
+          (pattern_id, None if data_json is None else _dumps(data_json), now(), doc_id))
 
 
 def find_confirmed_by_hash(file_hash: str, exclude_id: int | None = None,

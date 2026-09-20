@@ -3,7 +3,7 @@
 
 {% if items | length > 1 %}
 <div class="batch-bar" data-batch-bar>
-  <p class="batch-bar-text" data-batch-text aria-live="polite">{{ items | length }}件中{{ confirmed }}件を確定しました</p>
+  <p class="batch-bar-text" data-batch-text>{{ items | length }}件中1件目を表示中</p>
   <span class="spacer"></span>
   <button type="button" class="btn small" data-next-doc>次の帳票へ</button>
 </div>

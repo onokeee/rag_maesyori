@@ -42,7 +42,9 @@ def match_pattern(info: WorkbookInfo, pattern: PatternDef) -> PatternMatch:
     if pattern.sheets:
         name_scores = []
         for sd in pattern.sheets:
-            best = max(
+            # 名前がそのまま同じシートがあれば、そのシートにする。項目の数で競わせると、
+            # 項目の少ない2枚目のシート（別紙など）が1枚目に負けて選ばれず、読まれなくなる
+            best = next((n for n in info.grids if _sheet_name_score(sd.sheet_name, n) == 1.0), None) or max(
                 info.grids,
                 key=lambda n: _sheet_name_score(sd.sheet_name, n) * 0.5 + len(found_by_sheet[n]) / total,
                 default=None,

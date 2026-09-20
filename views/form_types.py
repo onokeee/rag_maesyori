@@ -288,9 +288,15 @@ def delete_field(pattern_id: int, field_name: str):
         abort(404)
     kept = {r["sheet_name"] for r in rest if r["sheet_name"]}
     sheet_rows = [s for s in sheet_rows if not kept or s["sheet_name"] in kept]
-    _save_rows(pattern, sheet_rows, rest)
+    # 読み取る項目が無くなった使用中の種類は、使用を停止する。そのままだと帳票取り込みの候補に出て、
+    # 中身の無い Markdown ができてしまう（［使用開始］も同じ決まりで断っている）
+    stopped = not rest and pattern.status == "active"
+    _save_rows(pattern, sheet_rows, rest, status="inactive" if stopped else None)
+    message = "項目を削除しました"
+    if stopped:
+        message += "。読み取る項目が無くなったので、この種類の使用を停止しました（帳票取り込みの候補に出なくなります）"
     return jsonify(html=_build_html(pattern_id, request.form.get("sample", type=int)),
-                   list_html=_list_html(), message="項目を削除しました")
+                   list_html=_list_html(), message=message)
 
 
 @bp.post("/<int:pattern_id>/fields/<field_name>/label")
@@ -316,6 +322,7 @@ def rename_field(pattern_id: int, field_name: str):
     if not target["candidates"] and not target["cell"]:
         target["candidates"] = target["display_name"]
     target["display_name"] = name
+    target["renamed"] = True   # このあと別の欄をクリックしても、手で付けた見出しに戻さない
     _save_rows(pattern, sheet_rows, field_rows)
     sample = payload.get("sample") or request.form.get("sample")
     return jsonify(html=_build_html(pattern_id, int(sample) if str(sample or "").isdigit() else None),
@@ -334,13 +341,17 @@ def rename(pattern_id: int):
     return jsonify(ok=True, list_html=_list_html(), message="名前を変えました")
 
 
-def _save_rows(pattern: PatternDef, sheet_rows: list[dict], field_rows: list[dict], name: str | None = None) -> None:
-    """状態は変えずに保存する（使用開始は［使用開始］を押したときだけ）。タイトル項目は自動で決める。"""
+def _save_rows(pattern: PatternDef, sheet_rows: list[dict], field_rows: list[dict], name: str | None = None,
+               status: str | None = None) -> None:
+    """状態は変えずに保存する（使用開始は［使用開始］を押したときだけ）。タイトル項目は自動で決める。
+
+    status を渡したときだけ状態も変える（読み取る項目が無くなったら使用を停止する）。
+    """
     meta = pattern_to_meta(pattern)
     if name:
         meta["name"] = name
     meta["title_fields"] = suggest_title_fields(field_rows)
-    db.save_pattern(rows_to_pattern(pattern.id, meta, sheet_rows, field_rows), pattern.status)
+    db.save_pattern(rows_to_pattern(pattern.id, meta, sheet_rows, field_rows), status or pattern.status)
 
 
 # ---- 見本ファイルの追加・削除 -----------------------------------------------------------

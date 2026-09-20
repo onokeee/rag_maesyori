@@ -138,9 +138,12 @@ def test_uploading_several_forms_makes_one_batch(app, client, sample_dir):
         rows = [db.get_document(d["id"]) for d in body["docs"]]
         batch_ids = {r["batch_id"] for r in rows}
         assert len(batch_ids) == 1 and "" not in batch_ids
-    # 同じ画面で1件ずつ読み取り、最後にまとめて zip にする
-    page = _finish(client, [d["id"] for d in body["docs"]])["html"]
-    assert "確定済み <strong>0</strong> / 3 件" in page and "zip" in page
+    # 読み取る前は件数も zip のボタンも出さない（読み取れた分だけが zip に入るため）
+    ids = [d["id"] for d in body["docs"]]
+    state = _finish(client, ids)
+    assert state["total"] == 0 and state["read_yet"] is False
+    assert "確定済み" not in state["html"] and "zip" not in state["html"]
+    assert "帳票の種類とシートを選び" in state["html"]
 
 
 def test_a_single_file_upload_still_has_no_batch(app, client, sample_dir):
@@ -329,9 +332,12 @@ def test_only_the_confirmed_forms_of_a_batch_can_be_downloaded(app, client):
     with app.app_context():
         pending = db.create_document("2.xlsx", "0" * 64, "documents/2.xlsx", batch_id="B", batch_order=1)
 
-    # 画面のボタンは「残りも確定してから渡す」1つだけ。それでも zip に入るのは確定済みの分だけ
+    # まだ読み取っていない帳票は確定できない＝zip に入らないので、件数にも数えない。
+    # 「すべて消えます」とも言わず、残ることをそのまま書く
     page = _finish(client, [first, pending], current=first)["html"]
-    assert "残り1件も確定して、まとめてダウンロード（zip）" in page
+    assert "確定済み <strong>1</strong> / 1 件" in page
+    assert "まとめて Markdown をダウンロード（zip）" in page
+    assert "まだ読み取れていない1件（zip には入りません）" in page and "2.xlsx" in page
 
     res = client.get("/forms/batches/B/download.zip")
     assert res.status_code == 200 and res.mimetype == "application/zip"

@@ -63,6 +63,8 @@ class FieldDef:
     sheet_name: str = ""
     label_cell: str = ""
     cell: str = ""
+    # 見出しを手で直した項目。別の欄を足したときに、手で付けた名前へ勝手に戻さないための目印
+    renamed: bool = False
 
     def search_labels(self) -> list[str]:
         labels = [c.strip() for c in self.candidates if c.strip()] or [self.display_name]

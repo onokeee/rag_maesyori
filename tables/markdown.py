@@ -251,7 +251,7 @@ def _title_text_line(raw) -> str:
     return ""
 
 
-def record_title(values: dict, spec: TableSpec) -> str:
+def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> str:
     """見出し: 【管理No】設備名（設備番号）現象の先頭40字｜日付"""
     md = spec.markdown or {}
     pieces: list[str] = []
@@ -293,7 +293,24 @@ def record_title(values: dict, spec: TableSpec) -> str:
     date_value = values.get(spec.date_key)
     if date_value:
         title += f"｜{str(date_value)[:10]}"
-    return _one_line(title) or "（見出しなし）"
+    title = _one_line(title)
+    if title:
+        return title
+    # 見出しの材料が何も無い表（識別番号・設備・長文・日付のどれも無い）。全部の記録が同じ見出しに
+    # なると RAG のチャンクを見分けられないので、先頭のほうの列の値をつないで見出しにする
+    parts: list[str] = []
+    for col in spec.columns:
+        if _is_hidden(col, spec) or col.type == "text":
+            continue
+        text = _one_line(str(values.get(col.key) or ""))
+        if text:
+            parts.append(_clip_title_text(text, 20))
+        if len(parts) >= 3:
+            break
+    if parts:
+        return " ".join(parts)
+    row = (source or {}).get("row")
+    return f"{row}行目の記録" if row else "（見出しなし）"
 
 
 def record_blocks(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None) -> list[list[str]]:
@@ -318,7 +335,7 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
     """1件分の行と、分けたときに書き直す行（管理No・設備・日付）。"""
     values = record.get("values", {}) or {}
     key = record.get("key", "")
-    lines = [f"## {record_title(values, spec)}"]
+    lines = [f"## {record_title(values, spec, record.get('source'))}"]
     entity, label = entity_columns(spec)
     key_col = spec.first_role("key")
     time_col = _time_column(spec)
@@ -511,7 +528,10 @@ def _sort_key(record: dict, spec: TableSpec, time_col) -> tuple:
     values = record.get("values", {}) or {}
     d = str(values.get(spec.date_key) or "")
     t = str(values.get(time_col.key) or "") if time_col is not None else ""
-    return (0 if d else 1, d, t, str(record.get("key", "")))
+    # 日付が同じ（または日付の列が無い）ときは元の表の順に並べる。記録キーの文字くらべだと
+    # 「行10」「行100」「行11」の順になり、元のExcelと突き合わせられなくなる
+    row = (record.get("source") or {}).get("row")
+    return (0 if d else 1, d, t, int(row) if isinstance(row, int) else 0, str(record.get("key", "")))
 
 
 class _Names:

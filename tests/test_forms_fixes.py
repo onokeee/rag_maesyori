@@ -176,6 +176,7 @@ def test_a_partly_confirmed_batch_does_not_say_everything_is_deleted(app, client
     first = _confirmed_doc(app, "1.xlsx", batch_id="B", order=0)
     with app.app_context():
         pending = db.create_document("2.xlsx", "0" * 64, "documents/2.xlsx", batch_id="B", batch_order=1)
+        db.update_document(pending, data_json=_extraction())   # 読み取り済み・未確定
     body = _finish(client, [first, pending], current=first)
     assert body["confirmed"] == 1 and body["total"] == 2 and body["next_id"] == pending
     page = body["html"]

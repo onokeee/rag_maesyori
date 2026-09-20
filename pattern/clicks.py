@@ -317,10 +317,17 @@ def separate_names(twin: dict, row: dict) -> None:
 
     辞書の名前が同じだけの別の欄（「担当者」と「報告者」）なので、どちらもクリックした見出しを名前にする。
     見出しまで同じ（区画違いの同じ名前の欄）ときは、新しいほうにセル番地を添える。
+    ただし手で直した見出しはそのまま残し、新しいほうの名前を変えて見分けられるようにする。
     """
     if row["display_name"] != twin["display_name"]:
         return
     twin_label, row_label = _first_label(twin), _first_label(row)
+    if twin.get("renamed"):
+        if row_label and row_label != twin["display_name"]:
+            row["display_name"] = row_label
+        elif row.get("label_cell"):
+            row["display_name"] = f"{row['display_name']}（{row['label_cell']}）"
+        return
     if twin_label and row_label and twin_label != row_label:
         twin["display_name"], row["display_name"] = twin_label, row_label
     elif row.get("label_cell"):

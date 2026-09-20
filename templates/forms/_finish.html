@@ -3,10 +3,10 @@
 {% set done = current.state in confirmed_states %}
 {% set batch = docs | length > 1 %}
 
-{% if batch %}
-<p>確定済み <strong>{{ confirmed | length }}</strong> / {{ docs | length }} 件。下のボタンで、まだ確定していない帳票も確定してから zip にまとめます。</p>
+{% if batch and read_yet %}
+<p>確定済み <strong>{{ confirmed | length }}</strong> / {{ ready | length }} 件。下のボタンで、まだ確定していない帳票も確定してから zip にまとめます。</p>
 <ul class="list-plain list-rows">
-  {% for d in docs %}
+  {% for d in ready %}
   <li>
     <div class="item-main">
       <span class="item-title">{{ loop.index }}. {{ d.title or d.file_name }}</span>
@@ -19,6 +19,11 @@
   </li>
   {% endfor %}
 </ul>
+{% if unread %}
+<p class="warn">まだ読み取れていない{{ unread | length }}件（zip には入りません）:
+  {{ unread | map(attribute="file_name") | join("、") }}</p>
+<p class="hint">ダウンロードのあと、この{{ unread | length }}件だけ②に戻って読み取るシートを選び直してください。</p>
+{% endif %}
 {% endif %}
 
 {% if not read_yet %}

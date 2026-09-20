@@ -150,7 +150,11 @@ def run_checks(records, spec, stats) -> list[Issue]:
                                 f"{rc.get('label') or '合計'}が合いません（列「{rc.get('column')}」: 表の値 {_num(rc.get('expected'))}、"
                                 f"行の合計 {_num(rc.get('actual'))}）", row=rc.get("row"), column=rc.get("column")))
     if not records and not any(i.level == "error" for i in issues):
-        issues.append(Issue("warning", "no_records", "取り込める行がありません"))
+        # 記録が1件も無いまま確定すると、中身の無い zip を渡してしまう。確定を止めて理由も出す
+        excluded = sum((st.get("excluded") or {}).values())
+        extra = f"（取り消し線・非表示などで{excluded}行を除外しました）" if excluded else ""
+        issues.append(Issue("error", "no_records",
+                            f"取り込める行がありません{extra}。表の範囲か元のファイルを見直してください"))
     return issues
 
 

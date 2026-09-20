@@ -60,8 +60,14 @@
     const name = newForm.querySelector("[data-type-name]");
     if (file && name) {
       file.addEventListener("change", () => {
-        if (!file.files || !file.files.length) return;
-        if (!name.value.trim()) name.value = file.files[0].name.replace(/\.[^.]+$/, "");
+        if (!file.files || !file.files.length) { name.dataset.autofill = ""; return; }
+        const stem = file.files[0].name.replace(/\.[^.]+$/, "");
+        // 前のファイルから入れた名前が残っているとき（登録に失敗したあと）は、置き直した
+        // ファイルの名前に入れ替える。手で書いた名前はそのままにする
+        if (!name.value.trim() || name.value === name.dataset.autofill) {
+          name.value = stem;
+          name.dataset.autofill = stem;
+        }
         // 置いたらそのままシートを開く（ボタンを押さなくてよい）
         newForm.requestSubmit();
       });
@@ -133,7 +139,11 @@
     const field = event.target.closest("[data-delete-field]");
     if (field) {
       event.preventDefault();
-      try { apply(await postForm(field.dataset.deleteField, new FormData())); }
+      const root = field.closest("#cellBuilder");
+      const data = new FormData();
+      // いま見ている見本を送る（送らないと1つ目の見本の表示に戻ってしまう）
+      data.append("sample", (root && root.dataset.sample) || "");
+      try { apply(await postForm(field.dataset.deleteField, data)); }
       catch (e) { toast(e.message, "err"); }
       return;
     }

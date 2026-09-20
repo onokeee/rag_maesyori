@@ -185,7 +185,7 @@ AI による種類の推定・空欄探しは無い（0.1）。
 - `patterns`：既存列＋`title_fields TEXT DEFAULT '[]'`（タイトル・ファイル名に使う field_name の配列）、`md_options TEXT DEFAULT '{}'`（`{"domain_context_fields": [...]}` 等。入力を削る設定は置かない＝人名の項目も必ず出す）、`version_no INTEGER DEFAULT 1`（保存ごとに+1）。`status` の値は draft/active/inactive のまま（表示語だけ変更）。
 - `pattern_fields`：＋`unit TEXT DEFAULT ''`、`rag_output TEXT DEFAULT 'show'`（show/omit）。`data_type` は string/text/date/number/table（明細表）。`extraction_rule` は `{"direction": "auto"}`、明細表は＋`"columns": [見本で見た列見出し]`（見出しの書き方が違う帳票で、列見出しが似た表を探すのに使う）。探す区画がある項目は＋`"section": "回答"`（区切りの見出しの名前。その区画の中だけでラベルを探す。8.0）。
 - 明細表の値（`data_json` の各項目の `value`）：`{"columns": ["品番", "品名", "数量"], "rows": [["PW48-1591", "ベアリング", "2"], ...]}`。行が無ければ null。連番だけの No 列と「なし」だけの行は読まない。
-- `documents`：＋`confirmed_json TEXT`、`confirmed_at TEXT`、`title TEXT DEFAULT ''`（一覧の見出し。タイトル項目の値を連結）、`batch_id TEXT DEFAULT ''`・`batch_order INTEGER DEFAULT 0`（まとめ取り込み。同じ `batch_id` の帳票をまとめて読み取り、縦に並べて確認し、zip でまとめて渡して一緒に消す）。`data_json` は作業中の値。状態は導出：`data_json IS NULL`→読み取り前、`confirmed_json IS NULL`→確認中、`confirmed_json != data_json`→修正中、それ以外→確定済み。`markdown`・`registered_at`・`status` 列は使わない（互換のため残す。マイグレーションで `registered_at`→`confirmed_at`、`status='registered'` の `data_json`→`confirmed_json` にコピー）。
+- `documents`：＋`confirmed_json TEXT`、`confirmed_at TEXT`、`updated_at TEXT`（最後にさわった時刻。取り込み・読み取り・途中保存・確定で入れ直す。見回り（3.3）が「2時間さわられていないもの」を選ぶのに使う。古い行は NULL なので `COALESCE(confirmed_at, updated_at, created_at)` で見る）、`title TEXT DEFAULT ''`（一覧の見出し。タイトル項目の値を連結）、`batch_id TEXT DEFAULT ''`・`batch_order INTEGER DEFAULT 0`（まとめ取り込み。同じ `batch_id` の帳票をまとめて読み取り、縦に並べて確認し、zip でまとめて渡して一緒に消す）。`data_json` は作業中の値。状態は導出：`data_json IS NULL`→読み取り前、`confirmed_json IS NULL`→確認中、`confirmed_json != data_json`→修正中、それ以外→確定済み。`markdown`・`registered_at`・`status` 列は使わない（互換のため残す。マイグレーションで `registered_at`→`confirmed_at`、`status='registered'` の `data_json`→`confirmed_json` にコピー）。
 
 ### 3.2 一覧表
 ```
@@ -263,7 +263,11 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
      （画面から 1. と同じ宛先へ）。
   3. **しばらくさわられていない**：`core.purge.IDLE_HOURS`（2時間。旧名 `STALE_HOURS`）さわられていないものを
      `app.SWEEP_INTERVAL_SECONDS`（最長10分）ごとに捨てる（`core/purge.sweep_stale`、`app._start_sweeper` の
-     daemon スレッド。見回りの間隔は `IDLE_HOURS` に追従し、最短60秒）。
+     daemon スレッド。見回りの間隔は `IDLE_HOURS` に追従し、最短60秒）。帳票も一覧表も
+     `COALESCE(confirmed_at, updated_at, created_at)` で切る（取り込んだ時刻ではない。途中保存を
+     続けている帳票を消さないため）。**まとめ取り込みは、そのまとまりのどれか1件でもさわられていれば
+     まとまりごと残す**（50件を上から順に見ていくと、まだ手が届いていない帳票だけが画面から消え、
+     zip が欠けてしまうため）。
   4. **起動時**：ダウンロードしていない帳票・一覧表を**すべて**捨てる（`core/purge.purge_all_pending`、
      `app._purge_pending`）。セッションでは分けない。**数人で使っているときにアプリを再起動すると、
      そのとき作業中だった全員の分が消える**（「その場でダウンロードしない限りその場で捨てる」方針どおりだが、

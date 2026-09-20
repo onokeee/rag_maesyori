@@ -503,6 +503,9 @@ details summary { cursor: pointer; color: var(--primary); }
   background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
   padding: .4rem var(--sp-3); margin-bottom: var(--sp-3);
 }
+/* 帳票1件のときも .review-doc-head（ファイル名の帯）が上に貼りつくので、
+   「元のシート」の枠をその分だけ下げる（下げないとシートのタブが帯に隠れて押せない） */
+.review-stack .split-pane.sticky { top: calc(var(--topbar-h) + 3rem); max-height: calc(100vh - var(--topbar-h) - 4.5rem); }
 .review-stack.is-batch .review-doc-head { top: calc(var(--topbar-h) + 2.6rem); }
 .review-stack.is-batch .split-pane.sticky { top: calc(var(--topbar-h) + 5.6rem); max-height: calc(100vh - var(--topbar-h) - 7rem); }
 .review-doc-no {

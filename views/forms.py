@@ -419,26 +419,18 @@ def _batch_matches(ranked: list[dict]) -> list[SimpleNamespace]:
 
 
 def _type_response(docs: list[dict]):
-    infos = []
+    patterns = db.load_active_patterns()
+    ranked: list[dict] = []
+    sheets: list[dict] = []
+    by_name: dict[str, dict] = {}
+    table_sheets: list[str] = []
+    # ブックは1件ずつ開いて、必要な数だけ取り出したらすぐ手放す。50件を同時にメモリへ広げると
+    # サーバーが落ちるので、置かれたファイル全部の WorkbookInfo を持ち続けない
     for doc in docs:
         info = _load_info(doc)
         if info is None:
             return jsonify(error="元のファイルを読み込めませんでした。ファイルを置き直してください"), 409
-        infos.append(info)
-    patterns = db.load_active_patterns()
-    ranked = [{m.pattern.id: m for m in rank_patterns(info, patterns)} for info in infos]
-    matches = _batch_matches(ranked)
-    suggested = {str(m.pattern.id): m.sheet_names for m in matches}
-    first, current = docs[0], _data(docs[0])
-    selected_id = first["pattern_id"] if any(m.pattern.id == first["pattern_id"] for m in matches) else None
-    selected_id = selected_id or (matches[0].pattern.id if matches else None)
-    selected_sheets = (current or {}).get("sheets") if current and selected_id == first["pattern_id"] else None
-    if not selected_sheets:
-        selected_sheets = suggested.get(str(selected_id)) or []
-
-    sheets: list[dict] = []
-    by_name: dict[str, dict] = {}
-    for info in infos:
+        ranked.append({m.pattern.id: m for m in rank_patterns(info, patterns)})
         for name, grid in info.grids.items():
             sheet = by_name.get(name)
             if sheet is None:
@@ -447,9 +439,24 @@ def _type_response(docs: list[dict]):
                 by_name[name] = sheet
                 sheets.append(sheet)
             sheet["files"] += 1
-    table_sheets: list[str] = []
-    for info in infos:
         table_sheets.extend(n for n in table_like_sheets(info) if n not in table_sheets)
+        info = grid = None   # 次の1件を開く前にブックを手放す
+
+    matches = _batch_matches(ranked)
+    suggested = {str(m.pattern.id): m.sheet_names for m in matches}
+    first = docs[0]
+    selected_id = first["pattern_id"] if any(m.pattern.id == first["pattern_id"] for m in matches) else None
+    selected_id = selected_id or (matches[0].pattern.id if matches else None)
+    # 読み取り済みの帳票が読んだシートを全部合わせる。1件分の "sheets" には、そのファイルに
+    # 在ったシートしか残らないので、先頭ファイルだけを見ると選んだチェックが消えてしまう
+    selected_sheets: list[str] = []
+    for d in docs:
+        data = _data(d) if d["pattern_id"] == selected_id else None
+        for name in (data or {}).get("sheets") or []:
+            if name not in selected_sheets:
+                selected_sheets.append(name)
+    if not selected_sheets:
+        selected_sheets = suggested.get(str(selected_id)) or []
 
     files = [{"id": d["id"], "file_name": d["file_name"],
               "found": ranked[i].get(selected_id).found_fields if selected_id in ranked[i] else 0}
@@ -501,14 +508,22 @@ def _read_documents(docs: list[dict]):
         return jsonify(error=f"{LOST_WORK_MESSAGE}。確認のチェックを入れてから読み取り直してください"), 400
 
     read_ids, errors = [], []
+
+    def failed(doc: dict, reason: str) -> None:
+        """読み取れなかった帳票。③に並ばないので、前の読み取り結果も残さない
+        （残すと、画面に出ていない帳票を④が数えて zip の件数と合わなくなる）。"""
+        errors.append(f"{doc['file_name']}: {reason}")
+        if doc["state"] not in CONFIRMED_STATES and doc.get("data_json"):
+            db.reset_document(doc["id"], doc["pattern_id"], None)
+
     for doc in docs:
         info = _load_info(doc)
         if info is None:
-            errors.append(f"{doc['file_name']}: 元のファイルを読み込めませんでした")
+            failed(doc, "元のファイルを読み込めませんでした")
             continue
         use = [s for s in sheets if s in info.grids]
         if not use:
-            errors.append(f"{doc['file_name']}: 選んだシートがファイルにありません")
+            failed(doc, "選んだシートがファイルにありません")
             continue
         extraction = extract_document(info, pattern, use)
         db.reset_document(doc["id"], pattern.id, _dumps(extraction))
@@ -679,10 +694,14 @@ def finish_fragment():
     docs = _docs_of(_id_list(request.args.get("ids", "")))
     if not docs:
         return jsonify(html="", ready=False, confirmed=0, total=0)
+    # 読み取れていない帳票は確定できない＝zip に入らないので、件数には数えない
+    # （数えると「残り12件も確定して…」と書いてあるのに .md が4件しか入らない zip になる）
+    ready = [d for d in docs if d.get("data_json")]
+    unread = [d for d in docs if not d.get("data_json")]
     current_id = request.args.get("current", type=int)
-    current = next((d for d in docs if d["id"] == current_id), None) or docs[0]
-    confirmed = [d for d in docs if d["state"] in CONFIRMED_STATES]
-    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
+    current = next((d for d in ready if d["id"] == current_id), None) or (ready[0] if ready else docs[0])
+    confirmed = [d for d in ready if d["state"] in CONFIRMED_STATES]
+    pending = [d for d in ready if d["state"] not in CONFIRMED_STATES]
     batch_id = current.get("batch_id") or ""
     working = _data(current)
     read_yet = working is not None or any(_data(d) is not None for d in docs)
@@ -690,21 +709,23 @@ def finish_fragment():
     html = render_template(
         "forms/_finish.html",
         docs=docs,
+        ready=ready,
+        unread=unread,
         current=current,
         confirmed=confirmed,
         pending=pending,
         batch_id=batch_id if len(docs) > 1 else "",
         read_yet=read_yet,
-        to_confirm=_to_confirm(docs),
+        to_confirm=_to_confirm(ready),
         confirmed_states=CONFIRMED_STATES,
         file_name=markdown_filename(current, extraction) if extraction else "",
         markdown=build_markdown(current, _data(current, "confirmed_json")) if current["state"] in CONFIRMED_STATES else "",
         delete_note=DELETE_ON_DOWNLOAD_NOTE,
         delete_confirm=(MODIFIED_DOWNLOAD_CONFIRM if current["state"] == "modified"
                         else DELETE_ON_DOWNLOAD_CONFIRM),
-        batch_confirm=_batch_zip_confirm(docs),
+        batch_confirm=_batch_zip_confirm(ready, unread),
     )
-    return jsonify(html=html, ready=bool(confirmed), confirmed=len(confirmed), total=len(docs),
+    return jsonify(html=html, ready=bool(confirmed), confirmed=len(confirmed), total=len(ready),
                    read_yet=read_yet,
                    next_id=(pending[0]["id"] if pending else None))
 
@@ -714,12 +735,21 @@ def _to_confirm(docs: list[dict]) -> list[dict]:
     return [d for d in docs if d["state"] != "confirmed"]
 
 
-def _batch_zip_confirm(docs: list[dict]) -> str:
-    """まとまりの zip ダウンロードの確認文（確定していない分はこのボタンで確定してから渡す）。"""
+def _batch_zip_confirm(docs: list[dict], unread: list[dict] | None = None) -> str:
+    """まとまりの zip ダウンロードの確認文（確定していない分はこのボタンで確定してから渡す）。
+
+    docs は zip に入る帳票（読み取り済み）だけ。読み取れていない帳票はサーバーに残るので、
+    「すべて消えます」とは言わない。
+    """
     rest = _to_confirm(docs)
+    head = (f"まだ確定していない{len(rest)}件も確定してから、{len(docs)}件をまとめて zip でダウンロードします。"
+            if rest else f"{len(docs)}件をまとめて zip でダウンロードします。")
+    if unread:
+        return (head + "ダウンロードすると、渡したこの"
+                f"{len(docs)}件のデータはサーバーから消えます。"
+                f"まだ読み取れていない{len(unread)}件はサーバーに残ります（②に戻ってもう一度読み取ってください）。")
     if rest:
-        return (f"まだ確定していない{len(rest)}件も確定してから、{len(docs)}件をまとめて zip でダウンロードします。"
-                f"ダウンロードすると、このまとまりの帳票のデータはサーバーからすべて消えます。")
+        return head + "ダウンロードすると、このまとまりの帳票のデータはサーバーからすべて消えます。"
     return BATCH_DELETE_CONFIRM
 
 
@@ -737,10 +767,14 @@ def download_md(doc_id: int):
 
 def _single_markdown(doc_id: int) -> tuple[str, bytes]:
     doc = _get_document(doc_id)
-    confirmed = _data(doc, "confirmed_json")
-    if confirmed is None:
+    if doc["confirmed_json"] is None:
+        abort(404)   # まだ確定していない帳票は渡さない
+    # 直したまま確定していない（修正中）帳票は、直した値で作る（design.md 3.3）。画面の JS を
+    # 通さずにリンクを開いたとき（中クリック・「名前を付けてリンク先を保存」）でも同じにする
+    extraction = _data(doc) if doc["state"] == "modified" else _data(doc, "confirmed_json")
+    if extraction is None:
         abort(404)
-    return markdown_filename(doc, confirmed), build_markdown(doc, confirmed).encode("utf-8")
+    return markdown_filename(doc, extraction), build_markdown(doc, extraction).encode("utf-8")
 
 
 def _unique_name(name: str, used: set[str]) -> str:
@@ -757,8 +791,10 @@ def _unique_name(name: str, used: set[str]) -> str:
 def _batch_markdown_files(confirmed_ids: list[int]) -> list[tuple[str, bytes]]:
     files, used = [], set()
     for doc in db.list_confirmed_documents(confirmed_ids, session_id=current_session_id()):
+        # 修正中（確定したあとに直した）帳票は、直した値で作る（1件の .md と同じ）
+        column = "data_json" if doc["state"] == "modified" else "confirmed_json"
         try:
-            extraction = json.loads(doc["confirmed_json"])
+            extraction = json.loads(doc[column])
         except (TypeError, ValueError):
             continue
         files.append((_unique_name(markdown_filename(doc, extraction), used),

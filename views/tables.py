@@ -528,8 +528,26 @@ def _warnings_of(sugg) -> list[str]:
 def _column_row(sugg) -> dict:
     """画面の1行（使う・見出し・役割と、知らせること）。"""
     return {"index": sugg.index, "header": sugg.header, "use": sugg.md != "omit",
-            "role": _screen_role(sugg.role), "examples": list(sugg.examples or [])[:3],
+            "role": _screen_role(sugg.role), "type": sugg.type, "examples": list(sugg.examples or [])[:3],
             "warnings": _warnings_of(sugg)}
+
+
+DATE_TYPES = ("date", "datetime")
+
+
+def _roles_for(row: dict) -> list[tuple[str, str]]:
+    """その列で選べる役割。
+
+    「日付」は値が日付として読める列にだけ出す。年月だけの列（2025-03 など）を日付にしても
+    保存が通らないので、画面で選べてしまうと直しようのない行き止まりになる。
+    """
+    return [(role, label) for role, label in SCREEN_ROLES
+            if role != "date" or row["type"] in DATE_TYPES or row["role"] == "date"]
+
+
+def _has_date_column(pairs) -> bool:
+    """日付として読める列があるか（1つも無ければ「日付の列を選べ」とは言わない）。"""
+    return any(sugg.type in DATE_TYPES for _row, sugg in pairs)
 
 
 # 「列の対応づけは決まっている」の決まり（利用者の問い 2026-09-20「列の対応付けを行う意味は？」）。
@@ -564,7 +582,8 @@ def _columns_todo(pairs) -> list[str]:
         if len(found) > 1:
             todo.append(f"{label}の列が{len(found)}つあります。1つにしてください")
         elif not found:
-            if required:
+            # 日付として読める列が1つも無い表では、選びようがないので求めない
+            if required and (role != "date" or _has_date_column(pairs)):
                 todo.append(f"{label}の列が決まっていません。1つ選んでください")
         elif found[0][1].matched_by != "dictionary":
             todo.append(f"「{found[0][0]['header']}」を{label}として読み取ります。これでよいか確かめてください")
@@ -587,6 +606,8 @@ def _columns_summary(pairs) -> str:
         found = _role_columns(pairs, role)
         if found:
             named.append(f"{found[0][0]['header']}＝{label}")
+        elif role == "date":
+            missing.append("日付の列はありません。記録は「日付なし」の1ファイルにまとめます。")
         else:
             missing.append(f"{label}の列はありません。")
     used = sum(1 for row, _s in pairs if row["use"])
@@ -608,6 +629,7 @@ def _build_spec(payload: dict, guess, suggestions):
         if isinstance(row, dict):
             choices[_int(row.get("index"), -1)] = row
     used: list[dict] = []
+    date_errors: list[str] = []
     for sugg in suggestions:
         choice = choices.get(sugg.index)
         if not (bool(choice.get("use")) if choice else sugg.md != "omit"):
@@ -617,6 +639,10 @@ def _build_spec(payload: dict, guess, suggestions):
             role = _screen_role(sugg.role)
         # 画面でそのままなら候補の役割（人名・数値・区分など）を活かす。選び直したときだけその役割にする
         role = sugg.role if role == _screen_role(sugg.role) else role
+        if role == "date" and sugg.type not in DATE_TYPES:
+            # 画面には出さない選び方だが、古い画面から送られたときに「型を日付にしてください」
+            # （利用者には直せない指示）ではなく、何が起きているかを返す
+            date_errors.append(f"列「{sugg.header}」の値は日付として読めないので、日付の列にはできません")
         type_ = "text" if role == "log" else sugg.type
         # 「使う」列は必ず md に出す（候補が「出さない」でも、チェックを入れたのだから出す）
         md = sugg.md if sugg.md != "omit" else ("body" if type_ == "text" else "attribute")
@@ -627,6 +653,9 @@ def _build_spec(payload: dict, guess, suggestions):
     header_rows = list(getattr(guess, "header_rows", None) or [1])
     spec = spec_from_suggestions(name, {"table_kind": "list", "header_rows": header_rows}, used)
     errors = validate_spec(spec)
+    if date_errors:
+        # 「型を日付にしてください」は画面に直す場所が無いので、こちらの言い方に置き換える
+        errors = date_errors + [e for e in errors if not e.startswith("日付の列「")]
     if sum(1 for u in used if u["role"] == "log") > 1:
         # 黙って最初の列だけを AI整形の対象にしない（2列目は追記ログとして1行につながれて出てしまう）
         errors.insert(0, "AI整形の対象は1列だけにしてください")
@@ -657,11 +686,13 @@ def _panel_columns(imp: dict):
             row["use"] = col is not None
             if col is not None:
                 row["role"] = _screen_role(col.role)
+    for row in rows:
+        row["roles"] = _roles_for(row)
     # 決めることが無ければ表をたたんで要約1行にする（表は隠すだけで残すので、保存で送る中身は同じ）
     pairs = list(zip(rows, suggestions))
     todo = _columns_todo(pairs)
     html = render_template(
-        "tables/_p_columns.html", rows=rows, roles=SCREEN_ROLES, todo=todo,
+        "tables/_p_columns.html", rows=rows, todo=todo,
         summary="" if todo else _columns_summary(pairs),
         name=spec.name if spec is not None else _default_table_name(imp),
         save_url=url_for("tables.save_columns", import_id=import_id))
@@ -1153,6 +1184,10 @@ def _panel_done(imp: dict):
         return _locked("上の「内容の確認」で［確定してMarkdownを作成］を押してください")
     spec = _spec_for(imp)
     files = [{"name": p.name, "size": p.stat().st_size} for p in pipeline.md_paths(import_id)]
+    if not files:
+        # 記録0件のまま確定された取り込み（渡せるものが無いので、ダウンロードのボタンは出さない）
+        return _locked("この取り込みから作られた Markdown はありません（取り込める行がありませんでした）。"
+                       "表の範囲か元のファイルを見直してください")
     html = render_template("tables/_p_done.html", imp=imp, files=files, stats=imp.get("stats") or {},
                            delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM)
     return _panel(html, note=f"{len(files)}ファイル")
@@ -1166,8 +1201,13 @@ def download_zip(import_id: int):
     """
     imp = _load_import(import_id)
     spec = _spec_for(imp)
-    if imp["status"] != "confirmed" or spec is None or not pipeline.md_paths(import_id):
+    if imp["status"] != "confirmed" or spec is None:
         flash("先に [確定してMarkdownを作成] を押してください", "error")
+        return redirect(url_for("tables.new"))
+    if not pipeline.md_paths(import_id):
+        # 確定はしたが記録が0件だった（押したばかりのボタンをもう一度押せ、とは言わない）
+        flash("作成された Markdown がありません（取り込める行がありませんでした）。表の範囲か元のファイルを見直してください",
+              "error")
         return redirect(url_for("tables.new"))
     if _ai_running(import_id):
         flash("AI整形の実行中はダウンロードできません。終わるか中止してからダウンロードしてください", "error")

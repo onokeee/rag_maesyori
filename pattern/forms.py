@@ -21,6 +21,7 @@ def pattern_to_rows(pattern: PatternDef) -> tuple[list[dict], list[dict]]:
             "sheet_name": getattr(f, "sheet_name", "") or "",
             "label_cell": getattr(f, "label_cell", "") or "",
             "cell": getattr(f, "cell", "") or "",
+            "renamed": bool(getattr(f, "renamed", False)),
         }
         for f in pattern.fields
     ]
@@ -56,6 +57,7 @@ def rows_to_pattern(pattern_id: int, meta: dict, sheet_rows: list[dict], field_r
             sheet_name=r.get("sheet_name", "") or "",
             label_cell=r.get("label_cell", "") or "",
             cell=r.get("cell", "") or "",
+            renamed=bool(r.get("renamed")),
         )
         for r in field_rows
         if r["use"]

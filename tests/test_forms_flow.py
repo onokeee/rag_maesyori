@@ -238,6 +238,8 @@ def test_form_flow_with_table_field(app, client, tmp_path):
     assert kept["value"] == {"columns": value["columns"], "rows": []}   # 列見出しは残る
     assert "## 交換部品" not in client.post(f"/forms/{doc_id}/preview", json={"values": {}}).get_json()["markdown"]
 
-    # ダウンロードは確定済みの版から作る（最後の手順。ここでデータは消える）
+    # ダウンロードは、直したまま確定していない（修正中）ときは直した値から作る（design.md 3.3。
+    # 最後の手順。ここでデータは消える）。行を全部消したので明細表は出ない
     md = client.get(f"/forms/{doc_id}/download.md").get_data(as_text=True)
-    assert "- 品番: PW48-1591／品名: ベアリング／数量: 4\n" in md and "スピンモータ" not in md
+    assert "## 交換部品" not in md and "スピンモータ" not in md
+    assert "- 報告番号: IN-2026-001" in md

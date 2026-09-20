@@ -462,7 +462,9 @@ def _busy_ids(db, ref_type: str) -> set[int]:
 def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
     """しばらくさわられていない帳票・一覧表を捨てる。戻り値: (帳票の件数, 一覧表の件数)。
 
-    帳票は updated_at を持たないので、確定した日時（無ければ取り込んだ日時）で見る。
+    帳票も一覧表も「最後にさわった日時」（確定 → 途中保存・読み取り → 取り込み の順に見る）で切る。
+    まとめ取り込みは、そのまとまりのどれか1件でも新しければ、まとまりごと残す（50件を上から順に
+    見ていくと、まだ手が届いていない帳票だけが画面から消えてしまうため）。
     動いているジョブが付いているものは、そのジョブが終わるまで残す。
     """
     db = database.get_db()
@@ -470,7 +472,11 @@ def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
     busy_docs = _busy_ids(db, "document")
     busy_imports = _busy_ids(db, "table_import")
     forms = purge_documents([i for i in _document_ids(
-        db, "WHERE COALESCE(confirmed_at, created_at) < ?", (limit,)) if i not in busy_docs])
+        db,
+        "WHERE COALESCE(confirmed_at, updated_at, created_at) < ? "
+        "AND (batch_id = '' OR NOT EXISTS (SELECT 1 FROM documents s WHERE s.batch_id = documents.batch_id "
+        "AND COALESCE(s.confirmed_at, s.updated_at, s.created_at) >= ?))",
+        (limit, limit)) if i not in busy_docs])
     tables = 0
     for import_id in _import_ids(
             db, "WHERE COALESCE(confirmed_at, updated_at, created_at) < ?", (limit,)):

@@ -76,7 +76,8 @@
                 {% if r.label != r.field.display_name %}<small class="muted">探す見出し: {{ r.label }}</small>{% endif %}
                 {% if r.field.data_type == 'table' %}<small class="muted">表（1行＝1明細）</small>{% endif %}</th>
               <td>
-                {% if r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
+                {% if not samples %}<span class="muted">—（見本のExcelを消したので値は出せません）</span>
+                {% elif r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
                 {% else %}<span class="pre">{{ r.value | field_text | truncate(120) }}</span>{% if r.field.unit %} {{ r.field.unit }}{% endif %}{% endif %}
                 {% if r.warning %}<div class="warn">{{ r.warning }}</div>{% endif %}
               </td>
@@ -95,9 +96,12 @@
   </div>
 
   {# ---- 読み取りテスト ---- #}
-  {% call ui.card("読み取りテスト", "いまの設定で、この見本を実際に読み取った結果です。", level=3) %}
-    {% if not test %}
+  {% call ui.card("読み取りテスト", "いまの設定で、この見本を実際に読み取った結果です。" if samples else none, level=3) %}
+    {% if not rows %}
       <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
+    {% elif not test %}
+      <p class="muted">見本のExcelがサーバーに無いので、読み取りテストはできません。設定は残っています。
+        確かめたいときは、下の「見本のExcelを置く」で同じ帳票のExcelを置いてください。</p>
     {% else %}
       <p>{{ test.total }}項目中 <strong>{{ test.found }}</strong>項目が見つかりました（シート: {{ test.sheets | join('、') }}）。</p>
       <details class="fold" {% if test.found < test.total %}open{% endif %}>

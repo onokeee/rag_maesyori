@@ -71,8 +71,8 @@ def test_three_forms_are_read_and_confirmed_from_the_stacked_view(app, client, s
         assert f'id="doc-{doc_id}"' in html and f'id="reviewForm-{doc_id}"' in html
         assert f"修理報告書_{no}.xlsx" in html
     assert html.count("要確認 <strong") == 3 and "未確定" in html
-    # 進み具合の1行（まだ1件も確定していない）
-    assert "3件中0件を確定しました" in html and "data-next-doc" in html
+    # 進み具合の1行（まとめ取り込みでは1件ずつ確定しないので、いま見ている場所を出す）
+    assert "3件中1件目を表示中" in html and "data-next-doc" in html
 
     # 3件とも確定でき、zip には3件ぶんの .md が入る
     for doc_id in ids:
@@ -100,7 +100,7 @@ def test_the_progress_line_counts_the_confirmed_forms(app, client, sample_dir, t
 
     client.post(f"/forms/{ids[0]}/confirm", json={})
     html = read_all(client, ids, pattern_id, ["修理報告書"], acknowledge="on").get_json()["html"]
-    assert "3件中1件を確定しました" in html
+    assert "3件中1件目を表示中" in html
     assert html.count('class="badge badge-green" data-doc-state>確定済み') == 1
     assert finish(client, ids)["confirmed"] == 1
 
@@ -151,7 +151,7 @@ def test_a_file_that_does_not_match_can_be_left_out(app, client, sample_dir, tmp
     assert [d["id"] for d in body["docs"]] == rest    # 外したファイルはもう出ない
 
     html = read_all(client, rest, pattern_id, ["修理報告書"]).get_json()["html"]
-    assert html.count('class="review-doc"') == 2 and "2件中0件を確定しました" in html
+    assert html.count('class="review-doc"') == 2 and "2件中1件目を表示中" in html
 
 
 # ---- 1件だけのときは今までどおり（まとまりの1行も出さない） ---------------------------------------
@@ -167,7 +167,7 @@ def test_a_single_file_review_has_one_block_and_no_batch_line(app, client, sampl
     body = read_all(client, [doc_id], pattern_id, ["修理報告書"]).get_json()
     html = body["html"]
     assert html.count('class="review-doc"') == 1
-    assert "data-batch-bar" not in html and "件を確定しました" not in html
+    assert "data-batch-bar" not in html and "件目を表示中" not in html
     assert 'data-cell="B3"' in html and "data-grid-wait" not in html   # 1件のときは元のシートもすぐ出す
     assert 'name="value-report_id"' in html and body["version"]
 

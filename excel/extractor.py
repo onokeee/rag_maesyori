@@ -125,6 +125,18 @@ def apply_manual_values(extraction: dict, form) -> None:
     refresh_summary(extraction)
 
 
+def _sheet_order(fd: FieldDef, sheet_names: list[str]) -> list[str]:
+    """その項目を登録したシートを先に見る。
+
+    同じ見出し語が2枚のシートに並ぶ帳票（1次報告／2次報告、8D報告など）で、渡された順に
+    シートを回ると、2枚目に登録した項目が1枚目の同名の欄の値を読んでしまう。
+    読むシート（sheet_names）に入っているときだけ先頭に回す（画面で外したシートは見ない）。
+    """
+    own = getattr(fd, "sheet_name", "") or ""
+    names = [own] if own in sheet_names else []
+    return names + [n for n in sheet_names if n not in names]
+
+
 def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], stop_labels: set[str]) -> FieldResult:
     result = FieldResult(fd.field_name, fd.display_name, fd.data_type,
                          unit=fd.unit, spec_unit=fd.unit or "", rag_output=fd.rag_output)
@@ -136,7 +148,7 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
         if not _extract_at_cell(info, fd, sheet_names, result):
             result.warning = "値のセルが空です"
         return result
-    for name in sheet_names:
+    for name in _sheet_order(fd, sheet_names):
         grid = info.grids.get(name)
         if grid is None:
             continue
@@ -189,8 +201,11 @@ def _extract_at_cell(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], r
     """
     from pattern.clicks import cell_key  # pattern.clicks が excel を使うため
 
-    names = [n for n in (getattr(fd, "sheet_name", "") or "",) if n in info.grids]
-    names += [n for n in sheet_names if n not in names]
+    # その項目を登録したシートがブックに在れば、そのシートだけを見る。空だったからといって
+    # 別のシートの同じ番地を読むと、まったく関係のない欄の値が入ってしまう。
+    # ほかのシートを見るのは、シートの名前が変わっていて見つからないときだけ
+    own = getattr(fd, "sheet_name", "") or ""
+    names = [own] if own in info.grids else list(sheet_names)
     for name in names:
         grid = info.grids.get(name)
         if grid is None:
@@ -293,7 +308,7 @@ def _extract_table_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str
                          result: FieldResult) -> FieldResult:
     """明細表: 見出し（アンカー）の下か右の列見出しから、行を読む。"""
     header_found = False
-    for name in sheet_names:
+    for name in _sheet_order(fd, sheet_names):
         grid = info.grids.get(name)
         if grid is None:
             continue

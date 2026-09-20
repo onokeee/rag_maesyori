@@ -55,8 +55,13 @@
 
   // ダウンロードしないまま画面を離れたら、この画面で取り込んだ分は捨てる（利用者の指示 2026-09-20）。
   // docs に残っているものが「まだダウンロードしていない分」そのもの（ダウンロード・削除で docs から抜ける）。
+  // 渡しに行った分（handedOver）も一緒に送る。途中で切れた・保存をやめたときはサーバーに残っていて、
+  // docs から抜けたままだと画面を閉じても捨てられない（消えたと思っているデータが残る）。
+  // すでに消えている番号は黙って飛ばされる（core.purge.discard_documents）。
+  let handedOver = [];
   const guard = (window.ragDiscard || { watch: () => ({ now: async () => {}, clear() {}, arm() {} }) })
-    .watch(page.dataset.discardUrl || "/forms/discard", () => ({ doc_ids: docs.map((d) => d.id) }));
+    .watch(page.dataset.discardUrl || "/forms/discard",
+      () => ({ doc_ids: docs.map((d) => d.id).concat(handedOver) }));
 
   // ---- 1 ファイルを置く ----
   const uploadForm = document.getElementById("uploadForm");
@@ -75,7 +80,7 @@
       work("upload", files.length > 1 ? files.length + "件のファイルを取り込んでいます…" : "ファイルを取り込んでいます…");
       try {
         // 新しいファイルを置いたら、前の分（ダウンロードしていない帳票）はその場で捨てる
-        if (docs.length) { await guard.now(); resetPage(); }
+        if (docs.length || handedOver.length) { await guard.now(); handedOver = []; resetPage(); }
         const data = new FormData();
         files.forEach((f) => data.append("file", f));
         const res = await postForm(page.dataset.uploadUrl, data);
@@ -562,41 +567,54 @@
   }
 
   // ---- まとめて置いたときの進み具合（③の上の1行） ----
-  function updateBar() {
-    const text = el.reviewBody.querySelector("[data-batch-text]");
-    if (!text) return;
-    const shown = docs.filter((d) => blocks.has(d.id));   // 読み取れなかったファイルは並んでいない
-    text.textContent = shown.length + "件中" + shown.filter(isDone).length + "件を確定しました";
-    const button = el.reviewBody.querySelector("[data-next-doc]");
-    if (!button) return;
-    const target = nextTarget();
-    button.disabled = !target;
-    button.textContent = !target ? "すべて確定しました"
-      : (isDone(docOf(target.id) || {}) ? "要確認の残る帳票へ" : "次の未確定の帳票へ");
+  // まとめ取り込みでは1件ずつ確定するボタンが無く、④のダウンロードまで全部が「未確定」のまま。
+  // 「確定した件数」では動かないので、いま見ている場所で数える
+
+  /** ③に縦に並んでいる帳票（読み取れなかったファイルは並ばない）。 */
+  function shownBlocks() {
+    return docs.map((d) => blocks.get(d.id)).filter(Boolean);
   }
 
-  /** まだ手が要る帳票（未確定 → 要確認の残る帳票の順）。 */
-  function nextTarget() {
-    for (const d of docs) {
-      const b = blocks.get(d.id);
-      if (b && !isDone(d)) return b;
-    }
-    for (const d of docs) {
-      const b = blocks.get(d.id);
-      if (b && issueCount(b)) return b;
-    }
-    return null;
+  /** いま画面のいちばん上に来ている帳票の位置。 */
+  function currentIndex(list) {
+    let at = 0;
+    list.forEach((b, i) => { if (b.root.getBoundingClientRect().top <= 8) at = i; });
+    return at;
+  }
+
+  function updateBar(index) {
+    const text = el.reviewBody.querySelector("[data-batch-text]");
+    if (!text) return;
+    const list = shownBlocks();
+    const at = index == null ? currentIndex(list) : index;
+    const left = list.filter((b) => issueCount(b)).length;
+    text.textContent = list.length + "件中" + (at + 1) + "件目を表示中"
+      + (left ? "／要確認が残る帳票 " + left + "件" : "");
+    const button = el.reviewBody.querySelector("[data-next-doc]");
+    if (!button) return;
+    button.disabled = list.length < 2;
+    button.textContent = at >= list.length - 1 ? "先頭の帳票へ" : "次の帳票へ";
   }
 
   el.reviewBody.addEventListener("click", (event) => {
     if (!event.target.closest("[data-next-doc]")) return;
-    const target = nextTarget();
-    if (target) gotoBlock(target.id);
+    const list = shownBlocks();
+    if (list.length < 2) return;
+    const at = (currentIndex(list) + 1) % list.length;   // 最後まで行ったら先頭に戻る
+    gotoBlock(list[at].id);
+    updateBar(at);
   });
 
   function gotoBlock(id) {
     const b = blocks.get(id);
-    if (!b) return;
+    if (!b) {
+      // ③に並んでいない帳票（読み取れなかった・選んだシートが無かった）。黙って何も起きないと
+      // 押し損ねたのか分からないので、理由を出す
+      const doc = docOf(id);
+      toast((doc ? doc.file_name + " は" : "この帳票は")
+        + "読み取れていません。②で読み取るシートを選び直してください", "err");
+      return;
+    }
     sections.open("review", false);
     b.root.scrollIntoView({ behavior: "smooth", block: "start" });
     b.root.classList.add("is-jumped");
@@ -693,10 +711,12 @@
       for (const d of pending) await confirmDoc(d.id);
       await refreshFinish();
       window.location.assign(link.getAttribute("href"));
+      // 渡しに行った分。通信が切れた・保存をやめたときはサーバーに残るので、画面を閉じるときに捨てる
+      handedOver = handedOver.concat(docs.filter(isDone).map((d) => d.id));
       // 読み取れなかった帳票はサーバーに残る（渡していないので消えない）ので、続けて読み取れるようにする
       const rest = docs.filter((d) => !isDone(d));
       setTimeout(async () => {
-        toast("ダウンロードしました。渡した分のデータはサーバーから消えました", "ok");
+        toast("ダウンロードしました。渡し終えた分はサーバーから消えます", "ok");
         if (!rest.length) { resetPage(); return; }
         docs = rest;
         await openType();
