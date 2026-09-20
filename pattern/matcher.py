@@ -116,18 +116,6 @@ DOMINANT_TABLE_ROWS = 30
 SIMILAR_ROW_RATIO = 0.6
 
 
-def looks_like_table_sheet(target: WorkbookInfo | SheetGrid, sheet_names: list[str] | None = None) -> bool:
-    """見出し行の下に、同じ列の並び（空でない列の組）の行が10行以上続くシートがあれば True。
-
-    帳票の中の小さな明細表（時系列・部品表）で誤判定しないよう、その表がシートの行の半分以上を
-    占める（または30行以上続く）ことも条件にする。非表示シート（入力規則用のリスト等）は見ない。
-    target に WorkbookInfo を渡すと sheet_names（省略時は全シート）のどれかが当てはまるかを返す。
-    """
-    if isinstance(target, SheetGrid):
-        return _is_table_like(target)
-    return bool(table_like_sheets(target, sheet_names))
-
-
 def table_like_sheets(info: WorkbookInfo, sheet_names: list[str] | None = None) -> list[str]:
     names = sheet_names if sheet_names is not None else info.sheet_names
     return [n for n in names if n in info.grids and _is_table_like(info.grids[n])]

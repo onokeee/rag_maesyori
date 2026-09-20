@@ -61,7 +61,7 @@ def test_another_browser_cannot_see_or_delete_a_form(app, client, other_client, 
     doc_id = upload_forms(client, sample_dir / "standard.xlsx")[0]
 
     assert other_client.get(f"/forms/{doc_id}/type").status_code == 404
-    assert other_client.get(f"/forms/{doc_id}/review").status_code == 404
+    assert other_client.get(f"/forms/{doc_id}/type").status_code == 404
     assert other_client.get(f"/forms/{doc_id}/download.md").status_code == 404
     assert other_client.get(f"/forms/{doc_id}/original").status_code == 404
     assert other_client.post(f"/forms/{doc_id}/draft", json={}).status_code == 404
@@ -78,17 +78,19 @@ def test_another_browser_cannot_see_or_delete_a_form(app, client, other_client, 
 # ---- 設定は分けない ----------------------------------------------------------------
 
 def test_settings_are_shared_between_browsers(app, client, other_client, sample_dir):
-    """取り込み設定・帳票の種類はみんなで使う設定なので、別のブラウザからも見える。"""
+    """帳票の種類はみんなで使う設定なので、別のブラウザからも見える。表の取り込み設定は保存しない。"""
     from tests.test_forms_flow import add_field, create_type
 
-    imported(app, client, "みんなの一覧.csv", "共有の取り込み設定")
+    import_id = imported(app, client, "みんなの一覧.csv", "この取り込みだけの名前")
     pattern_id = create_type(client, sample_dir / "standard.xlsx", name="共有の帳票の種類")
     add_field(client, pattern_id, "修理報告書", "A4")
 
     other_import = upload_csv(other_client, "別の人の一覧.csv")
-    assert "共有の取り込み設定" in panel_html(other_client, other_import, "source")
-    assert "共有の帳票の種類" in other_client.get("/form-types/list").get_json()["html"]
-    assert other_client.get(f"/form-types/{pattern_id}/panel").status_code == 200
+    # 表の設定は取り込みの中にしかないので、ほかのブラウザには名前も出ない
+    assert "この取り込みだけの名前" not in panel_html(other_client, other_import, "source")
+    assert other_client.get(f"/tables/imports/{import_id}/panel/columns").status_code == 404
+    panel = other_client.get(f"/form-types/{pattern_id}/panel")
+    assert panel.status_code == 200 and "共有の帳票の種類" in panel.get_json()["html"]
 
 
 # ---- 同時に動く --------------------------------------------------------------------

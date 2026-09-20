@@ -19,30 +19,24 @@ from tables.spec import spec_from_dict, validate_spec
 from tests.test_tables_pipe import FakeCtx, _new_import, _rec
 
 
-# ---- R6T-1: 設定の編集を何も変えずに保存しても、JSON で選んだ期間の列（2列目の日付）を置き換えない -------------
+# ---- R6T-1: 期間の日付の列は、画面で選んだ「日付」の役割から決める -------------------------------------------
 
-def test_noop_save_keeps_the_period_date_column(app, client):
-    from tables.spec import ColumnSpec
-    from tests.tables_helpers import SPEC_CSV, json_only_spec
+def test_the_period_date_column_follows_the_date_role(app, client):
+    from tests.tables_helpers import SPEC_CSV, set_role
     from tests.test_tables_fixes4 import _editor_body, _saved
 
-    spec = json_only_spec()
-    spec.columns.append(ColumnSpec("completed_at", "完了日", headers=["完了日"], type="date", role="date"))
-    spec.period["date_column"] = "completed_at"
-    assert validate_spec(spec) == []
-    # 完了日の列もある CSV（画面にその行が出るように）
+    # 完了日の列もある CSV（日付の列が2つある表）
     text = "\r\n".join(line + ("完了日" if i == 0 else "2026-08-28") for i, line in
                        enumerate(x + "," for x in SPEC_CSV.strip("\r\n").split("\r\n"))) + "\r\n"
-    import_id, template_id, body = _editor_body(app, client, spec, text=text)
-    after = _saved(app, client, import_id, template_id, body)
-    assert after.period["date_column"] == "completed_at"
-
-    # 日付の役割の列を変えたときは画面の役割から決め直す
-    for r in body["columns"]:
-        if r.get("key") == "completed_at":
-            r["role"] = "attribute"
-    after = _saved(app, client, import_id, template_id, body)
+    import_id, body = _editor_body(app, client, text=text)
+    after = _saved(app, client, import_id, body)
     assert after.period["date_column"] == "occurred_at"
+
+    # 最初の日付の列を「その他」にすると、次の日付の列が期間の列になる
+    set_role(body, "発生日", "attribute")
+    set_role(body, "完了日", "date")
+    after = _saved(app, client, import_id, body)
+    assert after.column(after.period["date_column"]).display == "完了日"
 
 
 # ---- R6T-2: 80行目より下の見出し行を手で指定しても見出しが読める ------------------------------------------------
@@ -76,30 +70,18 @@ def test_header_row_below_the_head_rows_is_read(tmp_path):
     assert single.headers[:3] == ["管理No", "発生日", "現象"]
 
 
-# ---- R6T-3: 見出しが自動で見つからなくても、保存した取り込み設定を選べる ------------------------------------------
+# ---- R6T-3: 見出しが自動で見つからなくても、指定した見出し行で列の対応づけができる --------------------------------
 
-def test_the_source_panel_lists_saved_settings_and_checks_the_imports_own(app, client, tmp_path):
-    from tests.tables_helpers import panel_html, upload_bytes
+def test_the_columns_panel_uses_the_saved_header_row(app, client, tmp_path):
+    from tests.tables_helpers import panel_html, save_layout, upload_bytes
 
     path = _deep_book(tmp_path / "deep40.xlsx", 41)
     import_id = upload_bytes(client, path.read_bytes(), "deep40.xlsx")
-    spec_a = spec_from_dict({"name": "トラブル一覧", "columns": [
-        {"key": "record_no", "display": "管理No", "headers": ["管理No"], "type": "code", "role": "key"}]})
-    spec_b = spec_from_dict({"name": "別名", "columns": [
-        {"key": "no", "display": "番号", "headers": ["番号"], "type": "code", "role": "key"}]})
-    with app.app_context():
-        store.create_template("トラブル一覧", spec_a, "")
-        t2, v2 = store.create_template("別名", spec_b, "")
-        imp = store.get_import(import_id)
-        src = dict(imp["source"] or {})
-        src["header_rows"] = [41]
-        store.update_import(import_id, source=src, template_id=t2, template_version_id=v2)
-    page = panel_html(client, import_id, "source")
-    radios = re.findall(r'<input type="radio" name="template" value="([^"]+)"([^>]*)>', page)
-    values = [v for v, _rest in radios]
-    assert str(t2) in values and "new" in values and len(values) == 3
-    assert [v for v, rest in radios if "checked" in rest] == [str(t2)]
-    assert "管理No" in page   # 保存した見出し行（41行目）で見出しを読んでいる
+    assert save_layout(client, import_id, header_rows="41").status_code == 200
+    page = panel_html(client, import_id, "columns")
+    assert "管理No" in page and "現象" in page   # 保存した見出し行（41行目）で見出しを読んでいる
+    # 読み取り方の段には取り込み設定の選択を出さない（設定は保存しない）
+    assert 'name="template"' not in panel_html(client, import_id, "source")
 
 
 # ---- R6T-4: 見出し行の入力は画面の下見とサーバーで同じように読む ---------------------------------------------------
@@ -151,16 +133,16 @@ def test_default_suggestions_tick_only_one_log_column():
 
 
 def test_untouched_columns_panel_with_two_log_like_columns_can_be_saved(app, client):
-    from tests.tables_helpers import editor_body, name_source, save_columns, save_layout, upload_csv
+    from tests.tables_helpers import editor_body, csv_source, save_columns, save_layout, upload_csv
 
     log = "4/1 10:00 停止を確認。\n4/2 11:00 センサーを交換。\n4/3 復旧を確認した。"
     text = "管理No,発生日,対応内容,対応内容_2\r\n" + "".join(
         f"TR-{i},2026/08/{i + 1:02d},\"{log}\",\"{log}追記\"\r\n" for i in range(10))
     import_id = upload_csv(client, "log2.csv", text, encoding="utf-8")
-    name_source(client, import_id, "T", encoding="utf-8")
+    csv_source(client, import_id, encoding="utf-8")
     assert save_layout(client, import_id).status_code == 200
     body = editor_body(client, import_id)
-    assert sum(1 for r in body["columns"] if r.get("ai")) == 1
+    assert sum(1 for r in body["columns"] if r["role"] == "log") == 1
     res = save_columns(client, import_id, body)
     assert res.status_code == 200, res.get_json()
 
@@ -249,7 +231,7 @@ def test_reread_does_not_write_back_into_a_purged_import(app, monkeypatch):
     from core import purge
 
     with app.app_context():
-        _template_id, import_id = _new_import(app)
+        __spec, import_id = _new_import(app)
         real_checks = pipeline.run_checks
 
         def purge_midway(records, spec, stats):
@@ -376,7 +358,7 @@ def test_far_memo_cell_is_not_counted_as_many_columns(tmp_path):
 
 def test_trial_is_refused_after_confirm(app, client):
     with app.app_context():
-        _template_id, import_id = _new_import(app)
+        __spec, import_id = _new_import(app)
         pipeline.run_read(FakeCtx(), import_id)
         pipeline.run_render(FakeCtx(), import_id)
         assert store.get_import(import_id)["status"] == "confirmed"
@@ -392,7 +374,7 @@ def test_trial_is_refused_after_confirm(app, client):
 ])
 def test_reread_during_hand_out_goes_back_to_the_preview(app, client, monkeypatch, tmp_path, method, url, builder):
     with app.app_context():
-        _template_id, import_id = _new_import(app)
+        __spec, import_id = _new_import(app)
         pipeline.run_read(FakeCtx(), import_id)
         pipeline.run_render(FakeCtx(), import_id)
 
@@ -408,43 +390,6 @@ def test_reread_during_hand_out_goes_back_to_the_preview(app, client, monkeypatc
         assert any("読み込み直しが始まった" in text for _level, text in session["_flashes"])
     with app.app_context():
         assert store.get_import(import_id) is not None
-
-
-# ---- R6B-1: 入力したキーが重なったら黙って「_2」にせず断る -------------------------------------------------------
-
-def test_duplicate_typed_key_is_refused_and_does_not_carry_another_columns_settings():
-    from tables.spec import spec_from_suggestions
-    from views.tables import _build_spec
-
-    base = spec_from_suggestions("T", {"header_rows": [1]}, [
-        {"header": "台帳No", "key": "record_no", "role": "key", "type": "code"},
-        {"header": "起票日", "key": "date", "role": "date", "type": "datetime"}])
-    base.columns[0].value_map = {"A": "B"}
-    base.columns[0].headers = ["台帳No", "管理番号"]
-    rows = [{"use": 1, "header": "台帳No", "key": "record_no", "role": "key", "type": "code"},
-            {"use": 1, "header": "起票日", "key": "record_no", "role": "date", "type": "datetime"}]
-    _spec, errors = _build_spec({"name": "T", "columns": rows}, base)
-    assert "キー「record_no」が重複しています" in errors
-
-    # キーを入れ替えただけなら保存できるが、別の列の見出しの別名・値の置き換えは引き継がない
-    swapped = [{"use": 1, "header": "台帳No", "key": "date", "role": "key", "type": "code"},
-               {"use": 1, "header": "起票日", "key": "record_no", "role": "date", "type": "datetime"}]
-    spec, errors = _build_spec({"name": "T", "columns": swapped}, base)
-    assert errors == []
-    dated = spec.column("record_no")
-    assert dated.value_map == {} and "台帳No" not in dated.headers and "管理番号" not in dated.headers
-
-
-def test_duplicate_typed_key_is_refused_by_the_editor(app, client):
-    from tests.tables_helpers import json_only_spec, save_columns
-    from tests.test_tables_fixes4 import _editor_body
-
-    import_id, _template_id, body = _editor_body(app, client, json_only_spec())
-    keys = [r["key"] for r in body["columns"] if r.get("use")]
-    body["columns"][1]["key"] = keys[0]
-    res = save_columns(client, import_id, body)
-    assert res.status_code == 400
-    assert f"キー「{keys[0]}」が重複しています" in json.dumps(res.get_json(), ensure_ascii=False)
 
 
 # ---- R6B-2: md のパスが Windows の上限を超えるときは分かる言葉で止める --------------------------------------------------
@@ -565,10 +510,10 @@ def test_settings_that_never_changed_the_reading_are_dropped():
 # ---- ux6-2: データの行が無いときは、見出し行ではなくデータの範囲のことを言う ----------------------------------------
 
 def _csv_import(client, name: str, text: str) -> int:
-    from tests.tables_helpers import name_source, upload_csv
+    from tests.tables_helpers import csv_source, upload_csv
 
     import_id = upload_csv(client, name, text, encoding="utf-8")
-    name_source(client, import_id, name, encoding="utf-8")
+    csv_source(client, import_id, encoding="utf-8")
     return import_id
 
 
@@ -604,7 +549,7 @@ def test_cancel_does_not_undo_a_read_that_just_finished(app, client, monkeypatch
     from models import database
 
     with app.app_context():
-        _template_id, import_id = _new_import(app)
+        __spec, import_id = _new_import(app)
         pipeline.run_read(FakeCtx(), import_id)
         db = database.get_db()
         ts = database.now()
@@ -631,39 +576,11 @@ def test_cancel_does_not_undo_a_read_that_just_finished(app, client, monkeypatch
         assert store.get_import(import_id)["status"] == "preview"
 
 
-# ---- r6-c2: 版番号は INSERT の中で数える（同時に保存しても衝突しない） -------------------------------------------
-
-def test_new_versions_are_numbered_without_a_race(app):
-    from tables.spec import ColumnSpec
-
-    with app.app_context():
-        col = {"key": "a", "display": "a", "type": "string", "role": "attribute"}
-        spec = spec_from_dict({"name": "版の確認", "columns": [col]})
-        template_id, version_id = store.create_template(spec.name, spec)
-        for i in range(2, 5):
-            store.mark_version_used(version_id)   # 確定に使われた版は上書きしない＝新しい版になる
-            spec.columns.append(ColumnSpec(f"c{i}", f"列{i}"))
-            version_id = store.save_template_version(template_id, spec)
-            assert store.get_template(template_id)["version"] == i
-
-
-def test_a_version_conflict_is_not_explained_as_a_duplicate_name():
-    import sqlite3
-
-    from views.tables import _save_conflict_message
-
-    name_taken = sqlite3.IntegrityError("UNIQUE constraint failed: table_templates.name")
-    version_clash = sqlite3.IntegrityError("UNIQUE constraint failed: table_template_versions.template_id, "
-                                           "table_template_versions.version")
-    assert "別の名前にしてください" in _save_conflict_message(name_taken, "トラブル対応一覧")
-    assert _save_conflict_message(version_clash, "トラブル対応一覧") == "保存が他の操作と重なりました。もう一度保存してください"
-
-
 # ---- ux6-6: ［取り込みを削除］の確認文は取り込みのどの画面でも同じ ------------------------------------------------
 
 def test_the_delete_confirm_text_is_the_same_on_every_table_screen():
     root = Path(__file__).resolve().parents[1] / "templates"
-    shared = "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。"
+    shared = "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
     found = [line.strip() for path in root.rglob("*.html")
              for line in path.read_text(encoding="utf-8").splitlines() if "この取り込みを削除します" in line]
     assert found  # 文言は共通のマクロ（と done.html の「ダウンロードせずに」）だけ

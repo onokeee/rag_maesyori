@@ -22,14 +22,14 @@
     </form>
   {% endcall %}
 
-  {% call ui.step("source", 2, "読み取り方と取り込み設定", open=True) %}
-    <p class="muted">上でファイルを置くと、ここに文字コード・区切り・シートと、使う取り込み設定が出ます。</p>
+  {% call ui.step("source", 2, "読み取り方", open=True) %}
+    <p class="muted">上でファイルを置くと、ここに文字コード・区切り・シートが出ます。</p>
   {% endcall %}
   {% call ui.step("layout", 3, "表の範囲", open=True) %}
     <p class="muted">見出しの行とデータの範囲を、色分けした先頭の行を見ながら決めます。</p>
   {% endcall %}
   {% call ui.step("columns", 4, "列の対応づけ", open=True) %}
-    <p class="muted">列ごとに、キー（見出し）・表示名・型・単位・役割を決めます。前と同じ形の表なら、この段は飛ばします。</p>
+    <p class="muted">表の名前と、列ごとに「使うか」「役割」を決めます。ほかは見出しと値から決めます。</p>
   {% endcall %}
   {% call ui.step("ai", 5, "AI整形（任意）", open=True) %}
     <p class="muted">追記ログの列（例: 対応内容）があるときだけ使います。AI接続の設定もここにあります。</p>

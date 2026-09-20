@@ -19,9 +19,6 @@ STATUS_LABELS = {
     "pending": "未処理", "ok": "照合OK", "flagged": "要確認", "rule_only": "ルールのみ", "error": "エラー",
     "skipped": "対象外", "outdated": "古い結果", "excluded": "除外",
 }
-OVERRIDES = ("rule_only", "excluded")   # 人が決めた扱い（再実行で上書きしない）
-
-
 def source_hash(text) -> str:
     return sha256_text(str(text or ""))
 
@@ -94,7 +91,7 @@ def upsert_item(template_id: int, stage_id: str, row_key: str, *, status: str, t
                 cache_key: str | None = None, result: dict | None = None, checks: dict | None = None,
                 attempts: int | None = None, error: str | None = None, job_id: int | None = None,
                 import_id: int | None = None, conn=None, commit: bool = True) -> None:
-    """行×段の状態を保存する。override（人の判断）は変えない。
+    """行×段の状態を保存する。
 
     import_id は「どの取り込みの分か」。行は (取り込み, 設定, 段, 行) で1つ。ダウンロードのときに
     その取り込みの分だけを消すために持つ（design.md 3.3。同じ設定で作業中の別の取り込みの結果を巻き添えにしない）。
@@ -172,11 +169,11 @@ def results_for_render(template_id: int, stage_id: str, conn=None, *,
                        import_id: int | None = None) -> dict[str, dict]:
     """Markdown 描画用：照合に通った結果（ok / flagged）だけを {row_key: accepted} で返す。
 
-    override が rule_only / excluded の行、outdated・error の行は含めない（ルール出力に戻す）。
+    outdated・error の行は含めない（ルール出力に戻す）。
     """
     out = {}
     for key, item in items_by_key(template_id, stage_id, conn=conn, import_id=import_id).items():
-        if item.get("override") in OVERRIDES or item["status"] not in ("ok", "flagged"):
+        if item["status"] not in ("ok", "flagged"):
             continue
         if item.get("result") is not None:
             out[key] = item["result"]

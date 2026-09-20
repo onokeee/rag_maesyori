@@ -1,8 +1,7 @@
 {#- 段6「内容の確認」の中身。件数・問題・作られるファイル・データを見てから確定する。 -#}
 {% import "components/_ui.html" as ui %}
-<div data-preview-page data-file-url="{{ url_for('tables.preview_file', import_id=imp.id) }}"
-     data-rows-url="{{ url_for('tables.panel', import_id=imp.id, name='preview') }}">
-  <p class="hint">ファイル: {{ imp.file_name }}／取り込み設定: {{ spec.name }}
+<div data-preview-page data-file-url="{{ url_for('tables.preview_file', import_id=imp.id) }}">
+  <p class="hint">ファイル: {{ imp.file_name }}／表の名前: {{ spec.name }}
     {%- if confirmed %}　{{ ui.badge("confirmed") }}（確定済み）{% endif %}</p>
 
   <dl class="tbl-summary">

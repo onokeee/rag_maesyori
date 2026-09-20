@@ -219,20 +219,20 @@ def sample_data_rows(source, sheet, layout: LayoutGuess, n: int = 200) -> list[S
     return out
 
 
+def kind_from_layout(layout) -> str:
+    """表の形の見立てから「行が並ぶ表か」を決める（控えを使う ImportSource.list_kind と共通）。"""
+    if layout.table_kind in ("list", "crosstab") and layout.counts.get("data", 0) >= 10:
+        return layout.table_kind
+    return ""
+
+
 def list_kind(source, sheet) -> str:
     """行が並ぶ表か（見出し行の下に同じ形の行が10行以上）。"list" / "crosstab" / ""（どちらでもない）。"""
     try:
         layout = guess_layout(source, sheet, max_scan_rows=200)
     except Exception:
         return ""
-    if layout.table_kind in ("list", "crosstab") and layout.counts.get("data", 0) >= 10:
-        return layout.table_kind
-    return ""
-
-
-def looks_like_list(source, sheet) -> bool:
-    """一覧表らしいか（クロス集計も含む）。帳票フローからも使う。"""
-    return bool(list_kind(source, sheet))
+    return kind_from_layout(layout)
 
 
 # ---- 内部: 行の事実 ----

@@ -29,8 +29,6 @@ from views.forms import _sheet_grids, upload_error_text
 
 bp = Blueprint("form_types", __name__, url_prefix="/form-types")
 
-STATUS_LABELS = {"draft": "作成中", "active": "使用中", "inactive": "停止中"}
-
 # excel/extractor.number_unit の単位不明の警告の書き出し
 _NO_UNIT_WARNING = "単位が書かれていません"
 TEST_NO_UNIT_WARNING = ("帳票に単位が書かれていません。取り込んだあとの「読み取り結果」で、"
@@ -104,12 +102,7 @@ def page():
 
 
 def _list_html() -> str:
-    return render_template("form_types/_list.html", patterns=db.list_patterns(), status_labels=STATUS_LABELS)
-
-
-@bp.get("/list")
-def list_fragment():
-    return jsonify(html=_list_html())
+    return render_template("form_types/_list.html", patterns=db.list_patterns())
 
 
 # 画面を作り直す前の URL（お気に入り・古いリンク）は1枚の画面へ送る
@@ -133,7 +126,7 @@ def create():
         return jsonify(error="帳票のExcelファイルを置いてください"), 400
     if not name:
         return jsonify(error="帳票の種類の名前を入れてください"), 400
-    pattern_id = db.create_pattern(name, "v1", "")
+    pattern_id = db.create_pattern(name)
     saved, errors = _save_samples(pattern_id, files)
     if not saved:
         db.delete_pattern(pattern_id)
@@ -165,7 +158,6 @@ def _build_html(pattern_id: int, sample_id: int | None = None, notes: list[str] 
         grids=grids,
         rows=_field_view_rows(pattern, info),
         test=_test_result(pattern, samples[index] if samples else None, info),
-        status_labels=STATUS_LABELS,
         confirmed_count=_confirmed_count(pattern_id),
         notes=(notes or []) + errors,
     )

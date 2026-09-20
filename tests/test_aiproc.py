@@ -314,9 +314,6 @@ def test_job_settings_fingerprint_and_chat_raw(ai_app, fake):
         assert res.tokens_in == 4 and res.tokens_out > 0 and res.latency_ms >= 0
         assert res.headers["x-ratelimit-limit-tokens"] == "200000"
         assert res.params["max_tokens"] == 10 and res.params["temperature"] == 0
-        # 既存の ask_json は変わらない
-        fake.chat_replies = ['```json\n{"answer": 42}\n```']
-        assert llm.ask_json("system", "user") == {"answer": 42}
 
 
 def test_error_classification(ai_app, fake):
@@ -456,13 +453,12 @@ def _make_import(app, rows=ROWS, spec=SPEC) -> int:
         conn = database.connect()
         now = database.now()
         try:
-            tid = conn.execute("INSERT INTO table_templates (name, created_at, updated_at) VALUES (?, ?, ?)",
-                               ("トラブル対応一覧", now, now)).lastrowid
-            vid = conn.execute("INSERT INTO table_template_versions (template_id, version, spec_json, spec_hash, created_at)"
-                               " VALUES (?, 1, ?, 'h', ?)", (tid, json.dumps(spec, ensure_ascii=False), now)).lastrowid
-            iid = conn.execute("INSERT INTO table_imports (template_id, template_version_id, file_name, file_hash, stored_path,"
-                               " status, created_at, updated_at) VALUES (?, ?, 'T1.xlsx', 'x', 'x', 'preview', ?, ?)",
-                               (tid, vid, now, now)).lastrowid
+            # 取り込み設定はこの取り込みの行が持つ（template_id / template_version_id は取り込み自身の番号）
+            iid = conn.execute("INSERT INTO table_imports (file_name, file_hash, stored_path, spec_json, spec_hash,"
+                               " status, created_at, updated_at)"
+                               " VALUES ('T1.xlsx', 'x', 'x', ?, 'h', 'preview', ?, ?)",
+                               (json.dumps(spec, ensure_ascii=False), now, now)).lastrowid
+            conn.execute("UPDATE table_imports SET template_id = id, template_version_id = id WHERE id = ?", (iid,))
             conn.commit()
         finally:
             conn.close()
@@ -487,9 +483,10 @@ def _run_job(app, iid, **kw):
         return jobs.wait_job(job_id, timeout=60)
 
 
-def _item_map(app, stage="log"):
+def _item_map(app, iid, stage="log"):
+    """その取り込みの AI整形の控え（設定は無くなったので、束ねる鍵は取り込みの番号）。"""
     with app.app_context():
-        return items.items_by_key(1, stage)
+        return items.items_by_key(iid, stage, import_id=iid)
 
 
 def test_ai_job_item_level_fallback_retry_and_cache(ai_app, fake):
@@ -500,7 +497,7 @@ def test_ai_job_item_level_fallback_retry_and_cache(ai_app, fake):
     assert job["status"] == "done", job["message"]
     assert time.monotonic() - t0 >= 1.0                        # 429 の Retry-After: 1 を待った
     res = job["result"]
-    got = _item_map(ai_app)
+    got = _item_map(ai_app, iid)
     status = {k: v["status"] for k, v in got.items()}
     assert status == {"R1": "ok", "R2": "flagged", "R3": "flagged", "R4": "flagged", "R5": "flagged", "R6": "ok",
                       "R7": "rule_only", "R8": "skipped", "R9": "ok"}
@@ -522,9 +519,9 @@ def test_ai_job_item_level_fallback_retry_and_cache(ai_app, fake):
     assert got["R6"]["attempts"] == 2 and got["R6"]["result"]["entries"]
     assert got["R1"]["result"]["incident"]["temporary_actions"][0]["v"] == "センサー清掃"
     assert got["R7"]["checks"]["reason"].startswith("見出し型")
-    assert all(v["source_hash"] and v["template_version_id"] == 1 for v in got.values())
+    assert all(v["source_hash"] and v["template_version_id"] == iid for v in got.values())
     # custom 段
-    cc = _item_map(ai_app, "cause_class")
+    cc = _item_map(ai_app, iid, "cause_class")
     assert cc["R2"]["status"] == "ok" and cc["R2"]["result"]["value"] == "締結緩み"
     assert cc["R4"]["status"] == "flagged" and cc["R4"]["result"]["value"] == "不明"
     assert cc["R3"]["status"] == "skipped" and cc["R3"]["result"]["value"] == "不明"
@@ -533,7 +530,7 @@ def test_ai_job_item_level_fallback_retry_and_cache(ai_app, fake):
     assert sum("コネクタ緩み" in r["body"]["messages"][-1]["content"] for r in custom_calls) == 1
     assert res["ok"] >= 4 and res["structured_mode"] == "json_schema" and res["cache_hits"] >= 1
     with ai_app.app_context():
-        rendered = items.results_for_render(1, "log")
+        rendered = items.results_for_render(iid, "log", import_id=iid)
     assert set(rendered) == {"R1", "R2", "R3", "R4", "R5", "R6", "R9"}
 
     # 2回目（全件）: すべてキャッシュから。HTTP 呼び出しは増えない（方式判定もメモリ）
@@ -542,7 +539,7 @@ def test_ai_job_item_level_fallback_retry_and_cache(ai_app, fake):
     assert job2["status"] == "done", job2["message"]
     assert len(fake.chat_requests()) == n
     assert job2["result"]["calls"] == 0 and job2["result"]["cache_hits"] >= 7
-    assert {k: v["status"] for k, v in _item_map(ai_app).items()} == status
+    assert {k: v["status"] for k, v in _item_map(ai_app, iid).items()} == status
     # 3回目（未処理のみ）: 対象なし
     job3 = _run_job(ai_app, iid)
     assert job3["result"]["already"] == 18 and job3["result"]["total"] == 0
@@ -556,7 +553,7 @@ def test_ai_job_fallback_mode_and_outdated(ai_app, fake):
     assert job["result"]["structured_mode"] == "json_object"
     keep_calls = [r for r in fake.chat_requests() if "<segments>" in r["body"]["messages"][-1]["content"]]
     assert keep_calls and all(r["body"]["response_format"] == {"type": "json_object"} for r in keep_calls)
-    assert {k: v["status"] for k, v in _item_map(ai_app).items()} == {"R1": "ok", "R6": "ok"}
+    assert {k: v["status"] for k, v in _item_map(ai_app, iid).items()} == {"R1": "ok", "R6": "ok"}
     # 文面が変わった行だけ古くなる
     changed = dict(ROWS)
     changed = {"R1": (ROWS["R1"][0] + "\n4/3 佐藤：清掃後の確認OK", ROWS["R1"][1]), "R6": ROWS["R6"]}
@@ -565,16 +562,16 @@ def test_ai_job_fallback_mode_and_outdated(ai_app, fake):
         data = runner.load_rows_for_ai(iid)
         works = [w for w in runner.prepare_works(data, ["log"])]
         current = {w.row_key: w.hashes() for w in works}
-        assert items.mark_outdated(1, "log", current, data.template_version_id) == 1
-        assert items.get_item(1, "log", "R1")["status"] == "outdated"
-        assert items.get_item(1, "log", "R6")["status"] == "ok"
+        assert items.mark_outdated(iid, "log", current, data.template_version_id, import_id=iid) == 1
+        assert items.get_item(iid, "log", "R1", import_id=iid)["status"] == "outdated"
+        assert items.get_item(iid, "log", "R6", import_id=iid)["status"] == "ok"
         est = estimate.estimate(iid, None, settings=llm.job_client_settings(model="noschema-model"), stage_ids=["log"])
         assert est["ai_rows"] == 1 and est["already_rows"] == 1 and est["calls"] == 1
     n = len(fake.chat_requests())
     job2 = _run_job(ai_app, iid, model="noschema-model", scope="changed", stage_ids=["log"])
     assert job2["status"] == "done" and job2["result"]["ok"] == 1
     assert len(fake.chat_requests()) == n + 1
-    assert items_status(ai_app, "R1") == "ok"
+    assert items_status(ai_app, iid, "R1") == "ok"
 
 
 def test_estimate_counts_unusable_cache_as_calls(ai_app, fake):
@@ -591,7 +588,7 @@ def test_estimate_counts_unusable_cache_as_calls(ai_app, fake):
     iid = _make_import(ai_app, rows=rows)
     job = _run_job(ai_app, iid, stage_ids=["log"])
     assert job["status"] == "done", job["message"]
-    assert items_status(ai_app, "RX") == "error" and items_status(ai_app, "R6") == "ok"
+    assert items_status(ai_app, iid, "RX") == "error" and items_status(ai_app, iid, "R6") == "ok"
     with ai_app.app_context():
         s = llm.job_client_settings()
         est = estimate.estimate(iid, None, scope="errors", settings=s, stage_ids=["log"])
@@ -603,9 +600,10 @@ def test_estimate_counts_unusable_cache_as_calls(ai_app, fake):
     assert len(fake.chat_requests()) > n                     # 実際に聞き直している
 
 
-def items_status(app, key, stage="log"):
+def items_status(app, iid, key, stage="log"):
     with app.app_context():
-        return items.get_item(1, stage, key)["status"]
+        item = items.get_item(iid, stage, key, import_id=iid)
+        return item["status"] if item else None
 
 
 def test_ai_job_pause_resume_and_cancel(ai_app, fake):
@@ -627,13 +625,13 @@ def test_ai_job_pause_resume_and_cancel(ai_app, fake):
         assert jobs.request_cancel(job_id)
         job = jobs.wait_job(job_id, timeout=30)
         assert job["status"] == "cancelled"
-        done = sum(1 for v in _item_map(ai_app).values() if v["status"] == "ok")
+        done = sum(1 for v in _item_map(ai_app, iid).values() if v["status"] == "ok")
         assert 1 <= done < 8
         # 中止した続きは「未処理のみ」で再実行できる
         job2 = jobs.wait_job(runner.start_ai_job(iid, concurrency=4, stage_ids=["log"]), timeout=60)
         assert job2["status"] == "done", job2["message"]
         assert job2["result"]["already"] == done
-        assert sum(1 for v in _item_map(ai_app).values() if v["status"] == "ok") == 8
+        assert sum(1 for v in _item_map(ai_app, iid).values() if v["status"] == "ok") == 8
 
 
 def test_ai_job_stops_when_its_import_is_deleted(ai_app, fake):
@@ -725,7 +723,7 @@ def test_ai_job_survives_a_dropped_connection(ai_app, fake):
     iid = _make_import(ai_app, rows={"R1": ROWS["R1"]})
     job = _run_job(ai_app, iid, stage_ids=["log"])
     assert job["status"] == "done", job["message"]
-    assert items_status(ai_app, "R1") == "ok"
+    assert items_status(ai_app, iid, "R1") == "ok"
     assert fake.counters["drop"] >= 2
 
 
@@ -739,16 +737,6 @@ def test_chat_raw_non_api_body_is_fatal(ai_app, fake):
     assert e.value.kind == "fatal" and "APIの形式" in str(e.value)
 
 
-def test_ask_json_non_api_body_says_so(ai_app, fake):
-    """帳票側の ask_json も、200 の HTML は Python の内部エラーではなく接続先の確認を促す文にする。"""
-    from tests.fake_servers import Reply
-    fake.responder = lambda body, srv: Reply(html="<!doctype html><html><body>blocked</body></html>")
-    with ai_app.app_context():
-        with pytest.raises(ValueError) as e:
-            llm.ask_json("system", "user")
-    assert "APIの形式" in str(e.value) and "choices" not in str(e.value)
-
-
 def test_cache_key_includes_endpoint():
     """接続先を別のサーバーに変えたら、同じモデル名でも前の応答を使わない（末尾の / は同じ扱い）。"""
     msgs = [{"role": "user", "content": "a"}]
@@ -758,21 +746,9 @@ def test_cache_key_includes_endpoint():
     assert cache.cache_key(msgs, "m", {}, None, "json_object") == cache.cache_key(msgs, "m", {}, None, "json_object", "")
 
 
-def _second_import(app, template_id, rows) -> int:
-    """同じ取り込み設定（同じ版）で2つ目の取り込みを作る（先月分と今月分で管理Noが重なる等）。"""
-    with app.app_context():
-        conn = database.connect()
-        now = database.now()
-        try:
-            vid = conn.execute("SELECT id FROM table_template_versions WHERE template_id = ?", (template_id,)).fetchone()[0]
-            iid = conn.execute("INSERT INTO table_imports (template_id, template_version_id, file_name, file_hash, stored_path,"
-                               " status, created_at, updated_at) VALUES (?, ?, 'T1_2.xlsx', 'y', 'y', 'preview', ?, ?)",
-                               (template_id, vid, now, now)).lastrowid
-            conn.commit()
-        finally:
-            conn.close()
-    _write_rows(app, iid, rows)
-    return iid
+def _second_import(app, rows, spec=SPEC) -> int:
+    """同じ設定で2つ目の取り込みを作る（先月分と今月分で管理Noが重なる等）。"""
+    return _make_import(app, rows=rows, spec=spec)
 
 
 def test_ai_items_are_per_import_and_survive_other_import_purge(ai_app, fake):
@@ -783,7 +759,7 @@ def test_ai_items_are_per_import_and_survive_other_import_purge(ai_app, fake):
     fake.responder = keep_scenario
     rows = {k: ROWS[k] for k in ("R1", "R6", "R9")}
     a = _make_import(ai_app, rows=rows)
-    b = _second_import(ai_app, 1, rows)
+    b = _second_import(ai_app, rows)
     ja = _run_job(ai_app, a, stage_ids=["log"])
     assert ja["status"] == "done" and ja["result"]["ok"] == 3
     jb = _run_job(ai_app, b, stage_ids=["log"])
@@ -791,19 +767,22 @@ def test_ai_items_are_per_import_and_survive_other_import_purge(ai_app, fake):
     # B は A の結果を「処理済み」とみなさず、自分の行を持つ（応答はキャッシュから。再課金しない）
     assert jb["result"]["already"] == 0 and jb["result"]["ok"] == 3 and jb["result"]["calls"] == 0
     with ai_app.app_context():
-        assert set(items.items_by_key(1, "log", import_id=b)) == {"R1", "R6", "R9"}
-        assert items.counts(1, "log", import_id=b) == {"ok": 3}
-        spec = runner.load_spec(1)
+        assert set(items.items_by_key(b, "log", import_id=b)) == {"R1", "R6", "R9"}
+        assert items.counts(b, "log", import_id=b) == {"ok": 3}
+        spec = runner.load_spec(b)
         imp_b = dict(database.get_db().execute("SELECT * FROM table_imports WHERE id = ?", (b,)).fetchone())
         assert sorted(pipeline.usable_ai_results(b, imp_b, spec)) == ["R1", "R6", "R9"]
         purge.purge_table_import(a)
         assert sorted(pipeline.usable_ai_results(b, imp_b, spec)) == ["R1", "R6", "R9"]
-        assert items.items_by_key(1, "log", import_id=a) == {}
-        assert items.counts(1, "log", import_id=b) == {"ok": 3}
+        assert items.items_by_key(a, "log", import_id=a) == {}
+        assert items.counts(b, "log", import_id=b) == {"ok": 3}
 
 
 def test_ai_items_migration_keeps_rows_and_allows_same_key_per_import(tmp_path):
-    """m6: 既存の行を残したまま、(取り込み, 設定, 段, 行) で一意に作り直す。"""
+    """m6: 既存の行を残したまま、(取り込み, 段, 行) で一意に作り直す。
+
+    m9 で取り込み設定が無くなったので、束ねる鍵（template_id）は取り込みの番号にそろう。
+    """
     import sqlite3
 
     conn = sqlite3.connect(tmp_path / "old.db")
@@ -811,16 +790,17 @@ def test_ai_items_migration_keeps_rows_and_allows_same_key_per_import(tmp_path):
     for number, migration in enumerate(database.MIGRATIONS[:5], start=1):
         migration(conn)
         conn.execute(f"PRAGMA user_version = {number}")
+    database._add_column(conn, "ai_items", "import_id", "INTEGER")   # 古いDBが持っていた列
     conn.execute("INSERT INTO ai_items (template_id, stage_id, row_key, status, result_json, import_id, updated_at)"
                  " VALUES (1, 'log', 'R1', 'ok', '{}', 7, 't')")
     conn.commit()
     assert database.migrate(conn) == len(database.MIGRATIONS)
-    row = conn.execute("SELECT status, import_id, result_json FROM ai_items").fetchone()
-    assert tuple(row) == ("ok", 7, "{}")
-    items.upsert_item(1, "log", "R1", status="error", import_id=8, conn=conn)
-    items.upsert_item(1, "log", "R1", status="flagged", import_id=8, conn=conn)
-    assert items.counts(1, "log", conn=conn, import_id=7) == {"ok": 1}
-    assert items.counts(1, "log", conn=conn, import_id=8) == {"flagged": 1}
+    row = conn.execute("SELECT template_id, status, import_id, result_json FROM ai_items").fetchone()
+    assert tuple(row) == (7, "ok", 7, "{}")
+    items.upsert_item(8, "log", "R1", status="error", import_id=8, conn=conn)
+    items.upsert_item(8, "log", "R1", status="flagged", import_id=8, conn=conn)
+    assert items.counts(7, "log", conn=conn, import_id=7) == {"ok": 1}
+    assert items.counts(8, "log", conn=conn, import_id=8) == {"flagged": 1}
     conn.close()
 
 
@@ -837,14 +817,14 @@ def test_errors_rerun_does_not_replay_unusable_cached_response(ai_app, fake):
     iid = _make_import(ai_app, rows={"R1": ROWS["R1"]})
     job = _run_job(ai_app, iid, stage_ids=["log"])
     assert job["result"]["error"] == 1
-    assert items_status(ai_app, "R1") == "error"
+    assert items_status(ai_app, iid, "R1") == "error"
     fake.responder = keep_scenario                    # サーバーはもう正しく答える
     n = len(fake.chat_requests())
     job2 = _run_job(ai_app, iid, scope="errors", stage_ids=["log"])
     assert job2["status"] == "done", job2["message"]
     assert job2["result"]["ok"] == 1 and job2["result"]["calls"] >= 1
     assert len(fake.chat_requests()) > n
-    assert items_status(ai_app, "R1") == "ok"
+    assert items_status(ai_app, iid, "R1") == "ok"
     # 正しい応答は使い回す（再課金しない）
     n = len(fake.chat_requests())
     assert _run_job(ai_app, iid, scope="all", stage_ids=["log"])["result"]["calls"] == 0
@@ -909,7 +889,7 @@ def test_estimate_from_counts():
     slow = estimate.estimate_from_counts(100, stats, concurrency=4, tpm=4400)
     assert slow["minutes_by_tpm"] == pytest.approx(50.0) and slow["minutes"] == pytest.approx(50.0)
     assert estimate.estimate_from_counts(10, None, default_tokens_in=500)["basis"] == "default"
-    assert estimate.percentile([1, 2, 3, 4], 75) == pytest.approx(3.25)
+    assert estimate.percentile([1, 2, 3, 4]) == pytest.approx(3.25)
 
 
 # ---- 応答しない行の打ち切りと、呼び出し中の一時停止・中止 ----------------------------------------
@@ -935,7 +915,7 @@ def test_hung_row_is_cut_at_row_deadline_and_job_moves_on(ai_app, fake, monkeypa
     assert job["status"] == "done", job["message"]
     # 以前は 6回×0.5秒＋待機（2+4+8+16+32秒）で1分以上かかった
     assert elapsed < 20
-    m = _item_map(ai_app)
+    m = _item_map(ai_app, iid)
     assert m["R5"]["status"] == "error" and "打ち切りました" in m["R5"]["error"]
     assert "1秒以内" in m["R5"]["error"] and "エラーだけ再実行" in m["R5"]["error"]
     assert m["R1"]["status"] == "ok"
@@ -985,7 +965,7 @@ def test_pause_and_cancel_are_responsive_while_a_call_is_in_flight(ai_app, fake)
             assert jobs.request_pause(job_id)
             _wait(lambda: jobs.get_job(job_id)["status"] == "paused", timeout=10)
             assert time.monotonic() - t0 < runner.STOP_GRACE + 3
-            assert all(v["status"] != "error" for v in _item_map(ai_app).values())   # 見捨てた行はエラーにしない
+            assert all(v["status"] != "error" for v in _item_map(ai_app, iid).values())   # 見捨てた行はエラーにしない
             assert jobs.request_resume(job_id)
             _wait(lambda: sum(1 for r in fake.chat_requests() if segments_of(r["body"])) >= 2)   # 再開したら送り直す
             t0 = time.monotonic()
@@ -1028,3 +1008,4 @@ def test_estimate_duration_text_says_under_a_minute():
     tiny = estimate.estimate_from_counts(1, [{"tokens_in": 100, "tokens_out": 50, "latency_ms": 1000}])
     assert tiny["minutes"] == 0.0 and tiny["duration_text"] == "1分未満"
     assert estimate.estimate_from_counts(0)["duration_text"] == "1分未満"
+

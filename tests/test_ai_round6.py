@@ -88,6 +88,6 @@ def test_ai_job_finishes_when_cache_stays_locked(ai_app, fake, monkeypatch):
     with ai_app.app_context():
         job = jobs.wait_job(runner.start_ai_job(iid, concurrency=2, stage_ids=["log"]), timeout=60)
         assert job["status"] == "done", job["message"]
-        got = items.items_by_key(1, "log", import_id=iid)
+        got = items.items_by_key(iid, "log", import_id=iid)
         assert len(got) == len(rows)
         assert not [v for v in got.values() if v["status"] == "error"]

@@ -108,11 +108,11 @@ def _normalize_row(raw: dict, n: int) -> dict:
     return row
 
 
-def load_spec(template_version_id: int, conn=None):
-    """版の spec_json を TableSpec に（tables.spec が無い・読めないときは dict のまま）。"""
+def load_spec(import_id: int, conn=None):
+    """取り込みの spec_json を TableSpec に（tables.spec が無い・読めないときは dict のまま）。"""
     def run(c):
-        row = c.execute("SELECT spec_json FROM table_template_versions WHERE id = ?", (template_version_id,)).fetchone()
-        return json.loads(row["spec_json"]) if row else None
+        row = c.execute("SELECT spec_json FROM table_imports WHERE id = ?", (import_id,)).fetchone()
+        return json.loads(row["spec_json"]) if row and row["spec_json"] else None
     d = _db(conn, run)
     if d is None:
         return None
@@ -137,7 +137,7 @@ def load_rows_for_ai(import_id: int) -> ImportData:
     imp = _db(None, run)
     if imp is None:
         raise AIJobError("取り込みが見つかりません。")
-    spec = load_spec(imp["template_version_id"]) if imp["template_version_id"] else None
+    spec = load_spec(import_id)
     if spec is None:
         raise AIJobError("取り込み設定が決まっていないため、AI整形を実行できません。")
     path = Path(imp["rows_path"]) if imp["rows_path"] else _tables_dir() / "imports" / str(import_id) / "rows.jsonl.gz"
@@ -382,9 +382,7 @@ def assign_keys(works: list[StageWork], settings: dict, mode: str) -> None:
 
 
 def selected(work: StageWork, item: dict | None, template_version_id, scope: str, forced: bool) -> bool:
-    """範囲の指定で、この行×段を処理するか。人の判断（override）がある行は処理しない。"""
-    if item and item.get("override") in items.OVERRIDES:
-        return False
+    """範囲の指定で、この行×段を処理するか。"""
     if forced or scope == "all":
         return True
     outdated = items.is_outdated(item, template_version_id, work.source_hash, work.context_hash, work.segments_hash)

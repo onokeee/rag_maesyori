@@ -2,10 +2,10 @@
 
 画面は /tables の1枚だけで、段（panel）の中身と保存はすべて fetch でやりとりする
 （views/tables.py・static/tables.js）。テストも同じ JSON のやりとりで進める。
+取り込み設定は保存しないので、列の対応づけは取り込みごとに「使う・役割」だけを送る。
 """
 from __future__ import annotations
 
-import copy
 import io
 from html.parser import HTMLParser
 
@@ -62,9 +62,9 @@ def panel_html(client, import_id: int, name: str, **query) -> str:
 def save_source(client, import_id: int, **fields):
     return client.post(f"/tables/imports/{import_id}/source", json=fields)
 
-def name_source(client, import_id: int, template_name: str, **fields):
-    """新しい取り込み設定を作る、いつもの読み取り方の保存（CSV は cp932・カンマ）。"""
-    payload = {"encoding": "cp932", "delimiter": ",", "template": "new", "new_template_name": template_name}
+def csv_source(client, import_id: int, **fields):
+    """いつもの読み取り方の保存（CSV は cp932・カンマ）。"""
+    payload = {"encoding": "cp932", "delimiter": ","}
     payload.update(fields)
     res = save_source(client, import_id, **payload)
     assert res.status_code == 200, res.get_json()
@@ -76,14 +76,22 @@ def save_layout(client, import_id: int, header_rows="1", data_end_row=""):
                        json={"header_rows": header_rows, "data_end_row": data_end_row})
 
 
+# 画面で選べる役割（views.tables.SCREEN_ROLES）。ここに無い役割は「その他」にして候補の役割を活かす
+SCREEN_ROLES = {"key", "date", "entity", "log"}
+
+
+def screen_role(role: str, ai_role: str | None = None) -> str:
+    if role == "log":
+        return "log" if ai_role == "log" else "attribute"
+    return role if role in SCREEN_ROLES else "attribute"
+
+
 def columns_payload(name: str, columns=COLUMNS, ai_role: str | None = None, **extra) -> dict:
-    """列の対応づけの保存に送る JSON。ai_role に役割名を渡すと、その列を AI整形の対象にする。"""
+    """列の対応づけの保存に送る JSON。ai_role="log" を渡すと追記ログの列を AI整形の対象にする。"""
     payload = {
-        "name": name, "group_by": "month", "description": "", "file_prefix": "",
-        "columns": [{"index": i, "header": h, "use": True, "key": k, "display": h.split("(")[0], "type": t,
-                     "role": r, "unit": "分" if k == "downtime" else "", "md": "attribute",
-                     "fill_down_blank": False, "ai": r == ai_role, "description": ""}
-                    for i, (k, h, t, r) in enumerate(columns)],
+        "name": name,
+        "columns": [{"index": i, "use": True, "role": screen_role(r, ai_role)}
+                    for i, (_k, _h, _t, r) in enumerate(columns)],
     }
     payload.update(extra)
     return payload
@@ -116,23 +124,23 @@ def preview_panel(app, client, import_id: int, **query) -> dict:
 
 # ---- 通しで「内容の確認」まで進める -------------------------------------------------------
 
-def imported(app, client, name: str, template_name: str, text: str = CSV_TEXT, ai_role: str | None = None,
+def imported(app, client, name: str, table_name: str, text: str = CSV_TEXT, ai_role: str | None = None,
              **payload_extra) -> int:
     """CSV を置いて読み取り方・範囲・列を保存し、読み込みが終わった取り込みを作る。"""
     import_id = upload_csv(client, name, text)
-    name_source(client, import_id, template_name)
+    csv_source(client, import_id)
     res = save_layout(client, import_id)
     assert res.status_code == 200, res.get_json()
-    payload = columns_payload(template_name, ai_role=ai_role, **payload_extra)
+    payload = columns_payload(table_name, ai_role=ai_role, **payload_extra)
     res = save_columns(client, import_id, payload)
     assert res.status_code == 200, res.get_json()
     wait_import_job(app, import_id)
     return import_id
 
 
-def confirmed(app, client, name: str, template_name: str, **kwargs) -> int:
+def confirmed(app, client, name: str, table_name: str, **kwargs) -> int:
     """確定まで済ませた取り込み（zip をダウンロードできる状態）。"""
-    import_id = imported(app, client, name, template_name, **kwargs)
+    import_id = imported(app, client, name, table_name, **kwargs)
     preview_panel(app, client, import_id)
     res = client.post(f"/tables/imports/{import_id}/confirm")
     assert res.status_code == 200, res.get_json()
@@ -141,12 +149,13 @@ def confirmed(app, client, name: str, template_name: str, **kwargs) -> int:
 
 
 # ---- 「列の対応づけ」の段を、画面と同じ形で読み書きする -------------------------------------
-# static/tables.js の collect() と同じ値を、段の HTML から集める。
+# static/tables.js の saveColumns が集める値（表の名前と、列ごとの「使う・役割」）を段の HTML から集める。
+
 
 class _EditorParser(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.settings, self.cols, self.cur, self.sel, self.header_rows = {}, [], None, None, 1
+        self.settings, self.cols, self.cur, self.sel = {}, [], None, None
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
@@ -155,8 +164,6 @@ class _EditorParser(HTMLParser):
             if target[key] is None or "selected" in a:
                 target[key] = a.get("value")
             return
-        if "data-columns-editor" in a:
-            self.header_rows = int(a.get("data-header-rows-count") or 1)
         if tag == "tr" and "data-col" in a:
             self.cur = {"index": int(a["data-index"]), "header": a["data-header"]}
             self.cols.append(self.cur)
@@ -184,51 +191,33 @@ class _EditorParser(HTMLParser):
 def collect_editor(html: str) -> dict:
     p = _EditorParser()
     p.feed(html)
-    return {**p.settings, "header_rows_count": p.header_rows, "columns": p.cols}
+    return {**p.settings, "columns": p.cols}
 
 
-def json_only_spec():
-    """JSON で読み込んだときにだけ付く設定（見出しの別名・単位換算・値の置き換えなど）を持つ取り込み設定。"""
-    from tables.spec import spec_from_dict
-    from tests.test_aiproc import SPEC
-
-    d = copy.deepcopy(SPEC)
-    for col in d["columns"]:
-        if col["key"] == "occurred_at":
-            col["headers"] = ["発生日", "発生日時", "日付"]
-        if col["key"] == "equipment_name":
-            col["value_map"] = {"ロボ2": "搬送ロボット2号機"}
-            col["allowed"] = ["搬送ロボット1号機", "搬送ロボット2号機"]
-            col["normalize"] = ["nfkc", "upper"]
-    d["columns"].append({"key": "downtime", "display": "停止時間", "headers": ["停止時間(分)", "停止時間"],
-                         "type": "number", "role": "measure", "unit": "分", "unit_conversions": {"h": 60, "時間": 60}})
-    d["markdown"] = {"summaries": [{"id": "month", "metrics": ["count", "sum:downtime"], "top_n": 10},
-                                   {"id": "entity_fiscal_year", "metrics": ["count", "avg:downtime"]}],
-                     "title_columns": ["equipment_name", "symptom"], "file_prefix": "トラブル", "dataset_card": False}
-    d["header"] = {"rows": 1, "anchors": ["管理No"], "search_rows": 50}
-    return spec_from_dict(d)
+def editor_body(client, import_id: int) -> dict:
+    """「列の対応づけ」の段が出す表を、画面が送る形（そのまま save_columns に渡せる形）にして返す。"""
+    return collect_editor(panel_html(client, import_id, "columns"))
 
 
-# json_only_spec の列がそのまま当たる CSV（「列の対応づけ」の段をその設定で開くため）
+def set_role(body: dict, header: str, role: str) -> dict:
+    """段から集めた表の、その見出しの列の役割を変える（画面で選び直したのと同じ）。"""
+    for col in body["columns"]:
+        if col["header"] == header:
+            col["role"] = role
+    return body
+
+
+# 見出しがはっきりした、もう1枚の表（列の対応づけの段をいろいろ試すため）
 SPEC_CSV = "管理No,発生日,設備名,現象,原因,対応内容,担当,停止時間(分)\r\n" + "".join(
     f'TR-{i:03d},2026-08-{i:02d},搬送ロボット{i % 2 + 1}号機,アラーム停止{i},摩耗,'
     f'"8/{i} 10:00 田中: 確認した。",田中,{i * 5}\r\n' for i in range(1, 13))
 
 
-def template_import(app, client, spec, name: str = "編集.csv", text: str = SPEC_CSV) -> tuple[int, int]:
-    """spec を取り込み設定として保存し、その設定で読む取り込みを1件作る。戻り値: (import_id, template_id)"""
-    with app.app_context():
-        template_id, _version_id = store.create_template(spec.name, spec, "")
+def spec_import(app, client, name: str = "編集.csv", text: str = SPEC_CSV) -> int:
+    """SPEC_CSV を置いて読み取り方と範囲まで決めた取り込み（「列の対応づけ」の段を開ける状態）。"""
     import_id = upload_csv(client, name, text)
-    res = save_source(client, import_id, encoding="cp932", delimiter=",", template=str(template_id))
+    res = save_source(client, import_id, encoding="cp932", delimiter=",")
     assert res.status_code == 200, res.get_json()
     res = save_layout(client, import_id)
     assert res.status_code == 200, res.get_json()
-    if res.get_json().get("job"):
-        wait_import_job(app, import_id)   # 読み込み中は段が待ち画面になるので、終わらせてから開く
-    return import_id, template_id
-
-
-def editor_body(client, import_id: int) -> dict:
-    """「列の対応づけ」の段が出す表を、画面が送る形にして返す。"""
-    return collect_editor(panel_html(client, import_id, "columns"))
+    return import_id

@@ -141,7 +141,7 @@ def _write_md_dir(target: Path, files: list[MdFile]) -> None:
             # Windows のパスの長さの上限（260文字）を超えると、書けずに分かりにくいエラーで止まる
             raise PipelineError(
                 f"Markdownのファイル名が長すぎて、サーバーのデータの置き場所に書けません（最長 {len(longest)}文字）。"
-                "取り込み設定の設定名・ファイル名の先頭を短くするか、アプリを浅いフォルダに置いてください")
+                "「表の名前」を短くするか、アプリを浅いフォルダに置いてください")
     shutil.rmtree(tmp, ignore_errors=True)
     # 親（imports/<id>/）は作り直さない。消された取り込みのフォルダを復活させないため（design.md 3.3）
     tmp.mkdir()
@@ -154,10 +154,8 @@ def _write_md_dir(target: Path, files: list[MdFile]) -> None:
 # ---- 設定と表の範囲 ---------------------------------------------------------------------------
 
 def spec_for_import(imp: dict):
-    if not imp.get("template_version_id"):
-        return None
-    version = store.get_version(imp["template_version_id"])
-    return version["spec"] if version else None
+    """その取り込みが使う取り込み設定（取り込みの行が持つ。tables.store）。列の対応づけ前は None。"""
+    return (imp or {}).get("spec")
 
 
 def _source_options(imp: dict) -> dict:
@@ -202,11 +200,10 @@ def layout_for_import(source, imp: dict, spec):
 def run_read(ctx, import_id: int) -> dict:
     """ジョブ: 保存した範囲と設定で全行を読み、正規化・チェックして行データと問題一覧を書く。"""
     imp = store.get_import(import_id)
-    version = store.get_version(imp["template_version_id"]) if imp and imp.get("template_version_id") else None
-    if version is None:
-        store.update_import(import_id, status="failed", stats={"error": "取り込み設定が見つかりません"})
-        raise PipelineError("取り込み設定が見つかりません")
-    spec = version["spec"]
+    spec = spec_for_import(imp) if imp else None
+    if spec is None:
+        store.update_import(import_id, status="failed", stats={"error": "列の対応づけが決まっていません"})
+        raise PipelineError("列の対応づけが決まっていません")
     try:
         ctx.progress(phase="読み込み", done=0, total=0)
         cached = import_source(imp)
@@ -234,7 +231,7 @@ def run_read(ctx, import_id: int) -> dict:
             shutil.rmtree(directory, ignore_errors=True)
         st = stats.to_dict()
         st.update({
-            "spec_hash": version["spec_hash"], "template_version_id": version["id"],
+            "spec_hash": imp.get("spec_hash") or "",
             "layout": {"sheet": layout.sheet, "table_kind": layout.table_kind, "header_rows": layout.header_rows,
                        "data_start": layout.data_start, "data_end": layout.data_end, "headers": layout.headers},
             "issue_counts": count_levels(issues),
@@ -457,7 +454,6 @@ def run_render(ctx, import_id: int) -> dict:
             file_count = len(files)
         stats = imp.get("stats") or {}
         stats["output"] = {"files": file_count, "records": len(records)}
-        store.mark_version_used(imp["template_version_id"])
         store.update_import(import_id, status="confirmed", confirmed_at=database.now(), stats=stats)
         ctx.progress(phase="完了", done=3, total=3)
         return {"files": file_count, "records": len(records)}

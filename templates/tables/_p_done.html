@@ -1,5 +1,4 @@
 {#- 段7「確定してダウンロード（zip）」の中身。ダウンロードするとこの取り込みのデータは消える。 -#}
-{% import "components/_ui.html" as ui %}
 <div data-done-page>
   <p class="hint">{{ (stats.output or {}).records or stats.records or 0 }}件の記録から {{ files|length }}件の Markdown を作りました。</p>
   <p class="notice" role="note">{{ delete_note }}</p>
@@ -8,7 +7,7 @@
        data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdownをまとめてダウンロード（zip）</a>
     <a class="btn" href="{{ url_for('tables.download_csv', import_id=imp.id) }}">正規化CSVをダウンロード</a>
     <button type="button" class="btn danger-outline" data-import-delete
-            data-confirm="ダウンロードせずにこの取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。"
+            data-confirm="ダウンロードせずにこの取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
             data-confirm-ok="削除する">ダウンロードせずに削除</button>
   </div>
   <p class="hint">zip の中身: 「RAG投入用」フォルダに Markdown、「管理用_RAGには入れない」フォルダに 正規化データ.csv・問題一覧.csv・取込レポート.csv が入っています。

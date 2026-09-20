@@ -115,23 +115,22 @@ def test_builder_suggests_units_and_title_fields(repair_infos, tmp_path):
     assert by_name["downtime"]["unit"] == "分"
 
 
-def test_form_rows_roundtrip_unit_rag_output_and_title_fields():
-    from pattern.forms import parse_pattern_form, pattern_to_meta, pattern_to_rows
+def _field_row(field_name, display_name, data_type="string", **extra):
+    row = {"use": True, "field_name": field_name, "display_name": display_name, "candidates": display_name,
+           "data_type": data_type, "required": False, "direction": "auto", "unit": "", "rag_output": "show",
+           "table_columns": "", "section": ""}
+    row.update(extra)
+    return row
 
-    form = {
-        "name": "設備修理報告書", "version": "v1", "title_fields": "report_id, equipment_id, unknown",
-        "md_options_form": "1",
-        "fields-0-use": "on", "fields-0-field_name": "report_id", "fields-0-display_name": "報告番号",
-        "fields-0-candidates": "報告番号", "fields-0-data_type": "string", "fields-0-direction": "auto",
-        "fields-1-use": "on", "fields-1-field_name": "equipment_id", "fields-1-display_name": "設備番号",
-        "fields-1-candidates": "設備番号", "fields-1-data_type": "string", "fields-1-direction": "auto",
-        "fields-2-use": "on", "fields-2-field_name": "work_hours", "fields-2-display_name": "作業時間",
-        "fields-2-candidates": "作業時間", "fields-2-data_type": "number", "fields-2-direction": "auto",
-        "fields-2-unit": "時間", "fields-2-rag_output": "omit",
-    }
-    meta, sheet_rows, field_rows, errors = parse_pattern_form(form)
-    assert errors == []
-    assert meta["title_fields"] == ["report_id", "equipment_id"]
+
+def test_rows_roundtrip_unit_rag_output_and_title_fields():
+    from pattern.forms import pattern_to_meta, pattern_to_rows
+
+    meta = {"name": "設備修理報告書", "version": "v1",
+            "title_fields": ["report_id", "equipment_id", "unknown"]}
+    sheet_rows = []
+    field_rows = [_field_row("report_id", "報告番号"), _field_row("equipment_id", "設備番号"),
+                  _field_row("work_hours", "作業時間", "number", unit="時間", rag_output="omit")]
     pattern = rows_to_pattern(3, meta, sheet_rows, field_rows)
     work = pattern.fields[2]
     assert (work.unit, work.rag_output) == ("時間", "omit")
@@ -157,12 +156,12 @@ def test_extraction_carries_unit_rag_output_and_title_fields(repair_infos):
 
 # ---- 一覧表らしさ ----
 
-def test_looks_like_table_sheet(repair_infos, sample_dir, tmp_path):
+def test_table_like_sheets(repair_infos, sample_dir, tmp_path):
     from openpyxl import Workbook
-    from pattern.matcher import looks_like_table_sheet, table_like_sheets
+    from pattern.matcher import table_like_sheets
 
     for info in repair_infos + [load_workbook_info(sample_dir / "inspection.xlsx")]:
-        assert not looks_like_table_sheet(info), info.path.name
+        assert not table_like_sheets(info), info.path.name
 
     wb = Workbook()
     ws = wb.active
@@ -176,14 +175,13 @@ def test_looks_like_table_sheet(repair_infos, sample_dir, tmp_path):
     notes["A1"] = "この様式の書き方"
     wb.save(tmp_path / "list.xlsx")
     info = load_workbook_info(tmp_path / "list.xlsx")
-    assert looks_like_table_sheet(info)
     assert table_like_sheets(info) == ["一覧"]
-    assert looks_like_table_sheet(info.grids["一覧"]) and not looks_like_table_sheet(info, ["記入要領"])
+    assert not table_like_sheets(info, ["記入要領"])
 
     # 9行しかない表は一覧表とみなさない
     ws.delete_rows(13, 3)
     wb.save(tmp_path / "short.xlsx")
-    assert not looks_like_table_sheet(load_workbook_info(tmp_path / "short.xlsx"))
+    assert not table_like_sheets(load_workbook_info(tmp_path / "short.xlsx"))
 
 
 # ---- 見出し欄の色・チェックボックス・項番・続きのシート（帳票サンプルの不一致の分析から） ----
@@ -385,15 +383,11 @@ def test_builder_suggests_table_field_and_skips_column_header_fields(tmp_path):
     assert next(r for r in rows if r["field_name"] == "downtime")["use"]
 
 
-def test_table_columns_roundtrip_through_form_rows():
-    from pattern.forms import parse_pattern_form, pattern_to_rows
+def test_table_columns_roundtrip_through_rows():
+    from pattern.forms import pattern_to_rows
 
-    form = {"name": "点検報告書", "fields-0-use": "on", "fields-0-field_name": "parts", "fields-0-display_name": "交換部品",
-            "fields-0-candidates": "■ 交換部品", "fields-0-data_type": "table", "fields-0-direction": "auto",
-            "fields-0-table_columns": "品番\n品名\n数量"}
-    meta, sheets, rows, errors = parse_pattern_form(form)
-    assert errors == []
-    pattern = rows_to_pattern(1, meta, sheets, rows)
+    rows = [_field_row("parts", "交換部品", "table", candidates="■ 交換部品", table_columns="品番\n品名\n数量")]
+    pattern = rows_to_pattern(1, {"name": "点検報告書"}, [], rows)
     assert pattern.fields[0].data_type == "table" and pattern.fields[0].table_columns == ["品番", "品名", "数量"]
     assert pattern_to_rows(pattern)[1][0]["table_columns"] == "品番\n品名\n数量"
 

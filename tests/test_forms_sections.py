@@ -3,8 +3,8 @@ from datetime import date, time
 
 from excel.extractor import extract_document
 from excel.tables import detect_tables, find_table, section_of, sections
-from pattern.builder import merge_with_existing, suggest_rows
-from pattern.forms import parse_pattern_form, pattern_to_rows, rows_to_pattern
+from pattern.builder import suggest_rows
+from pattern.forms import pattern_to_rows, rows_to_pattern
 from pattern.model import FieldDef, PatternDef
 from tests.test_extraction import LABEL_FILL, _book, _values
 
@@ -131,15 +131,13 @@ def test_builder_leaves_the_section_empty_when_both_sides_are_common(tmp_path):
     assert all(r["section"] == "" for r in rows)
 
 
-def test_section_round_trips_through_the_form():
+def test_section_round_trips_through_the_rows():
     fd = FieldDef("repair", "処置", ["暫定対策"], data_type="text", section="回答")
     _, rows = pattern_to_rows(_pattern(fd))
     assert rows[0]["section"] == "回答"
-    form = {"name": "連絡票", "fields-0-use": "on", "fields-0-field_name": "repair", "fields-0-display_name": "処置",
-            "fields-0-candidates": "暫定対策", "fields-0-data_type": "text", "fields-0-section": "▼ 回答欄（宛先記入）"}
-    meta, sheets, field_rows, errors = parse_pattern_form(form)
-    assert not errors and field_rows[0]["section"] == "回答"  # 見出しのとおり入力しても比較用の名前にそろえる
-    assert rows_to_pattern(1, meta, sheets, field_rows).fields[0].section == "回答"
+    # 見出しのとおり入力しても比較用の名前にそろえる
+    rows[0]["section"] = "▼ 回答欄（宛先記入）"
+    assert rows_to_pattern(1, {"name": "連絡票"}, [], rows).fields[0].section == "回答"
 
 
 def test_section_with_two_suffixes_is_stable_through_learning_and_saving(tmp_path):
@@ -171,16 +169,6 @@ def test_section_with_two_suffixes_is_stable_through_learning_and_saving(tmp_pat
     meta, sheet_rows = {"name": "報告書"}, [{"use": True, "sheet_name": "報告書", "required": True}]
     _, again = pattern_to_rows(pattern)
     assert rows_to_pattern(1, meta, sheet_rows, again).fields == pattern.fields
-
-
-def test_adding_samples_fills_an_empty_section_but_keeps_a_set_one():
-    """見本の追加で見つかった区画は、登録済みの項目の区画が空のときだけ入れる（手で決めた区画は変えない）。"""
-    existing = _pattern(FieldDef("repair", "処置", ["暫定対策"], data_type="text"),
-                        FieldDef("cause", "原因", ["原因"], data_type="text", section="手入力"))
-    found = [{"field_name": f, "display_name": d, "candidates": c, "data_type": "text", "examples": "", "seen": 2,
-              "unit": "", "section": "回答", "use": True} for f, d, c in (("repair", "処置", "暫定対策"), ("cause", "原因", "原因"))]
-    _, rows = merge_with_existing(existing, [], found)
-    assert {r["field_name"]: r["section"] for r in rows} == {"repair": "回答", "cause": "手入力"}
 
 
 # ---- ラベルの下の値: 左の見出しの値の欄を取らない ----------------------------------------------

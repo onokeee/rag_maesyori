@@ -1,21 +1,36 @@
-{#- 段4「列の対応づけ」の中身。表そのものは _column_editor.html。 -#}
+{#- 段4「列の対応づけ」の中身。決めるのは「表の名前」と、列ごとの「使う・役割」だけ。
+    キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値からサーバーが決める（利用者の指示 2026-09-20）。
+    必要な変数: rows, roles, name, save_url -#}
 {% import "components/_ui.html" as ui %}
-<p class="hint">{% if is_new %}見出しと値から候補を入れました。確かめて取り込み設定を保存してください。
-  {% else %}取り込み設定「{{ settings.name }}」を変更します。{% endif %}</p>
+<div data-columns-editor data-save-url="{{ save_url }}">
+  <label class="stack-label">表の名前
+    <input type="text" class="input" data-setting="name" value="{{ name }}" maxlength="80" required>
+    <small>Markdown のファイル名と、データセット説明の見出しに使います。</small>
+  </label>
 
-{% if changed %}
-<div class="notice" role="note">
-  <strong>前回の取り込み設定と見出しが変わっています。</strong>
-  {% if changed.missing %}見つからない列: {{ changed.missing | join('、') }}。{% endif %}
-  {% if changed.added %}新しい見出し: {{ changed.added | join('、') }}。{% endif %}
-  対応づけを確かめてから保存してください。
-  {% if absent %}今回のファイルにない列（設定には残します）: {{ absent | join('、') }}。{% endif %}
-</div>
-{% endif %}
+  {% call ui.card("列の対応づけ", "Markdown に出す列にチェックを入れ、役割を選びます。キー・型・単位・出し方は値から決めます。") %}
+    <div class="table-wrap">
+    <table class="table compact col-editor">
+      <thead>
+        <tr><th>使う</th><th>見出し（そのまま項目名になります）</th><th>役割</th><th>値の例</th><th>知らせ</th></tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr data-col data-index="{{ r.index }}" data-header="{{ r.header }}" class="{{ '' if r.use else 'is-unused' }}">
+          <td class="center"><input type="checkbox" data-field="use" {{ 'checked' if r.use }} aria-label="{{ r.header }} を使う"></td>
+          <td><strong>{{ r.header }}</strong></td>
+          <td><select data-field="role" aria-label="役割">{% for v, label in roles %}<option value="{{ v }}" {{ 'selected' if v == r.role }}>{{ label }}</option>{% endfor %}</select></td>
+          <td class="examples">{{ r.examples | join('\n') }}</td>
+          <td><small class="muted">{% for w in r.warnings %}{{ w }}{% if not loop.last %}<br>{% endif %}{% endfor %}</small></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <ul class="list-plain warn" data-editor-errors aria-live="polite"></ul>
+  {% endcall %}
 
-{% set show_stats = True %}
-{% include "tables/_column_editor.html" %}
-
-<div class="form-actions">
-  <button type="button" class="btn primary" data-editor-save>この対応づけで読み込む</button>
+  <div class="form-actions">
+    <button type="button" class="btn primary" data-editor-save>この対応づけで読み込む</button>
+  </div>
 </div>

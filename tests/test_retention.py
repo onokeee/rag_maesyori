@@ -19,7 +19,7 @@ EXTRACTION = {
     "pattern": {"id": 1, "name": "設備修理報告書", "version": "v1"},
     "values": {"equipment_id": "EQ-001"},
     "fields": [{"field_name": "equipment_id", "display_name": "設備番号", "data_type": "string", "value": "EQ-001",
-                "sheet": "修理報告書", "label_cell": "A4", "value_cell": "B4", "edited": False, "ai_filled": False}],
+                "sheet": "修理報告書", "label_cell": "A4", "value_cell": "B4", "edited": False}],
     "missing_required": [], "attachments": [], "sheets": ["修理報告書"],
 }
 
@@ -85,7 +85,7 @@ def test_downloading_a_form_removes_its_file_and_every_row(app, client):
     assert not path.exists()
     assert _uploaded_files(app) == []
     assert _rows_for(app, "documents", ("document_id",), doc_id) == {}
-    assert client.get(f"/forms/{doc_id}/review").status_code == 404
+    assert client.get(f"/forms/{doc_id}/type").status_code == 404
     assert client.get(f"/forms/{doc_id}/download.md").status_code == 404
 
 
@@ -212,8 +212,8 @@ def test_downloading_the_table_zip_removes_everything(app, client):
         assert conn.execute("SELECT COUNT(*) FROM ai_items").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM jobs WHERE ref_id = ?", (import_id,)).fetchone()[0] == 0
-        # 取り込み設定は残る（設定であってデータではない）
-        assert store.get_template(template_id) is not None
+        # 取り込み設定も取り込みの行ごと消える（保存しない）
+        assert conn.execute("SELECT COUNT(*) FROM table_imports").fetchone()[0] == 0
     assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 404
 
 
@@ -385,11 +385,10 @@ def test_purging_one_import_keeps_the_ai_results_of_another_import(app, client):
     import_id = _confirmed_import(app, client)
     with app.app_context():
         template_id = store.get_import(import_id)["template_id"]
-        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"}, template_id,
-                                    store.get_template(template_id)["current_version_id"])
+        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"})
         conn = db.get_db()
         _ai_row(conn, template_id, import_id, "TR-001", "K1")
-        _ai_row(conn, template_id, other, "TR-900", "K2")
+        _ai_row(conn, other, other, "TR-900", "K2")
         conn.commit()
 
     assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
@@ -445,11 +444,10 @@ def test_purging_one_import_keeps_the_unreferenced_responses_another_import_stil
     import_id = _confirmed_import(app, client)
     with app.app_context():
         template_id = store.get_import(import_id)["template_id"]
-        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"}, template_id,
-                                    store.get_template(template_id)["current_version_id"])
+        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"})
         conn = db.get_db()
         _ai_row(conn, template_id, import_id, "TR-001", "K1")
-        _ai_row(conn, template_id, other, "TR-900", "K2-repair")
+        _ai_row(conn, other, other, "TR-900", "K2-repair")
         _llm_call(conn, "K2-first")   # 別の取り込みの、再依頼で直した行の1回目の応答（どこからも参照されない）
         conn.commit()
 
@@ -471,12 +469,11 @@ def test_purging_one_import_keeps_a_response_another_import_paid_for(app, client
     import_id = _confirmed_import(app, client)
     with app.app_context():
         template_id = store.get_import(import_id)["template_id"]
-        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"}, template_id,
-                                    store.get_template(template_id)["current_version_id"])
+        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"})
         conn = db.get_db()
         _ai_row(conn, template_id, import_id, "TR-001", "K")      # 消す取り込みはキャッシュとして引いただけ
         conn.execute("UPDATE llm_calls SET import_id = ? WHERE cache_key = 'K'", (other,))   # 払ったのは別の取り込み
-        _ai_row(conn, template_id, other, "TR-900", "K9")         # 別の取り込みは AI整形の作業中
+        _ai_row(conn, other, other, "TR-900", "K9")         # 別の取り込みは AI整形の作業中
         conn.commit()
 
     assert client.get(f"/tables/imports/{import_id}/download.zip").status_code == 200
@@ -499,12 +496,11 @@ def test_purging_an_import_deletes_its_own_unreferenced_responses(app, client, t
     import_id = _confirmed_import(app, client)
     with app.app_context():
         template_id = store.get_import(import_id)["template_id"]
-        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"}, template_id,
-                                    store.get_template(template_id)["current_version_id"])
+        other = store.create_import("作業中.csv", "1" * 64, "tables/other.csv", {"kind": "csv"})
         conn = db.get_db()
         _ai_row(conn, template_id, import_id, "TR-001", "K1-repair")
         _llm_call(conn, "K1-first", import_id)          # 消す取り込みの、再依頼で直した行の1回目の応答
-        _ai_row(conn, template_id, other, "TR-900", "K2-repair")
+        _ai_row(conn, other, other, "TR-900", "K2-repair")
         _llm_call(conn, "K2-first", other)              # 別の取り込みの分（再実行で引く。残す）
         conn.execute("UPDATE llm_calls SET import_id = ? WHERE cache_key = 'K1-repair'", (import_id,))
         conn.execute("UPDATE llm_calls SET import_id = ? WHERE cache_key = 'K2-repair'", (other,))
@@ -724,17 +720,16 @@ def test_files_stay_when_deleting_the_table_rows_fails(app, client, monkeypatch)
 
 
 def test_ai_responses_left_by_a_template_delete_are_swept_at_startup(app, client):
-    """取り込み設定を消すと ai_items は消えるが、生の応答（llm_calls）が残る。起動時の片付けで消す。"""
+    """AI整形の控え（ai_items）が消えたのに生の応答（llm_calls）が残る場面は、起動時の片付けで消す。"""
     from app import _cleanup_leftovers
 
     import_id = _confirmed_import(app, client)
     with app.app_context():
-        template_id = store.get_import(import_id)["template_id"]
         conn = db.get_db()
-        _ai_row(conn, template_id, import_id, "TR-001", "K")
+        _ai_row(conn, import_id, import_id, "TR-001", "K")
+        conn.execute("DELETE FROM ai_items WHERE import_id = ?", (import_id,))
         conn.commit()
-        store.delete_template(template_id)
-        assert conn.execute("SELECT COUNT(*) FROM ai_items").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 1
     _cleanup_leftovers(app)
     with app.app_context():
         assert db.get_db().execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
@@ -751,17 +746,17 @@ def test_sweep_orphan_ai_removes_responses_nobody_uses(app):
     assert SECRET.encode("utf-8") not in _db_bytes(app)
 
 
-def test_deleting_a_template_removes_the_raw_ai_responses_at_once(app, client):
-    """取り込み設定を消したら、生の応答（llm_calls）も起動を待たずにすぐ消える。"""
+def test_deleting_an_import_removes_the_raw_ai_responses_at_once(app, client):
+    """取り込みを消したら、生の応答（llm_calls）も起動を待たずにすぐ消える。"""
     import_id = _confirmed_import(app, client)
     with app.app_context():
-        template_id = store.get_import(import_id)["template_id"]
         conn = db.get_db()
-        _ai_row(conn, template_id, import_id, "TR-001", "K")
+        _ai_row(conn, import_id, import_id, "TR-001", "K")
         conn.commit()
         assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 1
-        store.delete_template(template_id)
+        purge.purge_table_import(import_id)
         assert conn.execute("SELECT COUNT(*) FROM llm_calls").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM ai_items").fetchone()[0] == 0
 
 
 def test_a_ranged_download_gets_the_whole_file_and_removes_the_item(app, client):

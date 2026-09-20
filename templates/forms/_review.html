@@ -1,6 +1,6 @@
 {#- 読み取り結果の欄（HTML の断片）。左に元のシート、右に読み取った値（その場で直せる） -#}
 {% import "components/_ui.html" as ui %}
-{% set SOURCE_LABELS = {"auto": ("自動で読み取り", "blue"), "ai": ("AIが入力（要確認）", "violet"), "manual": ("手で修正", "teal"), "blank": ("空欄", "gray")} %}
+{% set SOURCE_LABELS = {"auto": ("自動で読み取り", "blue"), "manual": ("手で修正", "teal"), "blank": ("空欄", "gray")} %}
 
 <div class="review-toolbar cluster">
   <ul class="chips" aria-label="項目の状態">
@@ -21,7 +21,7 @@
     <div class="split-pane-head">
       <h3>元のシート</h3>
       {% if grids | length > 1 %}
-      <div class="tabs" role="tablist" data-sheet-tabs>
+      <div class="tabs" role="tablist">
         {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
       </div>
       {% endif %}
@@ -31,24 +31,7 @@
         <p class="muted">元のファイルを読み込めませんでした。値の確認は右の項目だけで行ってください。</p>
       {% endif %}
       <p class="hint">項目の入力欄を選ぶと、見出しのセル（橙）と値のセル（青）が光ります。入力欄を選んだ状態でセルをクリックすると、そのセルの値を入れます。</p>
-      {% for g in grids %}
-      <div class="sheet-grid" data-sheet="{{ g.name }}" {% if not loop.first %}hidden{% endif %}>
-        {% if g.truncated %}<p class="hint">大きいシートのため、先頭の一部だけ表示しています。</p>{% endif %}
-        {% if g.images %}<p class="hint">このシートに画像が{{ g.images }}件あります。</p>{% endif %}
-        <div class="grid-wrap" tabindex="0" aria-label="シート {{ g.name }}">
-          <table class="data-grid">
-            <thead><tr><th class="corner"></th>{% for l in g.letters %}<th scope="col">{{ l }}</th>{% endfor %}</tr></thead>
-            <tbody>
-            {% for row in g.rows %}
-              <tr><th scope="row" class="rownum">{{ row.index }}</th>
-              {% for c in row.cells %}<td data-cell="{{ c.coord }}"{% if c.rowspan > 1 %} rowspan="{{ c.rowspan }}"{% endif %}{% if c.colspan > 1 %} colspan="{{ c.colspan }}"{% endif %}{% if c.label %} class="is-label"{% endif %}>{{ c.text }}</td>{% endfor %}
-              </tr>
-            {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      {% endfor %}
+      {{ ui.sheet_grid(grids) }}
     </div>
   </section>
 

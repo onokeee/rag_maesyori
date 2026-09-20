@@ -104,15 +104,6 @@ CREATE TABLE IF NOT EXISTS table_template_versions (
     UNIQUE (template_id, version)
 );
 
-CREATE TABLE IF NOT EXISTS table_template_samples (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    template_id INTEGER NOT NULL REFERENCES table_templates(id) ON DELETE CASCADE,
-    file_name TEXT NOT NULL,
-    stored_path TEXT NOT NULL,
-    file_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS table_imports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     template_id INTEGER REFERENCES table_templates(id) ON DELETE SET NULL,
@@ -121,7 +112,6 @@ CREATE TABLE IF NOT EXISTS table_imports (
     file_hash TEXT NOT NULL,
     stored_path TEXT NOT NULL,
     source_json TEXT NOT NULL DEFAULT '{}',        -- {"kind","encoding","delimiter","preamble_rows","sheet","header_row","header_rows","data_end_row"}
-    period_json TEXT NOT NULL DEFAULT '{}',        -- {"grain","start","end"}
     status TEXT NOT NULL DEFAULT 'uploaded',       -- uploaded / reading / preview / confirming / confirmed / discarded / failed
     stats_json TEXT NOT NULL DEFAULT '{}',
     issues_path TEXT,
@@ -132,36 +122,6 @@ CREATE TABLE IF NOT EXISTS table_imports (
     confirmed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_table_imports_template ON table_imports(template_id);
-
-CREATE TABLE IF NOT EXISTS table_outputs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    template_id INTEGER NOT NULL REFERENCES table_templates(id) ON DELETE CASCADE,
-    file_name TEXT NOT NULL,
-    content_hash TEXT,
-    delivered_hash TEXT,
-    delivered_at TEXT,
-    removed INTEGER NOT NULL DEFAULT 0,
-    UNIQUE (template_id, file_name)
-);
-
-CREATE TABLE IF NOT EXISTS table_downloads (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    template_id INTEGER NOT NULL REFERENCES table_templates(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,                            -- diff / all
-    files_json TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL,
-    delivered_marked INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE TABLE IF NOT EXISTS alias_entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    dictionary TEXT NOT NULL,
-    alias_norm TEXT NOT NULL,
-    canonical TEXT NOT NULL,
-    display TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL,
-    UNIQUE (dictionary, alias_norm)
-);
 
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,7 +168,6 @@ CREATE TABLE IF NOT EXISTS ai_items (
     status TEXT NOT NULL DEFAULT 'pending',        -- pending / ok / flagged / rule_only / error / skipped / outdated / excluded
     result_json TEXT,
     checks_json TEXT,
-    override TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     job_id INTEGER,
@@ -280,16 +239,14 @@ def _m5_purge_scope(conn: sqlite3.Connection) -> None:
     """AI整形の控えを「取り込み単位」で消せるようにし、使っていない表を落とす。
 
     ai_items は (設定, 段, 行) で一意なので、設定単位で消すと同じ設定で作業中の別の取り込みの結果まで
-    消えていた（課金済みの応答キャッシュも道連れ）。import_id を持たせて purge の探索（IMPORT_REF_COLUMNS）に乗せる。
+    消えていた（課金済みの応答キャッシュも道連れ）。import_id は次の _m6 で表を作り直すときに持たせる。
     """
-    _add_column(conn, "ai_items", "import_id", "INTEGER")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_items_import ON ai_items(import_id)")
     for table in _UNUSED_TABLES:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 _AI_ITEMS_COLUMNS = ("id, template_id, stage_id, row_key, template_version_id, source_hash, context_hash, "
-                     "segments_hash, cache_key, status, result_json, checks_json, override, attempts, error, job_id, "
+                     "segments_hash, cache_key, status, result_json, checks_json, attempts, error, job_id, "
                      "updated_at, import_id")
 
 
@@ -313,7 +270,6 @@ def _m6_ai_items_per_import(conn: sqlite3.Connection) -> None:
         status TEXT NOT NULL DEFAULT 'pending',
         result_json TEXT,
         checks_json TEXT,
-        override TEXT,
         attempts INTEGER NOT NULL DEFAULT 0,
         error TEXT,
         job_id INTEGER,
@@ -354,10 +310,79 @@ def _m8_session_scope(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_table_imports_session ON table_imports(session_id)")
 
 
+_TABLE_IMPORTS_COLUMNS = ("id, template_id, template_version_id, file_name, file_hash, stored_path, source_json, "
+                          "status, stats_json, issues_path, rows_path, job_id, created_at, updated_at, "
+                          "confirmed_at, session_id, spec_json, spec_hash")
+
+def _m9_import_spec(conn: sqlite3.Connection) -> None:
+    """取り込み設定の保存をやめ、その取り込みが使う設定（spec）を取り込みの行に持たせる。
+
+    利用者の指示（2026-09-20）:「表の方には、取り込み設定を保持しておく機能はいらない」。
+    取り込みごとに列の対応づけを決めるので、設定を名前で残して選び直す仕組み（table_templates と
+    その版）は要らない。表を作り直すのは table_templates への外部キーを外すため（参照先の表を
+    落とすと、外部キーを有効にした接続では table_imports への書き込みがすべて落ちる）。
+    template_id / template_version_id は取り込み自身の id にそろえて残す（aiproc・core.purge が
+    AI整形の控えを束ねる鍵に使っている）。
+    """
+    _add_column(conn, "table_imports", "spec_json", "TEXT NOT NULL DEFAULT ''")
+    _add_column(conn, "table_imports", "spec_hash", "TEXT NOT NULL DEFAULT ''")
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'table_template_versions'").fetchone():
+        # まだダウンロードしていない取り込みが使っている版を、取り込みの行に写す
+        conn.execute("""UPDATE table_imports SET
+            spec_json = COALESCE((SELECT v.spec_json FROM table_template_versions v
+                                  WHERE v.id = table_imports.template_version_id), ''),
+            spec_hash = COALESCE((SELECT v.spec_hash FROM table_template_versions v
+                                  WHERE v.id = table_imports.template_version_id), '')""")
+    conn.execute("""CREATE TABLE table_imports_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        template_id INTEGER,                           -- = id（AI整形の控えを束ねる鍵。設定はもう無い）
+        template_version_id INTEGER,                   -- = id（AI整形の控えの「作り直し判定」に使う）
+        file_name TEXT NOT NULL,
+        file_hash TEXT NOT NULL,
+        stored_path TEXT NOT NULL,
+        source_json TEXT NOT NULL DEFAULT '{}',        -- {"kind","encoding","delimiter","preamble_rows","sheet","header_rows","data_end_row"}
+        status TEXT NOT NULL DEFAULT 'uploaded',       -- uploaded / reading / preview / confirming / confirmed / failed
+        stats_json TEXT NOT NULL DEFAULT '{}',
+        issues_path TEXT,
+        rows_path TEXT,
+        job_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        confirmed_at TEXT,
+        session_id TEXT,
+        spec_json TEXT NOT NULL DEFAULT '',            -- この取り込みの取り込み設定（tables.spec.TableSpec の JSON）
+        spec_hash TEXT NOT NULL DEFAULT ''
+    )""")
+    conn.execute(f"INSERT INTO table_imports_new ({_TABLE_IMPORTS_COLUMNS}) "
+                 f"SELECT {_TABLE_IMPORTS_COLUMNS} FROM table_imports")
+    conn.execute("DROP TABLE table_imports")
+    conn.execute("ALTER TABLE table_imports_new RENAME TO table_imports")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_table_imports_session ON table_imports(session_id)")
+    conn.execute("DROP TABLE IF EXISTS table_template_versions")
+    conn.execute("DROP TABLE IF EXISTS table_templates")
+    conn.execute("UPDATE table_imports SET template_id = id, template_version_id = id")
+    # AI整形の控えは「設定」ではなく取り込みで束ねる。持ち主の分からない古い行（import_id なし）は消す
+    conn.execute("DELETE FROM ai_items WHERE import_id IS NULL")
+    conn.execute("UPDATE ai_items SET template_id = import_id, template_version_id = import_id")
+
+
+def _m10_drop_unused(conn: sqlite3.Connection) -> None:
+    """使わなくなったものを落とす。
+
+    - 互換ビュー table_template_versions: _m9 が一時的に置いたもの。aiproc.runner.load_spec が
+      table_imports.spec_json を直接読むようになったので要らない。
+    - table_imports.period_json: 書く側がもう無く、常に '{}' のまま（期間は取り込み設定が持つ）。
+    """
+    conn.execute("DROP VIEW IF EXISTS table_template_versions")
+    if "period_json" in _column_names(conn, "table_imports"):
+        conn.execute("ALTER TABLE table_imports DROP COLUMN period_json")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
                                                           _m5_purge_scope, _m6_ai_items_per_import,
-                                                          _m7_llm_calls_owner, _m8_session_scope]
+                                                          _m7_llm_calls_owner, _m8_session_scope, _m9_import_spec,
+                                                          _m10_drop_unused]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -459,11 +484,11 @@ def count_active_patterns() -> int:
     return get_db().execute("SELECT COUNT(*) FROM patterns WHERE status = 'active'").fetchone()[0]
 
 
-def create_pattern(name: str, version: str = "v1", description: str = "") -> int:
+def create_pattern(name: str) -> int:
     ts = now()
     return _exec(
-        "INSERT INTO patterns (name, version, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        (name, version, description, ts, ts),
+        "INSERT INTO patterns (name, version, description, created_at, updated_at) VALUES (?, 'v1', '', ?, ?)",
+        (name, ts, ts),
     )
 
 
@@ -639,16 +664,6 @@ _LIST_COLUMNS = f"""
         FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id"""
 
 
-def list_documents(state: str | None = None, limit: int = 50) -> list[dict]:
-    """ホームの一覧（作業中・ダウンロード待ち）。state は1つでも複数でも指定できる。"""
-    where, args = "", []
-    if state:
-        states = [state] if isinstance(state, str) else list(state)
-        where = f"WHERE ({_STATE_SQL}) IN ({', '.join('?' for _ in states)})"
-        args += states
-    return _all(f"{_LIST_COLUMNS} {where} ORDER BY d.id DESC LIMIT ?", (*args, limit))
-
-
 def list_batch_documents(batch_id: str, session_id: str | None = None) -> list[dict]:
     """まとめ取り込み（1回の選択で複数ファイル）の帳票を、選んだ順に返す。
 
@@ -693,19 +708,6 @@ def confirm_document(doc_id: int, title: str | None = None) -> bool:
         args.append(title)
     db = get_db()
     cur = db.execute(f"UPDATE documents SET {', '.join(sets)} WHERE id = ? AND data_json IS NOT NULL",
-                     (*args, doc_id))
-    db.commit()
-    return cur.rowcount > 0
-
-
-def discard_changes(doc_id: int, title: str | None = None) -> bool:
-    """修正中の変更を捨てて確定済みの版に戻す。確定済みの版が無ければ False。"""
-    sets, args = ["data_json = confirmed_json"], []
-    if title is not None:
-        sets.append("title = ?")
-        args.append(title)
-    db = get_db()
-    cur = db.execute(f"UPDATE documents SET {', '.join(sets)} WHERE id = ? AND confirmed_json IS NOT NULL",
                      (*args, doc_id))
     db.commit()
     return cur.rowcount > 0

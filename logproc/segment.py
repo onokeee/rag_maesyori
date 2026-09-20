@@ -15,7 +15,7 @@ from logproc.dates import USER_PATTERN_WINDOW, HeadWhen, head_kind, parse_when_a
 from logproc.extract import extract_identifiers, extract_plans, extract_quantities
 from logproc.models import LogParse, Segment, SplitOptions
 from logproc.people import PeopleIndex, detect_head_author, detect_tail_author, inherit_authors
-from logproc.text import clean_log_text, is_empty_log, shadow
+from logproc.text import clean_log_text, dedupe as _dedupe, is_empty_log, shadow
 
 _BULLETS = "・●■◆◇□○▪►*"
 _CIRCLED_RE = re.compile(r"[\u2460-\u2473\u2776-\u277f]|\(?\d{1,2}\)(?!\d)|\d{1,2}\.(?=[ \t])")
@@ -381,11 +381,3 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
         warnings.append("他の記録や資料への参照がある（内容は推測しない）")
     return LogParse(segs, order, kind, _dedupe(warnings), clean)
 
-
-def _dedupe(items: list[str]) -> list[str]:
-    seen, out = set(), []
-    for x in items:
-        if x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out

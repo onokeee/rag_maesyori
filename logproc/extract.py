@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-from logproc.text import shadow
+from logproc.text import dedupe as _dedupe, shadow
 
 _ID_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9](?:[A-Za-z0-9._\-]*[A-Za-z0-9])?")
 _UNITS = sorted(
@@ -85,11 +85,3 @@ def extract_plans(text: str) -> list[str]:
             out.append(piece)
     return _dedupe(out)
 
-
-def _dedupe(items) -> list[str]:
-    seen, out = set(), []
-    for x in items:
-        if x and x not in seen:
-            seen.add(x)
-            out.append(x)
-    return out

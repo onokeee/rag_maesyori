@@ -38,12 +38,6 @@ def owns(row) -> bool:
     return not owner or owner == current_session_id()
 
 
-def safe_next(default: str) -> str:
-    """フォームの next パラメータ（同一サイト内の相対パスのみ許可）"""
-    target = request.form.get("next", "") or request.args.get("next", "")
-    return target if target.startswith("/") and not target.startswith("//") else default
-
-
 # ---- ダウンロードのファイル名 ---------------------------------------------------------
 # Content-Disposition には UTF-8 の名前（filename*）と、それを読めない相手向けの ASCII の名前
 # （filename）が並ぶ。日本語だけの名前だと ASCII 側が「_2026-09-19.zip」のように意味を失い、

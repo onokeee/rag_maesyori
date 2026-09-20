@@ -1,8 +1,7 @@
-{#- 段2「読み取り方と取り込み設定」の中身。変えるたびに static/tables.js が保存する（画面は移らない）。 -#}
-{% import "components/_ui.html" as ui %}
+{#- 段2「読み取り方」の中身。変えるたびに static/tables.js が保存する（画面は移らない）。 -#}
 {% if error %}<div class="flash flash-error" role="alert">{{ error }}</div>{% endif %}
 
-<div data-source-form data-delete-template-url="{{ delete_url }}">
+<div data-source-form>
   <p class="hint">ファイル: {{ imp.file_name }}</p>
 
   {% if src.kind == "csv" %}
@@ -43,34 +42,4 @@
     </div>
   </div>
   {% endif %}
-
-  <div class="sub-block">
-    <h3 class="sub-title">取り込み設定</h3>
-    <p class="hint">同じ形の表を前に取り込んだことがあれば、その設定を選びます。</p>
-    <div class="stack" role="radiogroup" aria-label="取り込み設定">
-      {% for c in candidates %}
-      <div class="filter-bar">
-        <label class="check">
-          <input type="radio" name="template" value="{{ c.template.id }}" data-source-field {{ 'checked' if c.template.id == selected }}>
-          <span><strong>{{ c.template.name }}</strong>
-            <small class="muted">必須列 {{ c.matched }}/{{ c.total }} 一致</small></span>
-        </label>
-        <button type="button" class="btn danger-outline small" data-delete-template="{{ c.template.id }}"
-                data-confirm="取り込み設定「{{ c.template.name }}」を削除します。元に戻せません。" data-confirm-ok="削除する">削除</button>
-      </div>
-      {% endfor %}
-      <label class="check">
-        <input type="radio" name="template" value="new" data-source-field {{ 'checked' if selected == 'new' }}>
-        <span><strong>新しい取り込み設定を作る</strong></span>
-      </label>
-      <label>新しい設定の名前
-        <input type="text" name="new_template_name" class="input" value="{{ new_name }}" maxlength="80"
-               placeholder="例: トラブル対応一覧" data-source-field>
-        <small>Markdown のファイル名とタイトルに使います。この名前は<strong>取り込み設定としてサーバーに残り続けます</strong>。
-          取引先名や「社外秘」が入った元のファイル名をそのまま使わないでください。</small>
-      </label>
-    </div>
-    {% if headers %}<p class="hint">読み取った見出し: {{ headers[:20] | join('、') }}{% if headers|length > 20 %} ほか{{ headers|length - 20 }}列{% endif %}</p>{% endif %}
-    <p class="warn" data-source-warning aria-live="polite" hidden></p>
-  </div>
 </div>

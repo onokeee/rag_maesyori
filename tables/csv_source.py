@@ -21,7 +21,6 @@ from tables.source import CellInfo, SheetInfo, SourceRow, UploadError, clean_tex
 SNIFF_BYTES = 1024 * 1024
 SNIFF_RECORDS = 200
 DELIMITERS = [",", "\t", ";", "|"]
-DELIMITER_NAMES = {",": "カンマ", "\t": "タブ", ";": "セミコロン", "|": "縦棒"}
 REPLACEMENT_CHAR = "〓"
 _CHUNK = 1024 * 1024
 _EXCEL_WRAPPED = re.compile(r'^="(.*)"$', re.S)
@@ -111,14 +110,6 @@ def sniff_csv(path) -> CsvSniff:
         decode_error_line=error_line,
         max_columns=max_columns,
     )
-
-
-def describe_sniff(sniff: CsvSniff) -> str:
-    """画面表示用の要約。「文字コード: CP932 / 区切り: カンマ / 前置き行: 4行」"""
-    enc = {"utf-8-sig": "UTF-8（BOM付き）", "utf-8": "UTF-8", "cp932": "CP932（Shift_JIS）",
-           "shift_jis_2004": "Shift_JIS-2004", "utf-16": "UTF-16"}.get(sniff.encoding, sniff.encoding)
-    name = DELIMITER_NAMES.get(sniff.delimiter, sniff.delimiter)
-    return f"文字コード: {enc} / 区切り: {name} / 前置き行: {sniff.preamble_rows}行"
 
 
 # ---- 文字コード ----

@@ -11,11 +11,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterator, Protocol
 
-try:
-    from core.files import UploadError
-except ImportError:  # WP-core 未統合の間の代替
-    class UploadError(Exception):
-        """利用者に見せる読み込みエラー（日本語メッセージ）。"""
+from core.files import UploadError
 
 
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}

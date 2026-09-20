@@ -104,7 +104,7 @@ def test_the_id_counter_does_not_record_how_many_forms_were_taken_in(app, client
     new_id, _ = add_confirmed_document(app, "次の報告書.xlsx")
     assert new_id == seq + 1 and new_id not in ids
     for doc_id in ids:
-        assert client.get(f"/forms/{doc_id}/review").status_code == 404
+        assert client.get(f"/forms/{doc_id}/type").status_code == 404
         assert client.get(f"/forms/{doc_id}/download.md").status_code == 404
     assert new_id < 2 ** 53   # 画面の JavaScript でも正確に扱える
 

@@ -271,11 +271,6 @@ def stacked_tables(grid: SheetGrid, table: Table, stop_labels: set[str] | None =
     return blocks
 
 
-def stacked_header_rows(grid: SheetGrid, table: Table, limit: int = 10) -> int:
-    """読み取った範囲のすぐ下に、同じ形の列見出しの行が何組続くか（stacked_tables の組数）。"""
-    return len(stacked_tables(grid, table, limit=limit))
-
-
 def merge_table_values(values: list[dict | None]) -> dict | None:
     """積み重なった組（同じ形の列見出しが縦に並ぶ表）の値を、1つの明細表の値にまとめる。
 

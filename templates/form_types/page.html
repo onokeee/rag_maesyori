@@ -4,7 +4,7 @@
 {% block container_class %}wide{% endblock %}
 {% block content %}
 
-<div id="typesPage" data-steps-open data-create-url="{{ url_for('form_types.create') }}" data-list-url="{{ url_for('form_types.list_fragment') }}">
+<div id="typesPage" data-steps-open data-create-url="{{ url_for('form_types.create') }}">
 
   {#- 帳票登録は見本のExcelを預かるだけ（取り込んだデータは持たない）。捨てるのは［使用開始］と起動時。 -#}
   <p class="notice" role="note">［使用開始］まで進めないまま画面を閉じると、置いた見本の Excel は捨てられます。登録した帳票の種類（読み取りの設定）は残ります。</p>
@@ -22,7 +22,7 @@
           <span class="hint">置くとすぐにシートが開きます。名前は下の画面で直せます。</span></label>
         <p class="hint" role="note">置いた Excel は項目を作る間だけ使います。［使用開始］を押すとサーバーから消え、<strong>残るのは読み取りの設定だけ</strong>です。</p>
       </form>
-      <p class="work-line" data-work="create" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
+      {{ ui.work_line("create") }}
   {% endcall %}
 
   {% call ui.step("build", 3, "読み取る欄をクリックする", open=True) %}

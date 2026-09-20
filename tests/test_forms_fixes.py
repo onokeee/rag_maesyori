@@ -4,7 +4,7 @@ from excel.extractor import apply_manual_values, refresh_summary
 
 def _number_field(**kw) -> dict:
     f = {"field_name": "downtime", "display_name": "停止時間", "data_type": "number", "required": False,
-         "value": None, "unit": "", "warning": None, "edited": False, "ai_filled": False}
+         "value": None, "unit": "", "warning": None, "edited": False}
     f.update(kw)
     return f
 
@@ -91,7 +91,7 @@ from models import database as db  # noqa: E402
 def _extraction(name="CMP研磨装置") -> str:
     field = {"field_name": "equipment_name", "display_name": "設備名", "data_type": "string", "required": False,
              "value": name, "sheet": "報告書", "label_cell": "A1", "value_cell": "B1", "label_found": True,
-             "warning": None, "edited": False, "ai_filled": False, "unit": "", "spec_unit": "",
+             "warning": None, "edited": False, "unit": "", "spec_unit": "",
              "rag_output": "show", "table_columns": [], "table_blocks": 1}
     data = {"pattern": {"id": 1, "name": "設備修理報告書", "version": "v1"}, "sheets": ["報告書"],
             "fields": [field], "attachments": [], "values": {"equipment_name": name}, "missing_required": []}
@@ -114,6 +114,22 @@ def _state(app, doc_id):
         return db.get_document(doc_id)["state"]
 
 
+def _doc_version(app, doc_id) -> str:
+    """いまの作業データの版（画面が読み取り結果と一緒に受け取る値）。"""
+    from views.forms import _version
+
+    with app.app_context():
+        return _version(db.get_document(doc_id))
+
+
+def _review_html(app, doc_id) -> str:
+    """読み取り結果の欄のHTML（読み取りの応答が返すのと同じもの）。"""
+    from views.forms import _review_response
+
+    with app.test_request_context():
+        return _review_response(doc_id).get_json()["html"]
+
+
 def test_typing_the_confirmed_value_back_returns_the_form_to_confirmed(app, client):
     doc_id = _confirmed_doc(app)
     client.post(f"/forms/{doc_id}/draft", json={"values": {"equipment_name": "別の名前"}})
@@ -129,9 +145,8 @@ def test_a_stale_review_page_cannot_save_or_confirm(app, client):
     doc_id = _confirmed_doc(app)
     with app.app_context():
         db.update_document(doc_id, confirmed_json=None)  # 確認中の帳票
-    body = client.get(f"/forms/{doc_id}/review").get_json()
-    old = body["version"]
-    assert f'name="version" value="{old}"' in body["html"]
+    old = _doc_version(app, doc_id)
+    assert f'name="version" value="{old}"' in _review_html(app, doc_id)
 
     # タブAの保存: 新しい版が返り、それを送れば続けて保存できる
     res = client.post(f"/forms/{doc_id}/draft", json={"values": {"equipment_name": "A"}, "version": old})
@@ -212,7 +227,7 @@ def test_time_range_is_not_read_as_its_start_hour():
 
 def _md_field(name, display, value, data_type="string"):
     return {"field_name": name, "display_name": display, "data_type": data_type, "required": False, "value": value,
-            "unit": "", "rag_output": "show", "edited": False, "ai_filled": False}
+            "unit": "", "rag_output": "show", "edited": False}
 
 
 def _inspection(work_no, work_date, finding="端子の緩みを増し締めした。" * 200):
@@ -407,7 +422,7 @@ def test_date_keeps_the_time_of_day():
     assert to_date(datetime(2023, 7, 10, 23, 8), "") == ("2023-07-10 23:08", None)
     assert to_date(datetime(2023, 7, 10), "") == ("2023-07-10", None)
     assert to_date("2023/7/10 23:08", "2023/7/10 23:08") == ("2023-07-10 23:08", None)
-    f = {"data_type": "date", "value": "2023-07-10 23:08", "ai_filled": False}
+    f = {"data_type": "date", "value": "2023-07-10 23:08"}
     assert _format_value(f) == "2023-07-10 23:08（2023年7月）"
 
 
@@ -415,8 +430,7 @@ def test_hand_typed_date_without_a_year_stays_to_be_checked():
     from views.forms import _field_status
 
     ex = {"fields": [{"field_name": "d", "display_name": "発生日", "data_type": "date", "required": False,
-                      "value": "2/12 3時17分", "warning": "年が書かれていません。", "edited": False,
-                      "ai_filled": False}]}
+                      "value": "2/12 3時17分", "warning": "年が書かれていません。", "edited": False}]}
     apply_manual_values(ex, {"value-d": "2/12 3:17"})
     assert ex["fields"][0]["edited"] and _field_status(ex["fields"][0])["issue"]
     apply_manual_values(ex, {"value-d": "あした"})

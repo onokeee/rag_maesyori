@@ -1,18 +1,19 @@
-"""一覧表の DB アクセス（取り込み設定と版・取り込み）。
+"""一覧表の DB アクセス（取り込み1件と、その取り込みが使う取り込み設定）。
 
+取り込み設定は保存しない（利用者の指示 2026-09-20:「表の方には、取り込み設定を保持しておく機能はいらない」）。
+取り込みごとに列の対応づけを決め、その設定（TableSpec）を取り込みの行（spec_json）に持つ。
 接続は models.database.get_db()（リクエスト中もジョブの app_context 中も使える）。conn を渡せばそれを使う。
-JSON の列は読み出し時に dict/list に直した値を別名（source, period, stats, spec）で付ける。
+JSON の列は読み出し時に dict/list に直した値を別名（source, stats）で付け、spec_json は TableSpec にする。
 """
 from __future__ import annotations
 
 import json
 import sqlite3
 
-from core import purge
 from models import database
 from tables.spec import TableSpec, spec_from_dict, spec_hash, spec_json
 
-IMPORT_JSON_COLUMNS = {"source_json": "source", "period_json": "period", "stats_json": "stats"}
+IMPORT_JSON_COLUMNS = {"source_json": "source", "stats_json": "stats"}
 
 
 def _db(conn=None) -> sqlite3.Connection:
@@ -38,111 +39,6 @@ def _spec_or_none(spec_text):
         return None
 
 
-# ---- 取り込み設定と版 -------------------------------------------------------------------
-# 版の履歴は画面で扱わない。保存は今の版を上書きする（確定に使われた版・取り込みが使っている版だけ新しい版にする）。
-
-def create_template(name: str, spec: TableSpec, description: str = "", note: str = "", conn=None) -> tuple[int, int]:
-    """設定と版1を作る。戻り値: (template_id, version_id)"""
-    db = _db(conn)
-    ts = database.now()
-    cur = db.execute("INSERT INTO table_templates (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                     (name, description or spec.description or "", ts, ts))
-    template_id = cur.lastrowid
-    cur = db.execute("INSERT INTO table_template_versions (template_id, version, spec_json, spec_hash, note, created_at) "
-                     "VALUES (?, 1, ?, ?, ?, ?)", (template_id, spec_json(spec), spec_hash(spec), note, ts))
-    version_id = cur.lastrowid
-    db.execute("UPDATE table_templates SET current_version_id = ? WHERE id = ?", (version_id, template_id))
-    db.commit()
-    return template_id, version_id
-
-
-def save_template_version(template_id: int, spec: TableSpec, note: str = "", conn=None,
-                          allow_import_id: int | None = None) -> int:
-    """設定を保存する。戻り値: version_id
-
-    今の版が確定に使われておらず、どの取り込みにも使われていなければ上書きする。使われていれば新しい版を作る
-    （読み込み済みでまだ確定していない取り込みは、読み込んだときの設定のまま。上書きすると、古い設定で読んだ値を
-    新しい単位・列キーで出してしまう）。allow_import_id: その取り込みだけが使っている版は上書きしてよい
-    （取り込み自身の列の対応づけ。保存のあと読み込み直す）。
-    """
-    db = _db(conn)
-    ts = database.now()
-    current = db.execute("SELECT v.* FROM table_templates t JOIN table_template_versions v ON v.id = t.current_version_id "
-                         "WHERE t.id = ?", (template_id,)).fetchone()
-    in_use = current is not None and db.execute(
-        "SELECT 1 FROM table_imports WHERE template_version_id = ? AND id IS NOT ? LIMIT 1",
-        (current["id"], allow_import_id)).fetchone() is not None
-    if current is not None and (current["spec_hash"] == spec_hash(spec) or (not current["used"] and not in_use)):
-        if current["spec_hash"] != spec_hash(spec):
-            db.execute("UPDATE table_template_versions SET spec_json = ?, spec_hash = ?, note = ? WHERE id = ?",
-                       (spec_json(spec), spec_hash(spec), note or current["note"], current["id"]))
-        version_id = current["id"]
-    else:
-        # 版番号は INSERT の中で数える（別の保存と重なっても UNIQUE (template_id, version) で衝突しない）
-        cur = db.execute(
-            "INSERT INTO table_template_versions (template_id, version, spec_json, spec_hash, note, created_at) "
-            "VALUES (?, (SELECT COALESCE(MAX(version), 0) + 1 FROM table_template_versions WHERE template_id = ?), "
-            "?, ?, ?, ?)",
-            (template_id, template_id, spec_json(spec), spec_hash(spec), note, ts))
-        version_id = cur.lastrowid
-    db.execute("UPDATE table_templates SET current_version_id = ?, name = ?, description = ?, updated_at = ? WHERE id = ?",
-               (version_id, spec.name, spec.description or "", ts, template_id))
-    db.commit()
-    return version_id
-
-
-def get_template(template_id: int, conn=None) -> dict | None:
-    row = _db(conn).execute("""
-        SELECT t.*, v.version, v.spec_json, v.spec_hash, v.used
-        FROM table_templates t LEFT JOIN table_template_versions v ON v.id = t.current_version_id
-        WHERE t.id = ?""", (template_id,)).fetchone()
-    if row is None:
-        return None
-    d = dict(row)
-    d["spec"] = _spec_or_none(d.get("spec_json"))
-    return d
-
-
-def list_templates(conn=None) -> list[dict]:
-    rows = _db(conn).execute("""
-        SELECT t.*, v.version, v.spec_json, v.spec_hash,
-               (SELECT COUNT(*) FROM table_imports i WHERE i.template_id = t.id) AS import_count,  -- まだダウンロードしていない取り込み（ダウンロードで消える）
-               (SELECT MAX(i.confirmed_at) FROM table_imports i WHERE i.template_id = t.id) AS last_confirmed_at
-        FROM table_templates t LEFT JOIN table_template_versions v ON v.id = t.current_version_id
-        ORDER BY t.name""").fetchall()
-    out = []
-    for row in rows:
-        d = dict(row)
-        d["spec"] = _spec_or_none(d.pop("spec_json", None))
-        out.append(d)
-    return out
-
-
-def get_version(version_id: int, conn=None) -> dict | None:
-    row = _db(conn).execute("SELECT * FROM table_template_versions WHERE id = ?", (version_id,)).fetchone()
-    if row is None:
-        return None
-    d = dict(row)
-    d["spec"] = spec_from_dict(_loads(d.get("spec_json"), {}))
-    return d
-
-
-def mark_version_used(version_id: int, conn=None) -> None:
-    """確定に使った版は、以後の保存で上書きしない（その取り込みの結果を作った設定を残す）。"""
-    db = _db(conn)
-    db.execute("UPDATE table_template_versions SET used = 1 WHERE id = ?", (version_id,))
-    db.commit()
-
-
-def delete_template(template_id: int, conn=None) -> None:
-    db = _db(conn)
-    db.execute("DELETE FROM table_templates WHERE id = ?", (template_id,))
-    db.execute("DELETE FROM ai_items WHERE template_id = ?", (template_id,))
-    # AIの応答の控え（llm_calls）もどこからも使われなくなった分をすぐ消す（起動時まで残さない。design.md 3.3）。
-    # sweep_orphan_ai が commit と DB の縮小までする
-    purge.sweep_orphan_ai(db)
-
-
 # ---- 取り込み ------------------------------------------------------------------------------
 
 def _decode_import(row) -> dict | None:
@@ -151,37 +47,45 @@ def _decode_import(row) -> dict | None:
     d = dict(row)
     for column, alias in IMPORT_JSON_COLUMNS.items():
         d[alias] = _loads(d.get(column), {})
+    d["spec"] = _spec_or_none(d.get("spec_json"))
     return d
 
 
-def create_import(file_name: str, file_hash: str, stored_path: str, source: dict | None = None,
-                  template_id: int | None = None, template_version_id: int | None = None, conn=None,
+def create_import(file_name: str, file_hash: str, stored_path: str, source: dict | None = None, conn=None,
                   session_id: str | None = None) -> int:
-    """取り込みを1件作る。session_id は置いたブラウザ（views.current_session_id）。"""
+    """取り込みを1件作る。session_id は置いたブラウザ（views.current_session_id）。
+
+    template_id / template_version_id は取り込み自身の番号にそろえる（設定はもう無いが、AI整形の控え
+    （ai_items）がこの番号で取り込みを束ねている。design.md 3.2）。
+    """
     db = _db(conn)
     ts = database.now()
-    cur = db.execute("""INSERT INTO table_imports (template_id, template_version_id, file_name, file_hash, stored_path,
-                        source_json, session_id, status, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)""",
-                     (template_id, template_version_id, file_name, file_hash, stored_path, _dumps(source or {}),
-                      session_id, ts, ts))
+    cur = db.execute("""INSERT INTO table_imports (file_name, file_hash, stored_path, source_json, session_id,
+                        status, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, 'uploaded', ?, ?)""",
+                     (file_name, file_hash, stored_path, _dumps(source or {}), session_id, ts, ts))
+    import_id = cur.lastrowid
+    db.execute("UPDATE table_imports SET template_id = id, template_version_id = id WHERE id = ?", (import_id,))
     db.commit()
-    return cur.lastrowid
+    return import_id
 
 
 def get_import(import_id: int, conn=None) -> dict | None:
-    return _decode_import(_db(conn).execute("""
-        SELECT i.*, t.name AS template_name FROM table_imports i LEFT JOIN table_templates t ON t.id = i.template_id
-        WHERE i.id = ?""", (import_id,)).fetchone())
+    return _decode_import(_db(conn).execute("SELECT * FROM table_imports WHERE id = ?", (import_id,)).fetchone())
+
+
+def save_spec(import_id: int, spec: TableSpec, conn=None) -> None:
+    """この取り込みが使う取り込み設定を保存する（列の対応づけを保存するたびに上書きする）。"""
+    update_import(import_id, conn=conn, spec_json=spec_json(spec), spec_hash=spec_hash(spec))
 
 
 def update_import(import_id: int, conn=None, commit: bool = True, **columns) -> None:
-    """列を更新する。source/period/stats は dict のまま渡してよい（*_json に保存）。"""
+    """列を更新する。source/stats は dict のまま渡してよい（*_json に保存）。"""
     if not columns:
         return
     sets, args = [], []
     for name, value in columns.items():
-        column = f"{name}_json" if name in ("source", "period", "stats") else name
+        column = f"{name}_json" if name in ("source", "stats") else name
         if column.endswith("_json") and not isinstance(value, str):
             value = _dumps(value)
         sets.append(f"{column} = ?")
@@ -197,24 +101,17 @@ def update_import(import_id: int, conn=None, commit: bool = True, **columns) -> 
 # 取り込み1件を消すのは core/purge.py の purge_table_import（ファイルと DB の行をまとめて消す。design.md 3.3）
 
 
-def list_imports(template_id: int | None = None, status: str | list | None = None, limit: int = 100, conn=None,
+def list_imports(status: str | list | None = None, limit: int = 100, conn=None,
                  session_id: str | None = None) -> list[dict]:
-    """取り込みの一覧。session_id を渡すとそのブラウザの分だけ（持ち主の分からない古い行は含む）。
-
-    取り込み設定を消せるかの確認（views.tables.delete_template）では、ほかの人が使っている取り込みも
-    数えないといけないので session_id を渡さない（設定はみんなで使うもの）。
-    """
+    """取り込みの一覧。session_id を渡すとそのブラウザの分だけ（持ち主の分からない古い行は含む）。"""
     where, args = [], []
-    if template_id is not None:
-        where.append("i.template_id = ?")
-        args.append(template_id)
     if session_id:
-        where.append("(i.session_id IS NULL OR i.session_id = ?)")
+        where.append("(session_id IS NULL OR session_id = ?)")
         args.append(session_id)
     if status:
         statuses = [status] if isinstance(status, str) else list(status)
-        where.append(f"i.status IN ({','.join('?' * len(statuses))})")
+        where.append(f"status IN ({','.join('?' * len(statuses))})")
         args += statuses
-    sql = ("SELECT i.*, t.name AS template_name FROM table_imports i LEFT JOIN table_templates t ON t.id = i.template_id"
-           + (f" WHERE {' AND '.join(where)}" if where else "") + " ORDER BY i.id DESC LIMIT ?")
+    sql = ("SELECT * FROM table_imports" + (f" WHERE {' AND '.join(where)}" if where else "")
+           + " ORDER BY id DESC LIMIT ?")
     return [_decode_import(r) for r in _db(conn).execute(sql, (*args, limit)).fetchall()]

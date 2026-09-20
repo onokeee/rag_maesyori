@@ -1,4 +1,4 @@
-"""読み取り結果から、保管用のJSONと RAG 投入用の Markdown を生成する。
+"""読み取り結果から、RAG 投入用の Markdown を生成する。
 
 Markdown は LightRAG 調査の指針（docs/design.md 6章）に従う。
   - 1帳票だけで意味が通るように、種類・識別番号・設備・日付をタイトルと本文に書く
@@ -10,23 +10,13 @@ Markdown は LightRAG 調査の指針（docs/design.md 6章）に従う。
 """
 from __future__ import annotations
 
-import math
 import re
-import unicodedata
 from pathlib import Path
 
+from core import mdtext as _core_mdtext, naming as _core_naming
 from excel.tables import TOTAL_LABEL_RE, drop_seq_column, is_table_value, table_row_items
-from excel.text import nfkc_value as _excel_nfkc_value, normalize_label as _normalize_label
+from excel.text import normalize_label as _normalize_label
 from pattern.model import DEFAULT_TITLE_KEYS
-
-try:  # WP-core の共通実装があればそれを使う
-    from core import mdtext as _core_mdtext
-except ImportError:  # pragma: no cover - core 未導入時
-    _core_mdtext = None
-try:
-    from core import naming as _core_naming
-except ImportError:  # pragma: no cover - core 未導入時
-    _core_naming = None
 
 # 長文項目の見出しに識別子を入れるのは、推定トークン数がこれを超える帳票だけ。
 # LightRAG が帳票を2つ以上の断片に切りうる大きさ（サーバー既定の固定窓 1,200トークン）に合わせる。
@@ -38,34 +28,10 @@ HEADING_IDENTIFIER_TOKENS = 1200
 TABLE_SECTION_TOKENS = 800
 # 値が見出し語かどうかを見るのは短い値だけ（長い本文にたまたま同じ語が入っていても消さない）
 MAX_LABEL_VALUE_CHARS = 20
-AI_MARK = "（AI入力）"
 
 _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})(?: \d{2}:\d{2})?$")  # 時刻付き（発生日時）も
 # 明細表の合計行の先頭（読み取り側と同じ決まり。excel.tables.TOTAL_LABEL_RE）
 _TOTAL_LABEL = TOTAL_LABEL_RE
-
-
-# ---- JSON ---------------------------------------------------------------------
-
-def build_json(doc: dict, extraction: dict) -> dict:
-    return {
-        "document_id": doc["id"],
-        "pattern": extraction["pattern"],
-        "values": extraction["values"],
-        "fields": [
-            {k: f.get(k) for k in ("field_name", "display_name", "data_type", "value", "unit", "rag_output", "sheet",
-                                   "label_cell", "value_cell", "edited", "ai_filled")}
-            for f in extraction["fields"]
-        ],
-        "missing_required": extraction["missing_required"],
-        "attachments": extraction["attachments"],
-        "source": {
-            "file_name": doc["file_name"],
-            "file_hash": doc["file_hash"],
-            "sheets": extraction["sheets"],
-            # 元ファイルへのリンクは書かない（ダウンロードで帳票ごと消すため、リンク先が残らない）
-        },
-    }
 
 
 # ---- Markdown -----------------------------------------------------------------
@@ -114,8 +80,6 @@ def build_markdown(doc: dict, extraction: dict) -> str:
                 heading += f"（{identifier}）"
             if f["data_type"] == "table":
                 lines = table_markdown_lines(f["value"])
-                if f.get("ai_filled") and lines:
-                    lines[-1] += AI_MARK
                 if not (with_identifier and identifier):
                     blocks.append([f"## {_escape_line(heading)}", *lines])
                     continue
@@ -273,8 +237,6 @@ def _basic_lines(filled: list[dict]) -> list[str]:
             if not done_pair:
                 eq_id, eq_name = names["equipment_id"], names["equipment_name"]
                 value = f"{_plain_value(eq_name)}（{_plain_value(eq_id)}）"
-                if eq_id.get("ai_filled") or eq_name.get("ai_filled"):
-                    value += AI_MARK
                 lines += _md_bullet("設備", value)
                 done_pair = True
             continue
@@ -283,7 +245,7 @@ def _basic_lines(filled: list[dict]) -> list[str]:
 
 
 def _format_value(f: dict) -> str:
-    """本文用の値。日付は「2026-09-14（2026年9月）」、数値は単位付き、AI入力には印を付ける。"""
+    """本文用の値。日付は「2026-09-14（2026年9月）」、数値は単位付き。"""
     value = f["value"]
     text = _plain_value(f) if f["data_type"] != "text" else nfkc_value(value)
     if f["data_type"] == "date":
@@ -292,8 +254,6 @@ def _format_value(f: dict) -> str:
             text = f"{text}（{int(m[1])}年{int(m[2])}月）"
     elif f["data_type"] == "number" and _is_number(value) and f.get("unit"):
         text = f"{text}{nfkc_value(f['unit'])}"
-    if f.get("ai_filled"):
-        text += AI_MARK
     return text
 
 
@@ -375,70 +335,28 @@ def nfkc_value(text) -> str:
     ㈱→(株)、⑴→(1) のように区切りが残る表記は今までどおり正規化する（core/mdtext.nfkc_keep_enclosed）。
     """
     s = "" if text is None else str(text).replace("_x000D_", "")
-    if _core_mdtext is not None and hasattr(_core_mdtext, "nfkc_value"):
-        return _core_mdtext.nfkc_value(s)
-    return _excel_nfkc_value(s)
-
-
-_MD_BLOCK_START = re.compile(r"^(\s*)(#|>|[-*+](?=\s|$)|\d+[.)](?=\s|$)|```|~~~)")
-_MD_RULE = re.compile(r"^\s*([-=_*])\1{2,}\s*$")
+    return _core_mdtext.nfkc_value(s)
 
 
 def _escape_line(line: str) -> str:
-    if _core_mdtext is not None and hasattr(_core_mdtext, "escape_md_line"):
-        return _core_mdtext.escape_md_line(line)
-    if _MD_RULE.match(line):
-        return "\\" + line.lstrip()
-    m = _MD_BLOCK_START.match(line)
-    if not m:
-        return line
-    token = m[2]
-    if token[0].isdigit():  # 「1. 」→「1\. 」
-        return line[: m.end() - 1] + "\\" + line[m.end() - 1:]
-    return line[: m.start(2)] + "\\" + line[m.start(2):]
+    return _core_mdtext.escape_md_line(line)
 
 
 def _md_bullet(label: str, value: str) -> list[str]:
-    if _core_mdtext is not None and hasattr(_core_mdtext, "md_bullet"):
-        return _core_mdtext.md_bullet(label, value)
-    lines = [line.strip() for line in str(value).split("\n") if line.strip()]
-    if not lines:
-        return []
-    if len(lines) == 1:
-        return [f"- {label}: {lines[0]}"]
-    return [f"- {label}:", *(f"  {_escape_line(line)}" for line in lines)]
+    return _core_mdtext.md_bullet(label, value)
 
 
 def _estimate_tokens(text: str) -> int:
-    if _core_mdtext is not None and hasattr(_core_mdtext, "estimate_tokens"):
-        return _core_mdtext.estimate_tokens(text)
-    ascii_chars = sum(1 for ch in text if ord(ch) < 128)
-    return (len(text) - ascii_chars) + math.ceil(ascii_chars / 3)
+    return _core_mdtext.estimate_tokens(text)
 
 
 def _join_blocks(blocks: list[list[str]]) -> str:
-    if _core_mdtext is not None and hasattr(_core_mdtext, "join_blocks"):
-        return _core_mdtext.join_blocks(blocks)
-    parts = ["\n".join(ln.rstrip() for ln in b if ln.strip()) for b in blocks]
-    parts = [p for p in parts if p]
-    return "\n\n".join(parts) + "\n" if parts else ""
-
-
-_FILENAME_UNSAFE = re.compile(r'[\\/:*?"<>|\[\]\s\x00-\x1f\x7f]')
-_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+    return _core_mdtext.join_blocks(blocks)
 
 
 def _safe_filename_part(text: str, max_len: int = 60) -> str:
-    if _core_naming is not None and hasattr(_core_naming, "safe_filename_part"):
-        return _core_naming.safe_filename_part(text, max_len)
-    s = unicodedata.normalize("NFKC", str(text or "")).replace(".[", "")
-    s = re.sub(r"_+", "_", _FILENAME_UNSAFE.sub("_", s)).strip("._")
-    s = s[:max_len].strip("._")
-    return f"{s}_" if s.split(".")[0].upper() in _WINDOWS_RESERVED else s
+    return _core_naming.safe_filename_part(text, max_len)
 
 
 def _md_filename(parts: list[str]) -> str:
-    if _core_naming is not None and hasattr(_core_naming, "md_filename"):
-        return _core_naming.md_filename(parts)
-    safe = [p for p in (_safe_filename_part(part) for part in parts) if p]
-    return ("_".join(safe) or "無題") + ".md"
+    return _core_naming.md_filename(parts)

@@ -8,70 +8,20 @@
 
   const toast = (msg, kind) => (window.App && window.App.toast ? window.App.toast(msg, kind) : null);
 
-  // ---- 段の開け閉て（app.js の window.ragSections。無ければ自前で同じことをする） ----
+  // ---- 段の開け閉て・通信は app.js（window.ragSections / window.ragFetch）を使う ----
+  const rag = window.ragSections;
   const sections = {
-    el(step) {
-      return typeof step === "string" ? page.querySelector('[data-step="' + step + '"]') : step;
-    },
-    open(step, scroll) {
-      const el = sections.el(step);
-      if (!el) return null;
-      if (window.ragSections) return window.ragSections.open(el, { scroll: !!scroll });
-      el.classList.add("is-open");
-      if (scroll) el.scrollIntoView({ behavior: "smooth", block: "start" });
-      return el;
-    },
-    // 済んだ段。見出しに要約（summary）を出して畳み、クリックで開き直せるようにする
-    done(step, summary, next) {
-      const el = sections.el(step);
-      if (!el) return null;
-      if (window.ragSections) return window.ragSections.done(el, summary, next);
-      el.classList.add("is-done");
-      el.classList.remove("is-open");
-      return el;
-    },
-    // まだの段に戻す（この段より下も全部まっさらにする）
-    close(step) {
-      const el = sections.el(step);
-      if (!el) return null;
-      el.classList.remove("is-open", "is-done");
-      const label = el.querySelector("[data-step-summary]");
-      if (label) label.textContent = "";
-      if (window.ragSections) window.ragSections.refresh();
-      return el;
-    },
-    note(step, text) {
-      const el = sections.el(step);
-      const label = el && el.querySelector("[data-step-summary]");
-      if (label) { label.textContent = text || ""; label.title = text || ""; }
-    },
-    show(step) {
-      return sections.open(step, true);
-    },
+    el: rag.el,
+    open: (step, scroll) => rag.open(step, { scroll: !!scroll }),
+    done: rag.done,
+    close: rag.close,
+    note: rag.note,
+    show: (step) => rag.open(step, { scroll: true }),
   };
-
-  async function send(url, options) {
-    if (window.ragFetch) return window.ragFetch(url, options);
-    const res = await fetch(url, Object.assign({ headers: { Accept: "application/json" } }, options || {}));
-    if (res.status === 204) return {};
-    const text = await res.text();
-    let data = {};
-    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { html: text }; }
-    if (!res.ok) {
-      const error = new Error(data.error || "うまくいきませんでした（HTTP " + res.status + "）");
-      error.status = res.status;
-      error.data = data;
-      throw error;
-    }
-    return data;
-  }
-
-  const postJson = (url, body) => send(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body || {}),
-  });
-  const postForm = (url, data) => send(url, { method: "POST", body: data });
+  // quiet: エラーの言い方はこの画面の側で決める（ragFetch の自動トーストと二重に出さない）
+  const get = (url) => window.ragFetch(url, { quiet: true });
+  const postJson = (url, body) => window.ragFetch(url, { json: body, quiet: true });
+  const postForm = (url, data) => window.ragFetch(url, { form: data, quiet: true });
 
   function work(name, text) {
     const line = page.querySelector('[data-work="' + name + '"]');
@@ -201,7 +151,7 @@
     buildBody.innerHTML = '<p class="muted">読み込んでいます…</p>';
     try {
       const url = "/form-types/" + id + "/panel" + (sampleId ? "?sample=" + sampleId : "");
-      apply(await send(url), { scroll: true });
+      apply(await get(url), { scroll: true });
     } catch (e) {
       buildBody.textContent = "";
       toast(e.message, "err");

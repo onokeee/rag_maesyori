@@ -12,10 +12,8 @@
 """
 from __future__ import annotations
 
-import copy
 import io
 import re
-import sqlite3
 import threading
 import time
 import unicodedata
@@ -28,15 +26,12 @@ from flask import Blueprint, abort, current_app, flash, jsonify, redirect, rende
 from core import jobs, purge
 from core.files import UploadError, precheck_excel, remove_upload, save_upload, upload_path
 from core.naming import safe_filename_part
-from models import database
 from tables import outputs, pipeline, store
 from tables.checks import count_levels, has_blocking
-from tables.mapping import match_templates, suggest_columns
+from tables.mapping import suggest_columns
 from tables.markdown import ai_point_lines, people_index_for, record_block
 from tables.source import open_source
-from tables.spec import (
-    COLUMN_ROLES, COLUMN_TYPES, MD_MODES, LogStageSpec, resolve_columns, spec_from_suggestions, validate_spec,
-)
+from tables.spec import spec_from_suggestions, validate_spec
 from views import current_session_id, owns, set_download_name
 
 bp = Blueprint("tables", __name__, url_prefix="/tables")
@@ -48,18 +43,17 @@ GRID_CELL_CHARS = 40
 DATA_PAGE = 100
 ISSUES_SHOWN = 200
 
-ROLE_LABELS = {"key": "記録番号", "date": "日付", "entity": "設備など（番号）", "entity_label": "設備名など",
-               "category": "区分", "measure": "数値（集計する）", "text": "文章", "log": "追記ログ", "person": "人名",
-               "attribute": "その他"}
+# 画面で選べる役割（列の対応づけ）。ここに無い役割（人名・数値・区分など）は候補のまま使い、画面では「その他」に見せる
+SCREEN_ROLES = [("key", "識別番号"), ("date", "日付"), ("entity", "設備"), ("log", "AI整形の対象（追記ログ）"),
+                ("attribute", "その他")]
+SCREEN_ROLE_KEYS = {role for role, _label in SCREEN_ROLES}
 TYPE_LABELS = {"code": "コード", "string": "文字", "text": "長文", "date": "日付", "datetime": "日時", "time": "時刻",
                "number": "数値", "enum": "選択肢", "status": "状態"}
-MD_LABELS = {"body": "本文", "attribute": "項目として出す", "omit": "出さない"}
 KIND_LABELS = {"header": "見出し", "data": "データ", "subtotal": "小計・合計", "note": "注記", "continuation": "継続行",
                "excluded": "除外", "title": "表題", "blank": "空行"}
 TABLE_KIND_LABELS = {"list": "一覧表", "crosstab": "クロス集計", "form_like": "帳票らしい", "unknown": "不明"}
 SCOPE_LABELS = {"pending": "まだ整形していない行と、内容が変わった行", "errors": "エラーになった行だけ",
                 "flagged": "要確認の行だけ", "all": "すべての行をやり直す"}
-MATCHED_LABELS = {"template": "設定", "dictionary": "辞書", "similar": "似た見出し", "none": "", "": ""}
 # CSV の文字コード・区切り文字は画面の選択肢だけを受け付ける（他の値は読み込みで落ちて画面が開けなくなるため）
 # ダウンロードでデータが消えることの案内（design.md 3.3）
 DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この取り込みのデータはサーバーから消えます"
@@ -72,7 +66,6 @@ ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), (
                     ("utf-16-le", "UTF-16LE（BOMなし）"), ("utf-16-be", "UTF-16BE（BOMなし）")]
 BUSY_MESSAGE = "処理中は変更できません。終わるか中止してから変更してください"
 DELIMITER_CHOICES = [(",", "カンマ"), ("\t", "タブ"), (";", "セミコロン"), ("|", "縦棒")]
-NEW_TEMPLATE_NAME_NOTE = "新しい取り込み設定の名前を入力してください（「列の対応づけ」でも入力できます）"
 
 
 # ---- 共通 ---------------------------------------------------------------------------------
@@ -130,13 +123,6 @@ def _after_read_panel(spec) -> str:
 
 def _json_error(message: str, status: int = 400, **extra):
     return jsonify({"error": message, **extra}), status
-
-
-def _save_conflict_message(exc: sqlite3.IntegrityError, name: str) -> str:
-    """取り込み設定の保存が UNIQUE で断られた理由。名前の重複でなければ、名前を変えても直らない"""
-    if "table_templates.name" in str(exc):
-        return f"「{name}」という名前の取り込み設定がすでにあります。別の名前にしてください"
-    return "保存が他の操作と重なりました。もう一度保存してください"
 
 
 def _payload() -> dict:
@@ -207,22 +193,19 @@ def _processing(imp: dict) -> bool:
 # ---- 1画面のやりとり（段の URL と、段の中身） ------------------------------------------------------
 
 def _urls(import_id: int) -> dict:
-    """画面（static/tables.js）が使う URL。panel は末尾の NAME を段の名前に置き換えて使う。"""
+    """画面（static/tables.js）が使う URL。panel は末尾の NAME を段の名前に置き換えて使う。
+
+    列の対応づけ・AI整形・プレビュー・ダウンロードの URL は、それぞれの段の HTML が
+    data-* 属性や <a href> で持っているので、ここには入れない。
+    """
     def u(endpoint: str, **kw) -> str:
         return url_for(endpoint, import_id=import_id, **kw)
 
     return {
         "panel": url_for("tables.panel", import_id=import_id, name="NAME"),
         "source": u("tables.save_source"), "detect": u("tables.layout_detect"), "layout": u("tables.save_layout"),
-        "columns": u("tables.save_columns"), "read": u("tables.reread"), "cancel": u("tables.cancel_job"),
-        "delete": u("tables.delete_import"), "preview_start": u("tables.start_preview"),
-        "preview_file": u("tables.preview_file"), "confirm": u("tables.confirm"),
-        "download": u("tables.download_zip"), "csv": u("tables.download_csv"),
-        "issues": u("tables.issues_csv"),
-        "ai": {"split": u("tables.ai_split_preview"), "trial": u("tables.ai_trial"),
-               "estimate": u("tables.ai_estimate"), "run": u("tables.ai_run"),
-               "pause": u("tables.ai_control", action="pause"), "resume": u("tables.ai_control", action="resume"),
-               "cancel": u("tables.ai_control", action="cancel")},
+        "read": u("tables.reread"), "cancel": u("tables.cancel_job"), "delete": u("tables.delete_import"),
+        "preview_start": u("tables.start_preview"), "confirm": u("tables.confirm"),
     }
 
 
@@ -347,29 +330,21 @@ def discard():
     return "", 204
 
 
-# ---- 読み取り方（文字コード・区切り・シート・取り込み設定） -------------------------------------------------
+# ---- 読み取り方（文字コード・区切り・シート） ---------------------------------------------------------
 
-def _list_templates() -> list[dict]:
-    return [t for t in store.list_templates() if t.get("spec") is not None]
-
-
-def _source_note(imp: dict, src: dict, template_name: str | None = None) -> str:
-    """段の見出しに出す1行（どう読むか・どの取り込み設定か）。"""
+def _source_note(imp: dict, src: dict) -> str:
+    """段の見出しに出す1行（どう読むか）。"""
     if _is_excel(imp):
-        note = f"シート: {src.get('sheet') or ''}"
-    else:
-        delimiters = dict(DELIMITER_CHOICES)
-        note = f"{src.get('encoding') or ''}／{delimiters.get(src.get('delimiter'), src.get('delimiter') or '')}"
-    return f"{note}／{template_name or src.get('new_template_name') or '新しい取り込み設定'}"
+        return f"シート: {src.get('sheet') or ''}"
+    delimiters = dict(DELIMITER_CHOICES)
+    return f"{src.get('encoding') or ''}／{delimiters.get(src.get('delimiter'), src.get('delimiter') or '')}"
 
 
 def _panel_source(imp: dict):
     import_id = imp["id"]
     src = imp.get("source") or {}
     error = None
-    sheets, sheet, headers, list_like = [], None, [], {}
-    candidates = []
-    templates = _list_templates()
+    sheets, sheet, list_like = [], None, {}
     try:
         source_obj = _open(imp)
         sheets = source_obj.sheets() if _is_excel(imp) else []
@@ -377,43 +352,18 @@ def _panel_source(imp: dict):
         if _is_excel(imp) and len([s for s in sheets if not s.hidden]) <= 8:
             # 「一覧表らしい」「クロス集計らしい（対応していません）」を出し分ける（表の範囲の判定と合わせる）
             list_like = {s.name: source_obj.list_kind(s.name) for s in sheets if not s.hidden}
-        # 見出し行を指定してあれば、その行の見出しで候補を探す（自動判定は先頭40行しか探さない）
-        saved_rows = [int(r) for r in src.get("header_rows") or [] if r] or None
-        layout = source_obj.layout(sheet, header_rows=saved_rows, max_scan_rows=200)
-        headers = layout.headers
     except UploadError as exc:
         error = str(exc)
-    if templates:
-        # 見出しが読み取れないときも、保存した取り込み設定は選べるように全部出す（一致数は 0 になる）
-        by_id = {id(t["spec"]): t for t in templates}
-        for spec, matched, total in match_templates(headers, sheet or imp["file_name"], [t["spec"] for t in templates]):
-            candidates.append({"template": by_id[id(spec)], "matched": matched, "total": total})
-    selected = imp.get("template_id")
-    if selected and selected not in {c["template"]["id"] for c in candidates}:
-        selected = None   # 消した取り込み設定など、選べるものが無いときは「新しく作る」を選んでおく
-    if not selected and candidates and candidates[0]["total"] and candidates[0]["matched"] == candidates[0]["total"]:
-        selected = candidates[0]["template"]["id"]
-    if selected and selected != imp.get("template_id"):
-        # 画面で選んだことにして記録に残す（1画面なので「次へ」で選択を確定する場面が無い）
-        chosen = store.get_template(selected)
-        if chosen is not None:
-            store.update_import(import_id, template_id=chosen["id"], template_version_id=chosen["current_version_id"])
     html = render_template(
         "tables/_p_source.html", imp=imp, src=src, error=error, sheets=sheets, sheet=sheet, list_like=list_like,
-        headers=headers, candidates=candidates, selected=selected or "new",
-        # 名前の初期値にファイル名を使わない: 設定の名前は消さずに残り続けるので、取引先名・工場名・
-        # 「社外秘」を含みうるファイル名がそのまま残ってしまう（design.md 3.3・R5）
-        new_name=src.get("new_template_name") or "",
-        encodings=ENCODING_CHOICES, delimiters=DELIMITER_CHOICES,
-        delete_url=url_for("tables.delete_template", template_id=0))
-    template_name = next((c["template"]["name"] for c in candidates if c["template"]["id"] == selected), None)
-    note = _source_note(imp, {**src, "sheet": sheet or src.get("sheet")}, template_name)
+        encodings=ENCODING_CHOICES, delimiters=DELIMITER_CHOICES)
+    note = _source_note(imp, {**src, "sheet": sheet or src.get("sheet")})
     return _panel(html, note=note, error=error, import_id=import_id)
 
 
 @bp.post("/imports/<int:import_id>/source")
 def save_source(import_id: int):
-    """読み取り方（シート・文字コード・区切り）と取り込み設定の選択。変えるたびに保存する。"""
+    """読み取り方（シート・文字コード・区切り）。変えるたびに保存する。"""
     imp = _load_import(import_id)
     if _processing(imp):
         return _json_error(BUSY_MESSAGE, 409)
@@ -433,28 +383,14 @@ def save_source(import_id: int):
             if value:
                 src[name] = value
         src["errors"] = "replace" if form.get("replace_errors") in ("on", True, "true", "1") else "strict"
-    changed_source = (src.get("sheet"), src.get("encoding"), src.get("delimiter"), src.get("errors")) != before
-    if changed_source:
+    columns: dict = {"source": src, "status": "uploaded"}   # 読み取り方を保存したら読み込みからやり直す
+    if (src.get("sheet"), src.get("encoding"), src.get("delimiter"), src.get("errors")) != before:
         src.pop("header_rows", None)
         src.pop("data_end_row", None)
-    choice = str(form.get("template") or "new")
-    columns: dict = {"source": src}
-    warning = ""
-    if choice == "new":
-        name = str(form.get("new_template_name") or "").strip()
-        src["new_template_name"] = name
-        if not name:
-            warning = NEW_TEMPLATE_NAME_NOTE
-        columns.update(template_id=None, template_version_id=None)
-    else:
-        template = store.get_template(_int(choice, 0))
-        if template is None:
-            return _json_error("取り込み設定が見つかりません")
-        columns.update(template_id=template["id"], template_version_id=template["current_version_id"])
-    columns["status"] = "uploaded"  # 選び直したら読み込みからやり直す
+        # 見出しが変わるので、この取り込みの列の対応づけは捨てて決め直す
+        columns.update(spec_json="", spec_hash="")
     store.update_import(import_id, **columns)
-    note = _source_note(imp, src, template["name"] if choice != "new" else None)
-    return jsonify({"ok": True, "warning": warning, "note": note, "next": "layout",
+    return jsonify({"ok": True, "note": _source_note(imp, src), "next": "layout",
                     "reset": ["layout", "columns", "ai", "preview", "done"]})
 
 
@@ -499,8 +435,7 @@ def _panel_layout(imp: dict):
         return _locked(str(exc))
     src = imp.get("source") or {}
     html = render_template("tables/_p_layout.html", imp=imp, layout=guess, info=_layout_json(guess), rows=rows,
-                           width=width, sheet=sheet, data_end_saved=src.get("data_end_row") or "",
-                           kind_labels=TABLE_KIND_LABELS)
+                           width=width, sheet=sheet, data_end_saved=src.get("data_end_row") or "")
     return _panel(html, note=f"{guess.data_start}〜{guess.data_end}行目" if guess.data_end >= guess.data_start else "")
 
 
@@ -547,242 +482,89 @@ def save_layout(import_id: int):
                            "見出し行の番号を確かめるか、データのある表を選んでください")
     src = dict(imp.get("source") or {})
     src.update(sheet=sheet, header_rows=guess.header_rows, header_row=None, data_end_row=data_end or None)
-    src.pop("headers_changed", None)
-    spec = _spec_for(imp)
-    if spec is not None:
-        res = resolve_columns(spec, guess.headers)
-        ignored = set((spec.header or {}).get("ignored") or [])
-        added = [h for h in res.unused_headers if h not in ignored]
-        if res.missing or added:
-            src["headers_changed"] = {"missing": res.missing, "added": added}
     store.update_import(import_id, source=src)
-    if spec is None or src.get("headers_changed"):
-        return jsonify({"ok": True, "next": "columns", "reset": ["columns", "ai", "preview", "done"]})
-    job_id = pipeline.start_read_job(import_id)
-    # 「列の対応づけ」は飛ばした（保存してある取り込み設定がそのまま使える）。
-    # 灰色のまま何も書かれていないと理由が分からないので、済みにして設定の名前を出す
-    return jsonify({"ok": True, "next": _after_read_panel(spec), "reset": ["ai", "preview", "done"],
-                    "done": {"columns": f"{spec.name}（保存してある取り込み設定をそのまま使いました）"},
-                    "job": _job_info(jobs.get_job(job_id), import_id), "reading": True})
+    # 取り込み設定は保存しないので、範囲を決めたら必ず「列の対応づけ」へ進む（利用者の指示 2026-09-20）
+    return jsonify({"ok": True, "next": "columns", "reset": ["columns", "ai", "preview", "done"]})
 
 
 # ---- 列の対応づけ ------------------------------------------------------------------------------
-
-def _options_ctx() -> dict:
-    return {"types": [(t, TYPE_LABELS.get(t, t)) for t in COLUMN_TYPES],
-            "roles": [(r, ROLE_LABELS.get(r, r)) for r in COLUMN_ROLES],
-            "md_modes": [(m, MD_LABELS.get(m, m)) for m in MD_MODES]}
+# 画面で決めるのは「使う・役割」だけ。キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値から
+# 候補づくり（tables.mapping.suggest_columns・tables.dictionary）が決める（利用者の指示 2026-09-20）。
 
 
-def _settings_of(spec, default_name: str) -> dict:
-    md = (spec.markdown or {}) if spec is not None else {}
-    return {"name": spec.name if spec is not None else default_name,
-            "description": spec.description if spec is not None else "",
-            "file_prefix": md.get("file_prefix") or "",
-            "group_by": md.get("group_by") or "month"}
+def _screen_role(role: str) -> str:
+    """候補の役割を画面の選択肢に寄せる（画面に出さない役割＝人名・数値・区分などは「その他」）。"""
+    return role if role in SCREEN_ROLE_KEYS else "attribute"
 
 
-def _column_row(index: int, header: str, col=None, sugg=None, use: bool = True) -> dict:
-    src = col if col is not None else sugg
-    role = getattr(src, "role", "attribute") or "attribute"
-    return {
-        "index": index, "header": header, "use": use,
-        "key": getattr(src, "key", "") or "", "display": getattr(src, "display", "") or header,
-        "description": getattr(col, "description", "") if col is not None else "",
-        "type": getattr(src, "type", "string") or "string", "unit": getattr(src, "unit", "") or "",
-        "role": role, "fill_down_blank": bool(getattr(src, "fill_down_blank", False)),
-        "md": getattr(src, "md", "attribute") or "attribute", "ai": role == "log",
-        "examples": list(getattr(sugg, "examples", []) or [])[:3] if sugg is not None else [],
-        "type_error_rate": getattr(sugg, "type_error_rate", 0.0) if sugg is not None else 0.0,
-        "blank_rate": getattr(sugg, "blank_rate", 0.0) if sugg is not None else 0.0,
-        "inferred_type": getattr(sugg, "inferred_type", "") if sugg is not None else "",
-        "inferred_type_label": TYPE_LABELS.get(getattr(sugg, "inferred_type", "") if sugg is not None else "",
-                                               getattr(sugg, "inferred_type", "") if sugg is not None else ""),
-        "auto_omit": sugg is not None and getattr(sugg, "md", "") == "omit",
-        "omit_reason": getattr(sugg, "omit_reason", "") if sugg is not None else "",
-        "matched_by": MATCHED_LABELS.get(getattr(sugg, "matched_by", "") if sugg is not None else "", ""),
-    }
+def _suggest(imp: dict):
+    """保存した範囲で見出しと先頭のデータを読み、列ごとの候補を作る。戻り値: (layout, suggestions)"""
+    source_obj = _open(imp)
+    sheet = _sheet(imp, source_obj)
+    guess = _layout(imp, source_obj, sheet)
+    samples = source_obj.sample_rows(sheet, guess, 200)
+    return guess, suggest_columns(guess.headers, samples)
 
 
-# 画面に出す markdown の項目（それ以外は前の設定から引き継ぐ）
-_SCREEN_MD_KEYS = ("file_prefix", "group_by")
+# 型の仲間。仲間が違うときだけ「値は…らしい」と知らせる（日付⇔日時、文字⇔長文は読み方が変わらない）
+_TYPE_FAMILY = {"date": "日付", "datetime": "日付", "time": "日付", "number": "数値",
+                "code": "文字", "string": "文字", "text": "文字", "enum": "文字", "status": "文字"}
 
 
-def _base_column(base_spec, row: dict, taken: set[str]):
-    """画面の行に対応する前の設定の列。キーで探し、無ければ見出しで探す（taken: 他の行がキーで使う列）。"""
-    key = str(row.get("key") or "").strip()
-    header = str(row.get("header") or "")
-    col = base_spec.column(key) if key else None
-    if col is not None and (not header or header in (col.headers or []) or header == col.display
-                            or not any(header in (c.headers or []) or header == c.display for c in base_spec.columns)):
-        # キーで当たった列でも、見出しが別の列のものなら使わない（キーを入れ替えた・重ねたときに、
-        # 別の列の見出しの別名・値の置き換えを引き継がないように）
-        return col
-    if not header:
-        return None
-    return next((c for c in base_spec.columns if c.key not in taken and header in (c.headers or [])), None)
+def _warnings_of(sugg) -> list[str]:
+    """その列で知らせることがあるときだけ出す1行（何も無ければ空）。"""
+    out = []
+    if sugg.type_error_rate:
+        out.append(f"型エラー {round(sugg.type_error_rate * 100, 1)}%")
+    if sugg.blank_rate >= 0.5:
+        out.append(f"空欄 {int(round(sugg.blank_rate * 100))}%")
+    if sugg.inferred_type and _TYPE_FAMILY.get(sugg.inferred_type) != _TYPE_FAMILY.get(sugg.type):
+        out.append(f"値は「{TYPE_LABELS.get(sugg.inferred_type, sugg.inferred_type)}」らしい")
+    if sugg.md == "omit":
+        out.append("空欄だけなので、はじめから使わない設定にしています" if sugg.omit_reason == "blank"
+                   else "記録に不要な管理用の列らしいので、はじめから使わない設定にしています")
+    return out
 
 
-def _carry_column(col, old, header: str) -> None:
-    """JSON で取り込んだ設定だけが持つ列の設定（見出しの別名・単位換算・値の置き換えなど）を引き継ぐ。
-
-    画面では見出しを1つしか扱わないので、見出しは前の見出しとの和にする（新しいファイルで見出しが変わっても、
-    前の見出しのファイルがそのまま読めるように）。
-    """
-    if old is None:
-        return
-    headers = [header] if header else []
-    if not old.headers and header == old.display:
-        headers = []   # 見出しを持たず表示名で照合していた列は、そのまま
-    headers += [h for h in old.headers or [] if h not in headers]
-    col.headers = headers
-    col.allowed = list(old.allowed or [])
-    col.value_map = dict(old.value_map or {})
-    if (col.unit or "") == (old.unit or ""):
-        col.unit_conversions = dict(old.unit_conversions or {})
-    if col.role == old.role and col.type == old.type:
-        # 型・役割を変えていなければ、正規化と必須も前のまま（変えたときは画面の選択に合わせた既定値）
-        col.normalize = list(old.normalize or [])
-        col.required = bool(old.required)
+def _column_row(sugg) -> dict:
+    """画面の1行（使う・見出し・役割と、知らせること）。"""
+    return {"index": sugg.index, "header": sugg.header, "use": sugg.md != "omit",
+            "role": _screen_role(sugg.role), "examples": list(sugg.examples or [])[:3],
+            "warnings": _warnings_of(sugg)}
 
 
-def _carry_markdown(spec, base_spec) -> None:
-    """画面に出さない markdown の設定（集計の指標・上位件数・dataset_card など）を前の設定から引き継ぐ。"""
-    old = copy.deepcopy(base_spec.markdown or {})
-    for k in _SCREEN_MD_KEYS:
-        old.pop(k, None)
-    old.pop("title_columns", None)
-    numbers = {c.key for c in spec.columns if c.type == "number"}
-    summaries = []
-    for s in base_spec.summaries():
-        s = copy.deepcopy(s)
-        # 消した列・数値でなくなった列の指標は落とす（残すと保存できなくなる）
-        s.metrics = [m for m in s.metrics if ":" not in m or m.split(":", 1)[1] in numbers] or ["count"]
-        summaries.append(s)
-    old["summaries"] = summaries
-    spec.markdown.update(old)
+def _default_table_name(imp: dict) -> str:
+    """表の名前の初期値。ファイル名から作る（設定は残らないので、名前もこの取り込みだけのもの）。"""
+    return Path(imp["file_name"]).stem
 
 
-_UNIQUE_ROLES = ("key", "date", "entity", "entity_label", "log")
-
-
-def _absent_columns(base_spec, rows: list[dict]) -> list:
-    """前の設定の列のうち、画面のどの行（使う・使わないとも）にも対応しないもの。必須の列は含めない。"""
-    matched: set[str] = set()
-    for r in rows:
-        col = _base_column(base_spec, r, set())
-        if col is not None:
-            matched.add(col.key)
-    ignored = set((base_spec.header or {}).get("ignored") or [])
-    ignored |= {str(r.get("header") or "") for r in rows if not r.get("use")}
-    return [c for c in base_spec.columns if c.key not in matched and not c.required
-            and not ({c.display, *(c.headers or [])} & ignored)]
-
-
-def _carry_record(spec, base_spec, keys: set[str]) -> dict:
-    """記録キー・代わりのキーは、画面で記録番号・日付・設備の役割を変えていなければ前の設定のまま
-    （JSON で取り込んだ複数列のキーを、何も変えずに保存しただけで置き換えないように）。"""
-    old = copy.deepcopy(base_spec.record or {})
-    record = {**old, **spec.record}
-
-    def role_key(s, role):
-        col = s.first_role(role)
-        return col.key if col is not None else None
-
-    def parts_exist(parts) -> bool:
-        return all(str(p).split(":")[0] in keys for p in parts or [])
-
-    if "key" in old and role_key(spec, "key") == role_key(base_spec, "key") and parts_exist(old["key"]):
-        record["key"] = old["key"]
-    if ("fallback_key" in old and parts_exist(old["fallback_key"])
-            and all(role_key(spec, r) == role_key(base_spec, r) for r in ("date", "entity", "text"))):
-        record["fallback_key"] = old["fallback_key"]
-    return record
-
-
-def _build_spec(payload: dict, base_spec=None):
-    """列の対応づけ表（JSON）から取り込み設定を作る。戻り値: (spec, errors)"""
-    rows = [r for r in payload.get("columns") or [] if isinstance(r, dict)]
-    used = [r for r in rows if r.get("use")]
+def _build_spec(payload: dict, guess, suggestions):
+    """画面の選択（使う・役割）と列の候補から取り込み設定を作る。戻り値: (spec, errors)"""
+    choices: dict[int, dict] = {}
+    for row in payload.get("columns") or []:
+        if isinstance(row, dict):
+            choices[_int(row.get("index"), -1)] = row
+    used: list[dict] = []
+    for sugg in suggestions:
+        choice = choices.get(sugg.index)
+        if not (bool(choice.get("use")) if choice else sugg.md != "omit"):
+            continue
+        role = str((choice or {}).get("role") or "")
+        if role not in SCREEN_ROLE_KEYS:
+            role = _screen_role(sugg.role)
+        # 画面でそのままなら候補の役割（人名・数値・区分など）を活かす。選び直したときだけその役割にする
+        role = sugg.role if role == _screen_role(sugg.role) else role
+        type_ = "text" if role == "log" else sugg.type
+        # 「使う」列は必ず md に出す（候補が「出さない」でも、チェックを入れたのだから出す）
+        md = sugg.md if sugg.md != "omit" else ("body" if type_ == "text" else "attribute")
+        used.append({"index": sugg.index, "header": sugg.header, "key": sugg.key, "display": sugg.display,
+                     "type": type_, "role": role, "unit": sugg.unit, "md": md,
+                     "fill_down_blank": bool(sugg.fill_down_blank)})
     name = str(payload.get("name") or "").strip()
-    # 入力したキーの重なり。spec_from_suggestions は黙って「_2」を付けるので、validate_spec の確認に届かない
-    typed = Counter(str(r.get("key") or "").strip() for r in used if str(r.get("key") or "").strip())
-    dup_errors = [f"キー「{k}」が重複しています" for k, n in typed.items() if n > 1]
-    suggestions = []
-    for i, r in enumerate(used):
-        role = str(r.get("role") or "attribute")
-        type_ = str(r.get("type") or "string")
-        if r.get("ai"):
-            role, type_ = "log", "text"
-        elif role == "log":
-            role = "text"
-        suggestions.append({
-            "index": _int(r.get("index"), i), "header": str(r.get("header") or ""),
-            "key": str(r.get("key") or "").strip() or None, "display": str(r.get("display") or "").strip(),
-            "type": type_, "role": role, "unit": str(r.get("unit") or "").strip(), "md": str(r.get("md") or "attribute"),
-            "fill_down_blank": bool(r.get("fill_down_blank")),
-        })
-    header_count = int(((base_spec.header or {}).get("rows") if base_spec is not None else None)
-                       or _int(payload.get("header_rows_count"), 1) or 1)
-    group_by = payload.get("group_by") if payload.get("group_by") in ("month", "entity_month") else "month"
-    options = {"description": str(payload.get("description") or ""), "group_by": group_by, "period_grain": "all"}
-    spec = spec_from_suggestions(name, {"table_kind": "list", "header_rows": list(range(1, header_count + 1))},
-                                 suggestions, options)
-    for col, r in zip(spec.columns, used):
-        col.description = str(r.get("description") or "").strip()
-    spec.header["ignored"] = [str(r.get("header") or "") for r in rows if not r.get("use")]
-    # 空欄・設定名と同じ接頭辞は保存しない（空欄＝設定名。名前を変えたら新しい名前が使われるように）
-    prefix = str(payload.get("file_prefix") or "").strip()
-    # 前の名前と同じ接頭辞は、前の設定にそう保存されていた（以前の版で空欄を設定名として保存した）ときだけ空欄に戻す。
-    # 名前を変えるときに前の名前を手で入れたなら、その接頭辞を残す（md のファイル名を変えないため）
-    old_name = base_spec.name if base_spec is not None else ""
-    old_prefix = str((base_spec.markdown or {}).get("file_prefix") or "").strip() if base_spec is not None else ""
-    legacy = bool(old_name) and prefix == old_name and old_prefix == old_name
-    spec.markdown["file_prefix"] = "" if prefix in ("", name) or legacy else prefix
-    if base_spec is not None:
-        # 画面で扱わない細かい設定は前の設定から引き継ぐ
-        for attr in ("name_patterns", "file_types", "na_tokens", "fiscal_year_start_month", "exclude",
-                     "continuation_rows", "checks", "custom_stages"):
-            setattr(spec, attr, copy.deepcopy(getattr(base_spec, attr)))
-        header = copy.deepcopy(base_spec.header or {})
-        header.update({"rows": spec.header["rows"], "ignored": spec.header["ignored"]})
-        header["anchors"] = header.get("anchors") or []
-        spec.header = header
-        # 記録キーと日付の列は画面の役割から決める。それ以外の項目は前の設定のまま
-        spec.period = {**copy.deepcopy(base_spec.period or {}), **spec.period}
-        # ただし日付の役割の列が前と同じなら、JSON で選んでいた期間の列（2列目の日付など）はそのまま
-        # （画面では期間の列を選べないので、何も変えずに保存しただけで最初の日付の列に置き換えない）
-        old_date = str((base_spec.period or {}).get("date_column") or "")
-        old_date_col = spec.column(old_date) if old_date else None
-        if (old_date_col is not None and old_date_col.type in ("date", "datetime")
-                and {c.key for c in spec.columns_with_role("date")}
-                == {c.key for c in base_spec.columns_with_role("date")}):
-            spec.period["date_column"] = old_date
-        taken = {c.key for c in spec.columns}
-        for col, r in zip(spec.columns, used):
-            _carry_column(col, _base_column(base_spec, r, taken), str(r.get("header") or ""))
-        # 今回のファイルに無いだけの列（どの行にも対応せず、外してもいない列）は設定に残す。
-        # 残さないと、その列の指標・AIの追加処理・タイトル列まで設定から消えてしまう
-        for old_col in _absent_columns(base_spec, rows):
-            if old_col.key in taken or (old_col.role in _UNIQUE_ROLES and spec.first_role(old_col.role) is not None):
-                continue
-            spec.columns.append(copy.deepcopy(old_col))
-            taken.add(old_col.key)
-        keys = {c.key for c in spec.columns}
-        spec.record = _carry_record(spec, base_spec, keys)
-        _carry_markdown(spec, base_spec)
-        spec.markdown["title_columns"] = [k for k in (base_spec.markdown or {}).get("title_columns") or []
-                                          if str(k).split(":")[0] in keys]
-        spec.custom_stages = [s for s in spec.custom_stages if all(k in keys for k in s.inputs)]
-        old = base_spec.log_stage
-        log_col = spec.first_role("log")
-        if spec.log_stage is None and old is not None and log_col is not None and log_col.key == old.column:
-            spec.log_stage = LogStageSpec(column=old.column)  # 今回のファイルに無いAI整形の列（下で前の設定に戻す）
-        if old is not None and spec.log_stage is not None and old.column == spec.log_stage.column:
-            old.context_columns = [k for k in old.context_columns if k in keys]
-            spec.log_stage = old
-    errors = dup_errors + [e for e in validate_spec(spec) if e not in dup_errors]
-    if sum(1 for r in used if r.get("ai")) > 1:
+    header_rows = list(getattr(guess, "header_rows", None) or [1])
+    spec = spec_from_suggestions(name, {"table_kind": "list", "header_rows": header_rows}, used)
+    errors = validate_spec(spec)
+    if sum(1 for u in used if u["role"] == "log") > 1:
         # 黙って最初の列だけを AI整形の対象にしない（2列目は追記ログとして1行につながれて出てしまう）
         errors.insert(0, "AI整形の対象は1列だけにしてください")
     return spec, errors
@@ -794,38 +576,29 @@ def _panel_columns(imp: dict):
     if job is not None and job.get("kind") == "table_read":
         return _panel("", job=_job_info(job, import_id), reading=True)
     try:
-        source_obj = _open(imp)
-        sheet = _sheet(imp, source_obj)
-        guess = _layout(imp, source_obj, sheet)
-        samples = source_obj.sample_rows(sheet, guess, 200)
+        guess, suggestions = _suggest(imp)
     except UploadError as exc:
         return _locked(str(exc))
     if not guess.headers:
         return _locked("見出しが見つかりません。上の「表の範囲」で見出し行を指定してください")
+    rows = [_column_row(s) for s in suggestions]
     spec = _spec_for(imp)
-    suggestions = suggest_columns(guess.headers, samples, spec)
-    pos_to_col, ignored = {}, set()
     if spec is not None:
-        res = resolve_columns(spec, guess.headers)
-        pos_to_col = {pos: spec.column(key) for key, pos in res.positions.items()}
-        ignored = set((spec.header or {}).get("ignored") or [])
-    rows = []
-    for s in suggestions:
-        col = pos_to_col.get(s.index)
-        if spec is None:
-            use = s.blank_rate < 1.0
-        else:
-            use = col is not None or s.header not in ignored
-        rows.append(_column_row(s.index, s.header, col, s, use))
-    absent = [c.display for c in _absent_columns(spec, rows)] if spec is not None else []
-    src = imp.get("source") or {}
+        # この取り込みで一度保存していれば、そのときの「使う・役割」を残す（開き直しても選び直さずに済む）
+        by_header = {}
+        for col in spec.columns:
+            for header in (col.headers or [col.display]):
+                by_header[header] = col
+        for row in rows:
+            col = by_header.get(row["header"])
+            row["use"] = col is not None
+            if col is not None:
+                row["role"] = _screen_role(col.role)
     html = render_template(
-        # 設定の名前の初期値にファイル名を使わない（R5・design.md 3.3）
-        "tables/_p_columns.html", imp=imp, rows=rows, settings=_settings_of(spec, src.get("new_template_name") or ""),
-        changed=src.get("headers_changed"), absent=absent, is_new=spec is None,
-        header_rows_count=len(guess.header_rows) or 1,
-        save_url=url_for("tables.save_columns", import_id=import_id), **_options_ctx())
-    return _panel(html, note=f"{len(rows)}列")
+        "tables/_p_columns.html", rows=rows, roles=SCREEN_ROLES,
+        name=spec.name if spec is not None else _default_table_name(imp),
+        save_url=url_for("tables.save_columns", import_id=import_id))
+    return _panel(html, note=f"{sum(1 for r in rows if r['use'])}／{len(rows)}列")
 
 
 @bp.post("/imports/<int:import_id>/columns")
@@ -833,24 +606,14 @@ def save_columns(import_id: int):
     imp = _load_import(import_id)
     if _processing(imp):
         return _json_error(BUSY_MESSAGE, 409)
-    payload = _payload()
-    template = store.get_template(imp["template_id"]) if imp.get("template_id") else None
-    base_spec = template["spec"] if template else None
-    spec, errors = _build_spec(payload, base_spec)
+    try:
+        guess, suggestions = _suggest(imp)
+    except UploadError as exc:
+        return _json_error(str(exc))
+    spec, errors = _build_spec(_payload(), guess, suggestions)
     if errors:
         return _json_error(errors[0], errors=errors)
-    try:
-        if template is not None:
-            version_id = store.save_template_version(template["id"], spec, allow_import_id=import_id)
-            template_id = template["id"]
-        else:
-            template_id, version_id = store.create_template(spec.name, spec)
-    except sqlite3.IntegrityError as exc:
-        database.get_db().rollback()
-        return _json_error(_save_conflict_message(exc, spec.name))
-    src = dict(imp.get("source") or {})
-    src.pop("headers_changed", None)
-    store.update_import(import_id, template_id=template_id, template_version_id=version_id, source=src)
+    store.save_spec(import_id, spec)
     job_id = pipeline.start_read_job(import_id)
     return jsonify({"ok": True, "next": _after_read_panel(spec), "reset": ["ai", "preview", "done"],
                     "job": _job_info(jobs.get_job(job_id), import_id), "reading": True})
@@ -895,7 +658,7 @@ def cancel_job(import_id: int):
 
 @bp.post("/imports/<int:import_id>/delete")
 def delete_import(import_id: int):
-    """間違えて取り込んだファイルを消す（読み込んだ内容・作った Markdown も消える。取り込み設定は残る）。"""
+    """間違えて取り込んだファイルを消す（読み込んだ内容・作った Markdown も消える）。"""
     imp = _load_import(import_id)
     if imp["status"] in ("reading", "confirming"):
         return _json_error("処理中の取り込みは削除できません。終わるか中止してから削除してください")
@@ -977,7 +740,7 @@ def _panel_ai(imp: dict):
                 break
     ai_job = _ai_job(import_id)
     html = render_template(
-        "tables/_p_ai.html", imp=imp, spec=spec, log_display=col.display if col else log_key, row_choices=row_choices,
+        "tables/_p_ai.html", imp=imp, log_display=col.display if col else log_key, row_choices=row_choices,
         trial_keys=[k for k, _ in row_choices[:10]], job=ai_job, job_active=bool(ai_job and not ai_job.get("finished")),
         job_url=url_for("tables.api_job", job_id=ai_job["id"]) if ai_job else None,
         counts=ai_items.counts(imp["template_id"], "log", import_id=import_id),
@@ -1241,7 +1004,7 @@ def _panel_preview(imp: dict, page: int = 1):
         # 件数分の md を作るのに時間がかかるので、ジョブにして同じ画面に進み具合を出す
         draft = _preview_job(import_id, imp, spec)
         if draft.get("finished") and draft["status"] != "done":
-            return _panel(render_template("tables/_p_preview_failed.html", imp=imp,
+            return _panel(render_template("tables/_p_preview_failed.html",
                                           error=draft.get("message") or "Markdownの下書きを作れませんでした"),
                           failed=True)
         return _panel("", job=_job_info(draft, import_id), building=True)
@@ -1258,8 +1021,7 @@ def _panel_preview(imp: dict, page: int = 1):
         "tables/_p_preview.html", imp=imp, spec=spec, stats=stats, issues=issues[:ISSUES_SHOWN],
         issue_total=len(issues), counts=count_levels(issues), blocking=blocking, files=files, data_rows=data_rows,
         page=page, total_pages=total_pages, columns=[(c.key, _display_with_unit(c)) for c in spec.columns],
-        confirmed=imp["status"] == "confirmed", delete_note=DELETE_ON_DOWNLOAD_NOTE,
-        delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM)
+        confirmed=imp["status"] == "confirmed", delete_note=DELETE_ON_DOWNLOAD_NOTE)
     return _panel(html, note=f"{stats.get('records') or 0}件・{len(files)}ファイル", blocking=blocking,
                   confirmed=imp["status"] == "confirmed")
 
@@ -1324,7 +1086,7 @@ def _panel_done(imp: dict):
         return _locked("上の「内容の確認」で［確定してMarkdownを作成］を押してください")
     spec = _spec_for(imp)
     files = [{"name": p.name, "size": p.stat().st_size} for p in pipeline.md_paths(import_id)]
-    html = render_template("tables/_p_done.html", imp=imp, spec=spec, files=files, stats=imp.get("stats") or {},
+    html = render_template("tables/_p_done.html", imp=imp, files=files, stats=imp.get("stats") or {},
                            delete_note=DELETE_ON_DOWNLOAD_NOTE, delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM)
     return _panel(html, note=f"{len(files)}ファイル")
 
@@ -1378,21 +1140,6 @@ def download_csv(import_id: int):
     name = f"{_download_base(imp, spec)}_正規化データ.csv"
     return set_download_name(
         send_file(io.BytesIO(data), mimetype="text/csv", as_attachment=True, download_name=name), name, "records")
-
-
-# ---- 取り込み設定の削除（読み取り方の段の一覧から） ---------------------------------------------------
-
-@bp.post("/templates/<int:template_id>/delete")
-def delete_template(template_id: int):
-    if store.get_template(template_id) is None:
-        return _json_error("取り込み設定が見つかりません", 404)
-    if store.list_imports(template_id=template_id, limit=1):
-        # ダウンロードした取り込みは消えているので、残っているのはまだダウンロードしていないデータ。
-        # 設定を消すと確定済みの zip も作れなくなる（design.md 3.3）
-        return _json_error("この取り込み設定を使っている、まだダウンロードしていない取り込みがあります。"
-                           "先にその取り込みをダウンロードするか削除してから、設定を削除してください")
-    store.delete_template(template_id)
-    return jsonify({"ok": True, "message": "取り込み設定を削除しました"})
 
 
 # ---- 段の割り当て ---------------------------------------------------------------------------

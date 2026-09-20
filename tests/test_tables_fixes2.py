@@ -20,7 +20,7 @@ from tables.normalize import parse_number_text, read_records
 from tables.source import UploadError, open_source
 from tables.spec import spec_from_dict, spec_from_suggestions
 from tests.tables_helpers import (
-    columns_payload, confirmed, name_source, panel, preview_panel, save_columns, save_layout, upload, upload_csv,
+    columns_payload, confirmed, csv_source, panel, preview_panel, save_columns, save_layout, upload, upload_csv,
     wait_import_job,
 )
 from tests.test_tables_pipe import _rec, list_spec_dict
@@ -201,21 +201,17 @@ def _confirmed_import(app, client) -> int:
     return confirmed(app, client, "トラブル一覧.csv", "トラブル対応一覧")
 
 
-def test_template_in_use_by_an_undownloaded_import_cannot_be_deleted(app, client):
+def test_the_import_carries_its_own_spec_and_takes_it_along_when_downloaded(app, client):
+    """取り込み設定は保存しない。設定は取り込みの行が持ち、ダウンロードすると一緒に消える。"""
     import_id = _confirmed_import(app, client)
     with app.app_context():
-        tid = store.get_import(import_id)["template_id"]
-    res = client.post(f"/tables/templates/{tid}/delete")
-    assert res.status_code == 400 and "ダウンロードしていない取り込み" in res.get_json()["error"]
-    with app.app_context():
-        assert store.get_template(tid) is not None
-        assert store.get_import(import_id)["template_version_id"] is not None
+        imp = store.get_import(import_id)
+        assert imp["spec"] is not None and imp["spec"].name == "トラブル対応一覧"
+        assert imp["spec_hash"] and imp["template_version_id"] == import_id
     res = client.get(f"/tables/imports/{import_id}/download.zip")
     assert res.status_code == 200 and res.mimetype == "application/zip"
-    # ダウンロードで取り込みが消えたあとは削除できる
-    assert client.post(f"/tables/templates/{tid}/delete").status_code == 200
     with app.app_context():
-        assert store.get_template(tid) is None
+        assert store.get_import(import_id) is None
 
 
 def test_second_download_after_purge_is_404_not_500(app, client, monkeypatch):
@@ -241,7 +237,7 @@ def test_delete_is_refused_while_the_preview_draft_is_being_made(app, client):
 
 def test_failed_preview_draft_can_be_made_again(app, client, monkeypatch):
     import_id = upload_csv(client, "t.csv")
-    name_source(client, import_id, "再作成テスト")
+    csv_source(client, import_id)
     save_layout(client, import_id)
     save_columns(client, import_id, columns_payload("再作成テスト"))
     wait_import_job(app, import_id)

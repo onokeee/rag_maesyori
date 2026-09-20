@@ -30,7 +30,7 @@
       <div class="split-pane-head">
         <h3>見本のシート{% if sample %} <small class="muted">{{ sample.file_name }}</small>{% endif %}</h3>
         {% if grids | length > 1 %}
-        <div class="tabs" role="tablist" data-sheet-tabs>
+        <div class="tabs" role="tablist">
           {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
         </div>
         {% endif %}
@@ -44,23 +44,7 @@
           <button type="button" class="btn small" data-click-empty>値が空のまま項目にする</button>
           <button type="button" class="btn small ghost" data-click-cancel>選び直す</button>
         </div>
-        {% for g in grids %}
-        <div class="sheet-grid" data-sheet="{{ g.name }}" {% if not loop.first %}hidden{% endif %}>
-          {% if g.truncated %}<p class="hint">大きいシートのため、先頭の一部だけ表示しています。</p>{% endif %}
-          <div class="grid-wrap" tabindex="0" aria-label="シート {{ g.name }}">
-            <table class="data-grid">
-              <thead><tr><th class="corner"></th>{% for l in g.letters %}<th scope="col">{{ l }}</th>{% endfor %}</tr></thead>
-              <tbody>
-              {% for row in g.rows %}
-                <tr><th scope="row" class="rownum">{{ row.index }}</th>
-                {% for c in row.cells %}<td data-cell="{{ c.coord }}"{% if c.rowspan > 1 %} rowspan="{{ c.rowspan }}"{% endif %}{% if c.colspan > 1 %} colspan="{{ c.colspan }}"{% endif %}{% if c.label %} class="is-label"{% endif %}{% if c.coord in g.click_cells %} data-table-head="1" title="この表を1つの項目にします"{% endif %}>{{ c.text }}</td>{% endfor %}
-                </tr>
-              {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        {% endfor %}
+        {{ ui.sheet_grid(grids, click_cells=True) }}
         {% if samples | length > 1 %}
         <p class="hint">見本ファイル:
           {% for s in samples %}
@@ -107,9 +91,7 @@
   </div>
 
   {# ---- 読み取りテスト ---- #}
-  <section class="card">
-    <div class="card-head"><div><h3 class="card-title">読み取りテスト</h3>
-      <p class="card-subtitle">いまの設定で、この見本を実際に読み取った結果です。</p></div></div>
+  {% call ui.card("読み取りテスト", "いまの設定で、この見本を実際に読み取った結果です。", level=3) %}
     {% if not test %}
       <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
     {% else %}
@@ -123,11 +105,10 @@
       </details>
       <p class="hint">思ったとおりに読めていれば、上の［使用開始］を押してください。帳票取り込みの候補に出ます。</p>
     {% endif %}
-  </section>
+  {% endcall %}
 
   {# ---- 見本ファイル ---- #}
-  <section class="card">
-    <div class="card-head"><div><h3 class="card-title">見本のExcel</h3></div></div>
+  {% call ui.card("見本のExcel", level=3) %}
     {% if samples %}
     <ul class="sample-list">
       {% for s in samples %}
@@ -145,5 +126,5 @@
       <button type="submit" class="btn">見本のExcelを置く</button>
     </form>
     <p class="hint">書き方の違う同じ帳票（「設備No」と「設備番号」など）を足して同じ欄をクリックすると、どちらの書き方でも読めるようになります。</p>
-  </section>
+  {% endcall %}
 </div>

@@ -100,6 +100,7 @@ def _display_text(value) -> str:
     return "" if value is None else str(value)
 
 
+@bp.app_template_filter("table_json")
 def table_json(value) -> str:
     """明細表の値を画面の入力欄（hidden）に入れる JSON。"""
     return json.dumps(value, ensure_ascii=False) if is_table_value(value) else ""
@@ -111,11 +112,6 @@ def field_text(value) -> str:
     if is_table_value(value):
         return "\n".join(table_text_lines(value))
     return "" if value is None else str(value)
-
-
-@bp.app_template_filter("table_json")
-def _table_json_filter(value) -> str:
-    return table_json(value)
 
 
 def _same_text(a: str, b: str) -> bool:
@@ -155,7 +151,7 @@ def _apply_values(extraction: dict, values: dict, confirmed: dict | None = None)
 
 
 # 手で直すと変わる項目のキー。これ以外（表示名・Markdownへの出し方など）が違う項目は戻さない
-_EDIT_KEYS = {"value", "unit", "warning", "edited", "ai_filled"}
+_EDIT_KEYS = {"value", "unit", "warning", "edited"}
 _LOCATION_KEYS = {"sheet", "value_cell"}
 
 
@@ -189,9 +185,7 @@ _UNIT_WARNING_PREFIXES = ("この項目の単位は", "単位が書かれてい�
 def _field_status(f: dict) -> dict:
     """項目の状態タグ: 値の出どころ（auto/manual/blank）と要確認かどうか。"""
     blank = _is_blank(f["value"])
-    if f.get("ai_filled"):
-        source = "ai"
-    elif f.get("edited"):
+    if f.get("edited"):
         source = "manual"
     elif blank:
         source = "blank"
@@ -455,12 +449,6 @@ def _review_response(doc_id: int):
         version=_version(doc),
     )
     return jsonify(html=html, version=_version(doc), summary=summary, doc_id=doc_id)
-
-
-@bp.get("/<int:doc_id>/review")
-def review_fragment(doc_id: int):
-    """読み取り済みの帳票の読み取り結果の欄（画面を開き直したとき用）。"""
-    return _review_response(doc_id)
 
 
 # ---- 3 読み取り結果（その場で直す・途中保存） -----------------------------------------------

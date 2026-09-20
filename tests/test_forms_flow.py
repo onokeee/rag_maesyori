@@ -138,11 +138,11 @@ def test_form_flow_happy_path(app, client, sample_dir):
     assert "別の名前" not in text          # 確定済みの版で作る
     with app.app_context():
         assert db.get_document(doc_id) is None
-    assert client.get(f"/forms/{doc_id}/review").status_code == 404
+    assert client.get(f"/forms/{doc_id}/type").status_code == 404
     assert client.get(f"/forms/{doc_id}/download.md").status_code == 404
 
     # 帳票の種類は設定なので残る
-    assert "設備修理報告書" in client.get("/form-types/list").get_json()["html"]
+    assert "設備修理報告書" in client.get("/form-types/").get_data(as_text=True)
 
 
 def test_missing_required_field_stops_the_confirm(app, client, sample_dir):
@@ -235,8 +235,10 @@ def test_form_flow_with_table_field(app, client, tmp_path):
     empty = {"columns": value["columns"], "rows": []}
     client.post(f"/forms/{doc_id}/draft",
                 json={"values": {parts.field_name: json.dumps(empty, ensure_ascii=False)}})
-    html = client.get(f"/forms/{doc_id}/review").get_json()["html"]
-    assert "data-table-editor" in html and "行を追加" in html and "明細表が見つかりませんでした" not in html
+    with app.app_context():
+        saved = json.loads(db.get_document(doc_id)["data_json"])
+    kept = next(f for f in saved["fields"] if f["field_name"] == parts.field_name)
+    assert kept["value"] == {"columns": value["columns"], "rows": []}   # 列見出しは残る
     assert "## 交換部品" not in client.post(f"/forms/{doc_id}/preview", json={"values": {}}).get_json()["markdown"]
 
     # ダウンロードは確定済みの版から作る（最後の手順。ここでデータは消える）

@@ -325,10 +325,10 @@ def spec_hash(spec: TableSpec) -> str:
 # ---- 検証 ---------------------------------------------------------------------------
 
 def validate_spec(spec: TableSpec) -> list[str]:
-    """設定の問題点（日本語）。空なら保存・取り込みに使える。"""
+    """設定の問題点（日本語）。空なら取り込みに使える。"""
     errors: list[str] = []
     if not str(spec.name or "").strip():
-        errors.append("設定名を入力してください")
+        errors.append("表の名前を入力してください")
     if not spec.columns:
         errors.append("列を1つ以上設定してください")
     keys: set[str] = set()
@@ -600,7 +600,7 @@ def spec_from_suggestions(name: str, layout, suggestions, options: dict | None =
     options: description, name_patterns, file_types, group_by, fiscal_year_start_month
     """
     options = dict(options or {})
-    spec = TableSpec(name=name)  # ファイル名の先頭は空（＝設定名。TableSpec.file_prefix）
+    spec = TableSpec(name=name)  # ファイル名の先頭は空（＝表の名前。TableSpec.file_prefix）
     spec.description = str(options.get("description") or "")
     if options.get("name_patterns"):
         spec.name_patterns = [str(p) for p in options["name_patterns"]]

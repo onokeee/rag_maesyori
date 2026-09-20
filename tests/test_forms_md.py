@@ -5,7 +5,7 @@ import hashlib
 import pytest
 
 from excel.extractor import extract_document, refresh_summary
-from export.formats import build_json, build_markdown, markdown_filename
+from export.formats import build_markdown, markdown_filename
 from pattern.builder import suggest_rows, suggest_title_fields
 from pattern.forms import rows_to_pattern
 from pattern.matcher import rank_patterns
@@ -114,15 +114,14 @@ def test_values_are_nfkc_normalized(standard):
     assert "## 原因\nポンプの コネクタ緩み。\n再締結した。\n" in md  # レコード内に空行を入れない
 
 
-def test_units_and_ai_mark(standard):
+def test_units_are_written_with_the_number(standard):
     info, _, extraction = standard
     assert "- 作業時間: 2.5時間" in build_markdown(_doc(info), extraction)
     work = _field(extraction, "work_hours")
-    work["unit"], work["value"], work["ai_filled"] = "h", 3.0, True
-    md = build_markdown(_doc(info), extraction)
-    assert "- 作業時間: 3h（AI入力）" in md
+    work["unit"], work["value"] = "h", 3.0
+    assert "- 作業時間: 3h" in build_markdown(_doc(info), extraction)
     work["value"] = "3時間くらい"  # 数値にできなかった値には単位を足さない
-    assert "- 作業時間: 3時間くらい（AI入力）" in build_markdown(_doc(info), extraction)
+    assert "- 作業時間: 3時間くらい" in build_markdown(_doc(info), extraction)
 
 
 def test_person_fields_are_written(standard):
@@ -137,20 +136,8 @@ def test_rag_output_omit_fields_are_not_written(standard):
     _field(extraction, "work_hours")["rag_output"] = "omit"
     md = build_markdown(_doc(info), extraction)
     assert "## 原因" not in md and "コネクタ接触不良" not in md and "作業時間" not in md
-    # JSON 側には残す
-    data = build_json(_doc(info), extraction)
-    cause = next(f for f in data["fields"] if f["field_name"] == "cause")
-    assert cause["rag_output"] == "omit" and cause["value"]
-    assert next(f for f in data["fields"] if f["field_name"] == "work_hours")["unit"] == "時間"
-
-
-def test_json_has_no_link_to_the_purged_original(standard):
-    """ダウンロードで帳票ごと消すので、元ファイルへのリンク（消えた後は404）は書かない。"""
-    info, _, extraction = standard
-    data = build_json(_doc(info), extraction)
-    assert "url" not in data["source"]
-    assert data["source"]["file_name"] == _doc(info)["file_name"]
-    assert "/original" not in str(data)
+    # 読み取り結果（画面で見る値）には残す
+    assert _field(extraction, "cause")["value"] and _field(extraction, "work_hours")["unit"] == "時間"
 
 
 def test_long_documents_get_identifier_headings(standard):
@@ -183,26 +170,11 @@ def test_output_is_deterministic_bytes(repair_infos):
     assert len(digests) == 1
 
 
-def test_local_fallback_matches_core_helpers(standard, monkeypatch):
-    """core/mdtext・core/naming が無い環境でも同じ md とファイル名になる。"""
-    from export import formats
-
-    if formats._core_mdtext is None or formats._core_naming is None:
-        pytest.skip("core が未導入")
-    info, _, extraction = standard
-    _field(extraction, "cause")["value"] = "# 見出し\n1. 手順\n- 箇条\n---\n> 引用"
-    _field(extraction, "report_id")["value"] = "R/2026 [改].[x]"
-    with_core = (build_markdown(_doc(info), extraction), markdown_filename(_doc(info), extraction))
-    monkeypatch.setattr(formats, "_core_mdtext", None)
-    monkeypatch.setattr(formats, "_core_naming", None)
-    assert (build_markdown(_doc(info), extraction), markdown_filename(_doc(info), extraction)) == with_core
-
-
 # ---- 明細表 ----
 
 def _table_field(value, name="parts", display="交換部品", **extra):
     return {"field_name": name, "display_name": display, "data_type": "table", "required": False, "value": value,
-            "unit": "", "rag_output": "show", "edited": False, "ai_filled": False, "warning": None, **extra}
+            "unit": "", "rag_output": "show", "edited": False, "warning": None, **extra}
 
 
 def test_table_field_is_written_one_line_per_row(standard):
@@ -224,7 +196,6 @@ def test_table_field_is_written_one_line_per_row(standard):
     refresh_summary(extraction)
     md = build_markdown(_doc(info), extraction)
     assert "## 交換部品" not in md
-    assert build_json(_doc(info), extraction)["values"]["parts"] is None
 
 
 def test_table_field_is_not_used_as_title(standard):
@@ -238,19 +209,19 @@ def test_table_field_is_not_used_as_title(standard):
 # ---- LightRAG オフライン評価の反映（見出し語が値になった行・ファイル名の一意性・タイトルの手がかり） ----
 
 def test_label_as_value_lines_are_not_written(standard):
-    """読み取り誤りで値が別の欄の見出し語になった項目は md・タイトル・ファイル名に出さない（JSON には残す）。"""
+    """読み取り誤りで値が別の欄の見出し語になった項目は md・タイトル・ファイル名に出さない（画面には残す）。"""
     info, _, extraction = standard
     labels = set(extraction["pattern"]["labels"])
     assert "報告番号" in labels and "発生日" in labels  # 候補ラベル・表示名から作られている
 
     quantity = {"field_name": "quantity", "display_name": "数量", "data_type": "string", "required": False,
-                "value": "発生日", "unit": "", "rag_output": "show", "edited": False, "ai_filled": False, "warning": None}
+                "value": "発生日", "unit": "", "rag_output": "show", "edited": False, "warning": None}
     extraction["fields"].append(quantity)
     extraction["fields"].append({**quantity, "field_name": "part_name", "display_name": "品名", "value": "報告番号"})
     refresh_summary(extraction)
     md = build_markdown(_doc(info), extraction)
     assert "- 数量: 発生日" not in md and "- 品名: 報告番号" not in md
-    assert build_json(_doc(info), extraction)["values"]["quantity"] == "発生日"  # JSON には残す
+    assert extraction["values"]["quantity"] == "発生日"  # 読み取り結果には残す
 
     # 人が直した値は消さない。ラベルでない値はそのまま出す
     quantity["edited"] = True

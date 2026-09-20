@@ -1,0 +1,16 @@
+{#- エラー画面の共通の枠。各画面は title（見出しにもなる）と body だけを書く。
+    戻り先が「帳票取り込みへ」だけでないときは actions を上書きする。 -#}
+{% extends "base.html" %}
+{% block content %}
+<div class="card narrow">
+  <div class="card-head">
+    <h1 class="card-title">{{ self.title() }}</h1>
+  </div>
+  {% block body %}{% endblock %}
+  {% block actions %}
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+  {% endblock %}
+</div>
+{% endblock %}

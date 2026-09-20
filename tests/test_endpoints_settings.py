@@ -1,4 +1,4 @@
-"""画面の経路: 取り込み設定の編集保存（「列の対応づけ」の段）、帳票の種類の見本と状態、
+"""画面の経路: 列の対応づけの保存、帳票の種類の見本と状態、
 帳票の元ファイルのダウンロード、Excel のシートの選択。"""
 import io
 
@@ -6,94 +6,64 @@ import openpyxl
 
 from models import database as db
 from tables import store
-from tables.spec import spec_to_dict
-from tests.tables_helpers import (CSV_TEXT, columns_payload, editor_body, json_only_spec, panel, panel_html,
-                                  save_columns, save_layout, save_source, template_import, upload_bytes, upload_csv,
-                                  wait_import_job)
+from tests.tables_helpers import (columns_payload, editor_body, panel, panel_html, save_columns, save_layout,
+                                  save_source, upload_bytes, upload_csv, wait_import_job)
 
 
-# ---- 取り込み設定の編集（「列の対応づけ」の段。設定だけを開く画面は無い） ----------------------------
+# ---- 列の対応づけ（取り込みごとに決める。設定だけを開く画面は無い） ------------------------------------
 
-def test_saving_the_template_editor_unchanged_keeps_json_only_settings(app, client):
-    """画面に出ない設定（見出しの別名・単位換算・値の置き換え・集計）は、そのまま保存しても消えない。"""
-    import_id, template_id = template_import(app, client, json_only_spec())
-    with app.app_context():
-        before = spec_to_dict(store.get_template(template_id)["spec"])
+def test_saving_the_columns_decides_everything_but_use_and_role_from_the_values(app, client):
+    """画面が送るのは「使う・役割」だけ。キー・型・単位・出し方は見出しと値から決める。"""
+    import_id = upload_csv(client, "a.csv")
+    assert save_source(client, import_id, encoding="cp932", delimiter=",").status_code == 200
+    assert save_layout(client, import_id).status_code == 200
 
     body = editor_body(client, import_id)
-    res = save_columns(client, import_id, body)
-    assert res.status_code == 200, res.get_json()
+    assert set(body["columns"][0]) == {"index", "header", "use", "role"}
+    assert body["name"] == "a"   # 表の名前の初期値はファイル名
+    body["name"] = "トラブル対応一覧"
+    assert save_columns(client, import_id, body).status_code == 200
+    wait_import_job(app, import_id)
+
+    with app.app_context():
+        spec = store.get_import(import_id)["spec"]
+    assert spec.name == "トラブル対応一覧"
+    assert spec.column("occurred_at").type in ("date", "datetime")   # 型は値から
+    assert spec.column("downtime").unit == "分"                # 単位は見出しから
+    assert spec.column("symptom").md in ("body", "attribute")  # md での扱いも自動
+    assert spec.markdown["group_by"] == "month"               # まとめ方は常に月
+    assert spec.markdown["file_prefix"] == "" and spec.file_prefix == "トラブル対応一覧"
+
+
+def test_saving_the_columns_again_replaces_the_imports_spec(app, client):
+    """保存し直しても版は作らず、その取り込みの設定を上書きする。"""
+    import_id = upload_csv(client, "a.csv")
+    save_source(client, import_id, encoding="cp932", delimiter=",")
+    save_layout(client, import_id)
+    assert save_columns(client, import_id, columns_payload("1回目")).status_code == 200
     wait_import_job(app, import_id)
     with app.app_context():
-        after = spec_to_dict(store.get_template(template_id)["spec"])
-
-    assert after["columns"] == before["columns"]
-    assert after["markdown"]["summaries"] == before["markdown"]["summaries"]
-    assert after["markdown"]["dataset_card"] is False
-    assert after["markdown"]["title_columns"] == ["equipment_name", "symptom"]
-    # search_rows は判定に使っていないので読み捨てる（R6-T-04）。anchors は残る
-    assert "search_rows" not in after["header"] and after["header"]["anchors"] == ["管理No"]
-    assert after["custom_stages"] == before["custom_stages"]
-    assert after["log_stage"] == before["log_stage"]
-    assert after["period"]["grain"] == "month"
-
-
-def test_template_editor_changes_are_saved_and_stale_metrics_dropped(app, client):
-    import_id, template_id = template_import(app, client, json_only_spec())
-    body = editor_body(client, import_id)
-    for row in body["columns"]:
-        if row["key"] == "downtime":
-            row["use"] = False         # 集計に使っていた列を外す
-        if row["key"] == "equipment_name":
-            row["type"], row["role"] = "code", "entity"    # 型と役割を変えた列は画面の役割に合わせる
-    body["file_prefix"] = "新しい接頭辞"
-    res = save_columns(client, import_id, body)
-    assert res.status_code == 200, res.get_json()
+        first = store.get_import(import_id)
+    assert save_columns(client, import_id, columns_payload("2回目")).status_code == 200
     wait_import_job(app, import_id)
     with app.app_context():
-        spec = store.get_template(template_id)["spec"]
-    assert spec.column("downtime") is None
-    assert [s.metrics for s in spec.summaries()] == [["count"], ["count"]]
-    assert spec.markdown["file_prefix"] == "新しい接頭辞"
-    eq = spec.column("equipment_name")
-    assert eq.role == "entity" and eq.value_map == {"ロボ2": "搬送ロボット2号機"}   # 値の置き換えは引き継ぐ
+        second = store.get_import(import_id)
+    assert first["spec"].name == "1回目" and second["spec"].name == "2回目"
+    assert second["spec_hash"] != first["spec_hash"]
+    assert second["template_version_id"] == first["template_version_id"] == import_id
 
 
-def test_renamed_header_keeps_the_old_header_in_the_template(app, client):
-    """見出しの名前が変わったファイルを読み直しても、前の見出しのファイルは対応づけをやり直さずに読める。"""
-    first = upload_csv(client, "a.csv")
-    assert save_source(client, first, encoding="cp932", delimiter=",", template="new",
-                       new_template_name="T").status_code == 200
-    assert save_layout(client, first).status_code == 200
-    assert save_columns(client, first, columns_payload("T")).status_code == 200
-    wait_import_job(app, first)
-    with app.app_context():
-        template_id = store.get_import(first)["template_id"]
+def test_the_table_name_is_required(app, client):
+    import_id = upload_csv(client, "a.csv")
+    save_source(client, import_id, encoding="cp932", delimiter=",")
+    save_layout(client, import_id)
+    res = save_columns(client, import_id, columns_payload(""))
+    assert res.status_code == 400 and res.get_json()["error"] == "表の名前を入力してください"
 
-    # 新しいファイルで見出し「設備番号」が「機番」に変わった
-    second = upload_csv(client, "b.csv", CSV_TEXT.replace("設備番号", "機番", 1))
-    assert save_source(client, second, encoding="cp932", delimiter=",",
-                       template=str(template_id)).status_code == 200
-    res = save_layout(client, second)
-    assert res.status_code == 200 and res.get_json()["next"] == "columns"   # 見出しが合わないので対応づけへ
-    headers = {"equipment_id": "機番"}
-    payload = columns_payload("T")
-    for row in payload["columns"]:
-        if row["key"] in headers:
-            row["header"] = row["display"] = headers[row["key"]]
-    assert save_columns(client, second, payload).status_code == 200
-    wait_import_job(app, second)
-    with app.app_context():
-        headers = store.get_template(template_id)["spec"].column("equipment_id").headers
-    assert headers[0] == "機番" and "設備番号" in headers
 
-    # 前の見出しのファイルも、列の対応づけをやり直さずに読める
-    third = upload_csv(client, "c.csv")
-    assert save_source(client, third, encoding="cp932", delimiter=",",
-                       template=str(template_id)).status_code == 200
-    res = save_layout(client, third)
-    assert res.status_code == 200 and res.get_json()["next"] != "columns"
-    wait_import_job(app, third)
+def test_there_is_no_saved_settings_endpoint(client):
+    """取り込み設定の経路（一覧・削除）は残していない。"""
+    assert client.post("/tables/templates/1/delete").status_code == 404
 
 
 # ---- 帳票の種類: 見本・状態・削除、帳票の JSON と元ファイル ------------------------------------------
@@ -211,7 +181,7 @@ def test_save_source_uses_the_chosen_excel_sheet(app, client, tmp_path):
     page = panel_html(client, import_id, "source")
     assert "メモ" in page and "一覧" in page
 
-    res = save_source(client, import_id, sheet="一覧", template="new", new_template_name="シート選択")
+    res = save_source(client, import_id, sheet="一覧")
     assert res.status_code == 200 and res.get_json()["next"] == "layout"
     with app.app_context():
         assert store.get_import(import_id)["source"]["sheet"] == "一覧"
@@ -224,7 +194,7 @@ def test_save_source_uses_the_chosen_excel_sheet(app, client, tmp_path):
     assert "発生日" in panel_html(client, import_id, "columns")
 
     # シートを選び直すと、前のシートで決めた見出し行・範囲は使わない
-    save_source(client, import_id, sheet="メモ", template="new", new_template_name="シート選択")
+    save_source(client, import_id, sheet="メモ")
     with app.app_context():
         src = store.get_import(import_id)["source"]
     assert src["sheet"] == "メモ" and "header_rows" not in src

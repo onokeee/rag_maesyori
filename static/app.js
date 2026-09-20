@@ -14,26 +14,6 @@ function toast(message, kind = "ok") {
 }
 
 // ---- fetch ---------------------------------------------------------------------
-// JSON を POST して JSON を受け取る。失敗時はサーバの error 文で例外
-async function postJson(url, body, options = {}) {
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
-    body: JSON.stringify(body || {}),
-    ...options,
-  });
-  if (res.status === 204) return {};
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    // 問題が複数あるとき（列の対応づけの保存など）は errors に全部入っている。1件だけ見せて残りを隠さない
-    const error = new Error(data.error || `通信に失敗しました（HTTP ${res.status}）`);
-    error.status = res.status;
-    error.errors = Array.isArray(data.errors) ? data.errors : null;
-    throw error;
-  }
-  return data;
-}
-
 async function getJson(url) {
   const res = await fetch(url, { headers: { Accept: "application/json" } });
   const data = await res.json().catch(() => ({}));
@@ -109,7 +89,6 @@ function bindProgressBox(box) {
     box.dispatchEvent(new CustomEvent("job:update", { detail: job, bubbles: true }));
     if (JOB_FINISHED.includes(job.status)) {
       box.dispatchEvent(new CustomEvent("job:finished", { detail: job, bubbles: true }));
-      if (box.dataset.reloadOnDone !== undefined) window.location.reload();
     }
   });
 }
@@ -217,29 +196,7 @@ document.addEventListener("click", async (event) => {
     }, () => toast("コピーできませんでした。", "err"));
   }
 
-  // 全選択チェック（data-check-all="name"）
-  const all = event.target.closest("input[data-check-all]");
-  if (all) {
-    document.querySelectorAll(`input[type=checkbox][name="${all.dataset.checkAll}"]`).forEach((box) => {
-      if (!box.disabled) box.checked = all.checked;
-    });
-    document.dispatchEvent(new Event("selection:change"));
-  }
 });
-
-// 選択数の表示（data-count-of="name" の要素に選択件数を入れる）
-function updateSelectionCounts() {
-  document.querySelectorAll("[data-count-of]").forEach((el) => {
-    const n = document.querySelectorAll(`input[type=checkbox][name="${el.dataset.countOf}"]:checked`).length;
-    el.textContent = String(n);
-    const button = el.closest("button");
-    if (button) button.disabled = n === 0;
-  });
-}
-document.addEventListener("change", (event) => {
-  if (event.target.matches("input[type=checkbox]")) updateSelectionCounts();
-});
-document.addEventListener("selection:change", updateSelectionCounts);
 
 // ---- ragFetch: 画面を移らずにサーバへ送る -------------------------------------------------
 // 1画面で全部やるので、送信はすべてここを通る（利用者の指示 2026-09-20）。
@@ -304,7 +261,6 @@ async function ragFetch(url, options = {}) {
 // 使い方（各画面の JS から）:
 //   const guard = ragDiscard.watch("/forms/discard", () => ({ doc_ids: docs.map((d) => d.id) }));
 //   guard.now();     … いま持っている分を今すぐ捨てる（新しいファイルを置く前。await できる）
-//   guard.clear();   … もう捨てるものが無い（ダウンロードが終わった・自分で消した）
 //
 // 閉じる合図は pagehide（閉じる・別のページへ移る）と visibilitychange（タブを隠す・スリープ）の両方で見る。
 // どちらも「必ず呼ばれる」ものではない（強制終了・LANの切断）ので、これだけに頼らない
@@ -339,10 +295,9 @@ const ragDiscard = (() => {
 
   /** url へ「これを捨てて」と送る見張りを付ける。payloadFn() は {doc_ids:[…]} / {import_ids:[…]} を返す。 */
   function watch(url, payloadFn) {
-    let live = true;
     let hiddenTimer = null;
     const has = () => {
-      const payload = (live && payloadFn && payloadFn()) || {};
+      const payload = (payloadFn && payloadFn()) || {};
       const ids = [].concat(payload.doc_ids || [], payload.import_ids || []);
       return ids.length ? payload : null;
     };
@@ -366,11 +321,6 @@ const ragDiscard = (() => {
           await ragFetch(url, { json: payload, quiet: true });
         } catch (e) { /* 捨て損ねても、サーバ側の時間切れで片付く */ }
       },
-      /** もう捨てるものが無い（ダウンロードが終わった・自分で消した）。 */
-      clear() { live = false; },
-      /** また見張る（新しいファイルを置いたあと）。 */
-      arm() { live = true; },
-      send: () => leave(),
     };
   }
 
@@ -402,54 +352,44 @@ const ragSections = (() => {
     toggle.textContent = section.classList.contains("is-open") ? "閉じる" : "開く";
   }
 
-  // 画面に data-steps-open があるときは、段を畳まず最初から全部出しておく（帳票登録など）
-  const alwaysOpen = () => !!document.querySelector("[data-steps-open]");
-
-  /** その段を開く（他の開いている段は、済んだものだけ畳む）。 */
+  /** その段を開く（3画面とも data-steps-open なので、ほかの段は畳まない）。 */
   function open(id, { scroll = true } = {}) {
     const section = el(id);
     if (!section) return null;
-    list().forEach((s) => {
-      if (!alwaysOpen() && s !== section && s.classList.contains("is-done")) s.classList.remove("is-open");
-      setToggle(s);
-    });
+    list().forEach(setToggle);
     section.classList.add("is-open");
     setToggle(section);
-    section.dispatchEvent(new CustomEvent("step:open", { bubbles: true }));
     if (scroll) section.scrollIntoView({ behavior: "smooth", block: "start" });
     return section;
   }
 
-  /** その段を「済み」にして畳み、要約を見出しに出す。next を渡すとその段を開く。 */
+  /** その段を「済み」にして要約を見出しに出す。next を渡すとその段を開く。 */
   function done(id, summary, next) {
     const section = el(id);
     if (!section) return null;
     section.classList.add("is-done");
-    if (!alwaysOpen()) section.classList.remove("is-open");
-    const label = section.querySelector("[data-step-summary]");
-    if (label && summary !== undefined && summary !== null) {
-      label.textContent = String(summary);
-      label.title = String(summary);
-    }
+    note(section, summary);
     setToggle(section);
-    section.dispatchEvent(new CustomEvent("step:done", { bubbles: true }));
     if (next) open(next);
     return section;
   }
 
-  /** その段を開き直し、後ろの段を「まだ」に戻す（やり直すとき）。 */
-  function reset(id) {
-    const all = list();
-    const index = all.indexOf(el(id));
-    if (index < 0) return null;
-    all.slice(index + 1).forEach((s) => {
-      s.classList.remove("is-open", "is-done");
-      const label = s.querySelector("[data-step-summary]");
-      if (label) label.textContent = "";
-      setToggle(s);
-      s.dispatchEvent(new CustomEvent("step:reset", { bubbles: true }));
-    });
-    return open(all[index]);
+  /** その段を「まだ」に戻す（やり直すとき。要約も消す）。 */
+  function close(id) {
+    const section = el(id);
+    if (!section) return null;
+    section.classList.remove("is-open", "is-done");
+    note(section, "");
+    setToggle(section);
+    return section;
+  }
+
+  /** 段の見出しに出す要約（空なら消す）。 */
+  function note(id, text) {
+    const label = el(id)?.querySelector("[data-step-summary]");
+    if (!label || text === undefined || text === null) return;
+    label.textContent = String(text);
+    label.title = String(text);
   }
 
   /** 段の中身の要素（ここに受け取った HTML を入れる）。 */
@@ -485,17 +425,16 @@ const ragSections = (() => {
     }
   });
 
-  return { el, open, done, reset, body, working, refresh: () => list().forEach(setToggle) };
+  return { el, open, done, close, note, body, working, refresh: () => list().forEach(setToggle) };
 })();
 
 // ---- 初期化 -------------------------------------------------------------------------
 document.querySelectorAll("[data-file-drop]").forEach(bindFileDrop);
 document.querySelectorAll(".progress-box[data-job-url]").forEach(bindProgressBox);
-updateSelectionCounts();
 ragSections.refresh();
 // 他のスクリプトから使う
 window.ragFetch = ragFetch;
 window.ragSections = ragSections;
 window.ragDiscard = ragDiscard;
-window.App = { toast, postJson, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox, ragFetch, ragSections,
+window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox, ragFetch, ragSections,
                ragDiscard };

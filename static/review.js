@@ -8,72 +8,20 @@
 
   const toast = (msg, kind) => (window.App && window.App.toast ? window.App.toast(msg, kind) : null);
 
-  // ---- 段の開け閉て（app.js の window.ragSections。無ければ自前で同じことをする） ----
+  // ---- 段の開け閉て・通信は app.js（window.ragSections / window.ragFetch）を使う ----
+  const rag = window.ragSections;
   const sections = {
-    el(step) {
-      return typeof step === "string" ? page.querySelector('[data-step="' + step + '"]') : step;
-    },
-    open(step, scroll) {
-      const el = sections.el(step);
-      if (!el) return null;
-      if (window.ragSections) return window.ragSections.open(el, { scroll: !!scroll });
-      el.classList.add("is-open");
-      if (scroll) el.scrollIntoView({ behavior: "smooth", block: "start" });
-      return el;
-    },
-    // 済んだ段。見出しに要約（summary）を出して畳み、クリックで開き直せるようにする
-    done(step, summary, next) {
-      const el = sections.el(step);
-      if (!el) return null;
-      if (window.ragSections) return window.ragSections.done(el, summary, next);
-      el.classList.add("is-done");
-      el.classList.remove("is-open");
-      return el;
-    },
-    // まだの段に戻す（この段より下も全部まっさらにする）
-    close(step) {
-      const el = sections.el(step);
-      if (!el) return null;
-      el.classList.remove("is-open", "is-done");
-      const label = el.querySelector("[data-step-summary]");
-      if (label) label.textContent = "";
-      if (window.ragSections) window.ragSections.refresh();
-      return el;
-    },
-    note(step, text) {
-      const el = sections.el(step);
-      const label = el && el.querySelector("[data-step-summary]");
-      if (label) { label.textContent = text || ""; label.title = text || ""; }
-    },
-    show(step) {
-      return sections.open(step, true);
-    },
+    el: rag.el,
+    open: (step, scroll) => rag.open(step, { scroll: !!scroll }),
+    done: rag.done,
+    close: rag.close,
+    note: rag.note,
+    show: (step) => rag.open(step, { scroll: true }),
   };
-
-  // ---- 通信（shell の window.ragFetch。無ければ自前。エラーは1か所でトースト） ----
-  async function send(url, options) {
-    if (window.ragFetch) return window.ragFetch(url, options);
-    const res = await fetch(url, Object.assign({ headers: { Accept: "application/json" } }, options || {}));
-    if (res.status === 204) return {};
-    const text = await res.text();
-    let data = {};
-    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { html: text }; }
-    if (!res.ok) {
-      const error = new Error(data.error || "うまくいきませんでした（HTTP " + res.status + "）");
-      error.status = res.status;
-      error.data = data;
-      throw error;
-    }
-    return data;
-  }
-
-  function postJson(url, body) {
-    return send(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(body || {}),
-    });
-  }
+  // quiet: エラーの言い方はこの画面の側で決める（ragFetch の自動トーストと二重に出さない）
+  const get = (url) => window.ragFetch(url, { quiet: true });
+  const postJson = (url, body) => window.ragFetch(url, { json: body, quiet: true });
+  const postForm = (url, data) => window.ragFetch(url, { form: data, quiet: true });
 
   // ---- 作業中の表示（同じ画面の中に出す。閉じたら消えてよい） ----
   function work(name, text) {
@@ -124,7 +72,7 @@
         if (docs.length) { await guard.now(); resetPage(); }
         const data = new FormData();
         files.forEach((f) => data.append("file", f));
-        const res = await send(page.dataset.uploadUrl, { method: "POST", body: data });
+        const res = await postForm(page.dataset.uploadUrl, data);
         (res.errors || []).forEach((m) => toast(m, "err"));
         docs = (res.docs || []).map((d) => Object.assign({ state: "unread" }, d));
         if (el.fileNote) {
@@ -176,7 +124,7 @@
     sections.open("type");
     el.typeBody.innerHTML = '<p class="muted">読み込んでいます…</p>';
     try {
-      const res = await send("/forms/" + id + "/type");
+      const res = await get("/forms/" + id + "/type");
       el.typeBody.innerHTML = res.html || "";
       bindTypeForm();
     } catch (e) {
@@ -207,7 +155,7 @@
       const doc = docOf(Number(form.dataset.doc));
       work("read", (doc ? doc.file_name : "帳票") + " を読み取っています…");
       try {
-        const res = await send(form.dataset.readUrl, { method: "POST", body: new FormData(form) });
+        const res = await postForm(form.dataset.readUrl, new FormData(form));
         showReview(res.html);
         await refreshFinish();
         sections.done("type");
@@ -255,8 +203,7 @@
 
   // ---- 3 読み取り結果 ----
   const SOURCES = {
-    auto: ["自動で読み取り", "blue"], ai: ["AIが入力（要確認）", "violet"],
-    manual: ["手で修正", "teal"], blank: ["空欄", "gray"],
+    auto: ["自動で読み取り", "blue"], manual: ["手で修正", "teal"], blank: ["空欄", "gray"],
   };
   let root = null;        // #review
   let form = null;        // #reviewForm
@@ -547,7 +494,7 @@
     try {
       const url = page.dataset.finishUrl + "?ids=" + encodeURIComponent(ids()) +
         (currentId ? "&current=" + currentId : "");
-      const res = await send(url);
+      const res = await get(url);
       el.finishBody.innerHTML = res.html || "";
       // 読み取る前は灰色のままにして、見出しに理由を1行だけ出す（「読み取り結果」より先に開かない）
       if (res.read_yet) {

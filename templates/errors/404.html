@@ -1,10 +1,6 @@
-{% extends "base.html" %}
+{% extends "errors/_base.html" %}
 {% block title %}ページが見つかりません{% endblock %}
-{% block content %}
-<div class="card narrow">
-  <div class="card-head">
-    <h1 class="card-title">ページが見つかりません</h1>
-  </div>
+{% block body %}
   {#- 帳票の種類・取り込み設定はダウンロードでは消えない（design.md §3.3）ので、設定の URL には別の文を出す -#}
   {%- set p = request.path -%}
   {%- if p.startswith("/form-types") -%}
@@ -23,5 +19,5 @@
     {% if back %}<a class="btn" href="{{ back[0] }}">{{ back[1] }}</a>{% endif %}
     <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
   </div>
-</div>
 {% endblock %}
+{% block actions %}{% endblock %}

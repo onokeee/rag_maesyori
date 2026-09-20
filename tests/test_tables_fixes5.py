@@ -131,7 +131,7 @@ def test_render_does_not_recreate_a_purged_import(app, monkeypatch):
     from core import purge
 
     with app.app_context():
-        _tid, import_id = _new_import(app)
+        _spec, import_id = _new_import(app)
         pipeline.run_read(FakeCtx(), import_id)
         original = pipeline.load_rows
 

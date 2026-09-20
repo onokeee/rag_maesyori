@@ -1,12 +1,12 @@
 """帳票まわりの修正（5巡目の確認で見つかった不具合）の回帰テスト。"""
-from tests.test_forms_fixes import _confirmed_doc
+from tests.test_forms_fixes import _confirmed_doc, _review_html
 
 
 # ---- R5F-2: 読み取り結果の入力欄で Enter を押しても、何も送信されない ----------------------------------
 
-def test_enter_in_the_review_form_submits_nothing(app, client):
+def test_enter_in_the_review_form_submits_nothing(app):
     doc_id = _confirmed_doc(app, "1.xlsx")
-    html = client.get(f"/forms/{doc_id}/review").get_json()["html"]
+    html = _review_html(app, doc_id)
     form = html[html.index('id="reviewForm"'):html.index("</form>", html.index('id="reviewForm"'))]
     # 暗黙の送信（Enter）を止める。送信ボタンも action も持たせない（値は途中保存で送る）
     assert '<form id="reviewForm" onsubmit="return false">' in html

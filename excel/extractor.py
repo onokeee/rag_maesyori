@@ -44,7 +44,6 @@ class FieldResult:
     label_found: bool = False
     warning: str | None = None
     edited: bool = False
-    ai_filled: bool = False
     unit: str = ""
     # 帳票の種類で決めた単位。unit は読み取った値（「14.9h」）で書き替わることがあるので、
     # 手で直したときに元の単位で判断し直せるよう別に持つ
@@ -121,13 +120,13 @@ def apply_manual_values(extraction: dict, form) -> None:
             unit, warning = number_unit(value, text, spec, f["field_name"], f["display_name"], warning)
             # 値と単位が同じでも、入力に警告（「1.5～3時間」の範囲など）が出たとき・前の警告が消えるときは直したものとする
             if value != f["value"] or unit != (f.get("unit") or "") or warning or f.get("warning"):
-                f["value"], f["unit"], f["warning"], f["edited"], f["ai_filled"] = value, unit, warning, True, False
+                f["value"], f["unit"], f["warning"], f["edited"] = value, unit, warning, True
             continue
         else:
             value, warning = (text or None), None
         # 日付も同じ: 「2026-09-14 24:30」は日付だけ同じでも時刻が不正なので、警告を残して手で修正にする
         if value != f["value"] or (f["data_type"] == "date" and value is not None and (warning or f.get("warning"))):
-            f["value"], f["warning"], f["edited"], f["ai_filled"] = value, warning, True, False
+            f["value"], f["warning"], f["edited"] = value, warning, True
     refresh_summary(extraction)
 
 

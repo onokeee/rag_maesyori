@@ -16,11 +16,12 @@ from models import database
 DEFAULT_SEC_PER_CALL = {"local": 15.0, "cloud": 8.0}
 
 
-def percentile(values, p: float = 75) -> float:
+def percentile(values) -> float:
+    """75パーセンタイル（実測値のばらつきを見積もりに使うときの代表値）。"""
     vals = sorted(float(v) for v in values if v is not None)
     if not vals:
         return 0.0
-    k = (len(vals) - 1) * p / 100
+    k = (len(vals) - 1) * 75 / 100
     lo, hi = math.floor(k), math.ceil(k)
     if lo == hi:
         return vals[int(k)]

@@ -37,7 +37,7 @@
 これにより次を決めた。
 
 - 画面は **3つだけ**：`/forms`（帳票取り込み）・`/tables`（表の取り込み）・`/form-types`（帳票登録）。`/` は帳票取り込みへ転送する。
-- **ホーム画面は無い**。**設定の画面も無い**（AI接続は「表の取り込み」画面の AI整形の段の中、帳票の種類は「帳票登録」画面、一覧表の取り込み設定は「表の取り込み」画面の中）。**取り込み履歴も無い**。
+- **ホーム画面は無い**。**設定の画面も無い**（AI接続は「表の取り込み」画面の AI整形の段の中、帳票の種類は「帳票登録」画面）。**一覧表の取り込み設定は保存しない**（取り込みごとに列の対応づけを決める。利用者の指示 2026-09-20）。**取り込み履歴も無い**。
 - **①→②→③と画面を移らない**。1つの画面に「段」（`.step`）が下へ増えていき、進むほど次の段が現れる。送信はすべて `fetch`（`window.ragFetch`）で、画面のURLは変わらなくてよい。時間のかかる処理（大きな表の読み込み・Markdown作成）も、同じ画面の中に進み具合を出す。
 - **作業中のものは捨てる**。画面を閉じたらその人の分を捨て、起動時にダウンロードしていない帳票・一覧表をすべて捨て、動いている間も2時間さわられていないものを捨てる（3.3）。閉じた画面の続きを開く入口は持たない。
 - **AI は「Markdown を作るときに、決めた1つの値の文章を構成する」ところだけ**。帳票側の AI 補助（AIで種類を推定・AIで空欄を探す、`services/ai_assist.py`）は削除した。
@@ -54,7 +54,7 @@
 | 一覧表の取り込み | 表の取り込み（Excel/CSV・1行＝1件） | 表形式 |
 | 帳票の読み取り設定（旧 pattern/テンプレート） | 帳票の種類 | テンプレート、パターン |
 | 帳票の種類を作る画面 | 帳票登録 | パターン編集、設定 |
-| 一覧表の設定（table template） | 一覧表の取り込み設定 | 表テンプレート |
+| 一覧表の設定（table spec） | 取り込み設定（その取り込みだけのもの。保存しない） | 表テンプレート |
 | 見本（sample） | 見本ファイル | サンプルExcel |
 | 抽出 | 読み取り | 解析、前処理、抽出 |
 | 帳票の確認画面 | 読み取り結果の確認・修正 | 前処理結果、抽出結果 |
@@ -79,7 +79,7 @@
 
 - 段のしるしは `<section class="step" data-step="<名前>">` で、中に `.step-head`（番号・見出し・要約・開閉）と `.step-body`（中身）を持つ。`templates/components/_ui.html` の `ui.step(id, no, title, open=..., done=...)` マクロで書く。
 - 見た目は3つ：`.step`（まだ開いていない＝灰色）、`.step.is-open`（いま作業する段）、`.step.is-done`（済み。見出しに ✓ と要約が出て畳まれ、クリックで開き直せる）。CSS は `static/style.css`。
-- 開け閉ては `window.ragSections`（`static/app.js`）：`open(id)` / `done(id, 要約, 次の段)` / `reset(id)`（その段を開き直し、後ろを「まだ」に戻す）/ `body(id)`（中身の要素）/ `working(id, 文言)`（段の中に「処理中」を出す・消す）。
+- 開け閉ては `window.ragSections`（`static/app.js`）：`open(id)` / `done(id, 要約, 次の段)` / `close(id)`（その段を「まだ」に戻す）/ `note(id, 要約)` / `body(id)`（中身の要素）/ `working(id, 文言)`（段の中に「処理中」を出す・消す）。
 - 送信は `window.ragFetch(url, options)`：`{json: {...}}`（JSONをPOST）、`{form: formまたはFormData}`（ファイルも送れる）、`{html: true}`（画面の一部のHTMLを受け取る）。サーバが JSON を返せばそのオブジェクト、HTML を返せば `{html: "…"}`。失敗はここでトーストに出してから例外を投げる（`{quiet: true}` で自分で出す）。
 - 長い処理はジョブ（`core/jobs.py`）で走らせ、`GET /api/jobs/<job_id>` を同じ画面から読んで進み具合を出す。**別の画面には移らない**。
 
@@ -101,9 +101,9 @@ AI による種類の推定・空欄探しは無い（0.1）。
 1画面。上から順に段が現れる。
 
 1. **ファイル**：Excel/CSV をドロップ。
-2. **読み取り方と取り込み設定**：CSV は文字コード・区切り・前置行、Excel はシート。保存してある取り込み設定の候補（必須列の一致数つき）から選ぶか「新しく作る」。いらない設定の削除もここ（`POST /tables/templates/<id>/delete`）。選び直すたびに自動で保存し、下の「表の範囲」を作り直す。
+2. **読み取り方**：CSV は文字コード・区切り・前置行、Excel はシート。変えるたびに自動で保存し、下の「表の範囲」を作り直す（取り込み設定は保存しないので、選ぶものは無い）。
 3. **表の範囲と見出し行**：先頭60行の色つきグリッドで確かめ、必要なら直す。
-4. **列の対応づけ**：どの列が何か、型・単位・md での扱い、AI整形の対象（1列だけ）。保存してある取り込み設定がそのまま使えるとき（見出しが変わっていないとき）はこの段を飛ばし、済みにして見出しに「〈設定名〉（保存してある取り込み設定をそのまま使いました）」と出す（見出しをクリックすれば開いて直せる）。
+4. **列の対応づけ**：表の上に「表の名前」（ファイル名から入れておく）を１つだけ置き、列ごとに「使う」「見出し（読むだけ）」「役割（識別番号 / 日付 / 設備 / AI整形の対象（追記ログ）/ その他）」の３つを決める。キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値から候補づくり（`tables/mapping.suggest_columns`）が決める。値の例と、知らせること（型エラー・空欄が多い・値の型が違う・はじめから使わない設定）があるときだけその列に出す。保存するとその取り込みの設定（`table_imports.spec_json`）になり、読み込みが始まる。
 5. **AI整形（任意）**：決めた1つの列（いまは一覧表の追記ログ列）の文章を構成する。**AI接続の設定（接続先URL・APIキー・使うモデル・接続テスト）はこの段の中に畳んで置く**（`details`、既定は閉じる）。対象の列が無い取り込みでは灰色のままで、見出しに「追記ログの列（AI整形の対象）がないので、この取り込みでは使いません」と1行だけ出す。
 6. **できるものの確認**：作られる md の一覧と中身、警告、合計の照合。
 7. **確定してダウンロード（zip）**：渡し終わるとその取り込みのデータは消える（3.3）。
@@ -128,15 +128,14 @@ AI による種類の推定・空欄探しは無い（0.1）。
 | `POST /tables/ai-connection` | AI接続の保存（接続先・APIキー・モデル・既定モデル）。JSON |
 | `POST /tables/ai-connection/models` | API からモデル一覧を取る。JSON |
 | `POST /tables/ai-connection/test` | 接続テスト（models.list ＋ 1回の短い chat）。JSON |
-| `POST /tables/templates/<id>/delete` | 取り込み設定の削除（読み取り方の段の候補一覧から）。JSON |
 
 旧ルート（`/documents/*`, `/patterns/*`, `/settings/*` すべて, `/history/*`, `/api/models`）は削除。
-`/settings/…` を開くと 404（エラー画面に「帳票取り込みへ」が出る）。取り込み設定の JSON 書き出し・読み込みも無くなった。
+`/settings/…` を開くと 404（エラー画面に「帳票取り込みへ」が出る）。取り込み設定を保存する仕組み（一覧・選び直し・名前の変更・削除・JSON の書き出し・読み込み、`/tables/templates/*`）も無い。
 
-エラー画面（`templates/errors/`）はすべて日本語で、帳票取り込みへ戻るボタンを置く。403 は他サイトからの書き込みを断ったとき（`app._refuse_cross_site_write`）で、画面の JSON 送信（`Accept: application/json`）には同じ理由を JSON で返す。404 は「ダウンロード済みか、しばらく置いたままで捨てられたか、URL違い」、500 は起動した画面のメッセージを見るよう案内する。
+エラー画面（`templates/errors/`）はすべて日本語で、帳票取り込みへ戻るボタンを置く。枠（カード・見出し・戻るボタン）は `templates/errors/_base.html` が持ち、各画面は題と本文だけを書く。403 は他サイトからの書き込みを断ったとき（`app._refuse_cross_site_write`）で、画面の JSON 送信（`Accept: application/json`）には同じ理由を JSON で返す。404 は「ダウンロード済みか、しばらく置いたままで捨てられたか、URL違い」、500 は起動した画面のメッセージを見るよう案内する。
 
 ### 2.7 UI共通部品（templates/components/_ui.html のマクロ）
-`step(id, no, title, open=, done=, summary=)`（1画面の中の段。3画面ともこれで書く）、`card`, `badge(state)`, `chips`, `empty_state`, `progress(job)`, `data_grid(rows)`（セルグリッド）, `file_drop(name, accept)`。CSS はデザイントークン（色・余白・角丸）を `:root` 変数で統一。PC専用（`body { min-width: 1200px }`）。
+`step(id, no, title, open=)`（1画面の中の段。3画面ともこれで書く）、`card(title, subtitle, level=)`, `badge(state)`, `work_line(name)`, `progress(job)`, `data_grid(rows)`（範囲確認のセルグリッド）, `sheet_grid(grids, click_cells=)`（元の／見本のシート）, `grid_legend()`, `file_drop(name, accept)`。CSS はデザイントークン（色・余白・角丸）を `:root` 変数で統一。PC専用（`body { min-width: 1200px }`）。
 
 ### 2.8 保存先フォルダ（2026-09-19 追加 → 2026-09-20 廃止）
 作った md を利用者が決めたフォルダへ直接保存する機能は削除した。受け取り口はダウンロードだけ（`services/output_folder.py`・`views/folder_save.py`・`/settings/output`・`data/output_settings.yaml` は無い）。
@@ -156,12 +155,11 @@ AI による種類の推定・空欄探しは無い（0.1）。
 
 ### 3.2 一覧表
 ```
-table_templates(id PK, name UNIQUE, description, current_version_id, created_at, updated_at)
-table_template_versions(id PK, template_id FK, version INTEGER, spec_json TEXT, spec_hash TEXT, used INTEGER DEFAULT 0, note, created_at, UNIQUE(template_id, version))
-table_imports(id PK, template_id FK NULL, template_version_id FK NULL, file_name, file_hash, stored_path,
-              source_json TEXT,   -- {"kind":"csv|excel","encoding","delimiter","preamble_rows","sheet","header_row","header_rows","data_end_row"}
-              period_json TEXT,   -- {"grain":"month|fiscal_year|all","start":"2026-08","end":"2026-08"}
-              status TEXT,        -- uploaded / reading / preview / confirming / confirmed / discarded / failed
+table_imports(id PK, template_id, template_version_id,   -- どちらも = id（設定は保存しない。下の注）
+              file_name, file_hash, stored_path, session_id TEXT,
+              spec_json TEXT, spec_hash TEXT,   -- この取り込みが使う取り込み設定（tables.spec.TableSpec の JSON）
+              source_json TEXT,   -- {"kind":"csv|excel","encoding","delimiter","preamble_rows","sheet","header_rows","data_end_row"}
+              status TEXT,        -- uploaded / reading / preview / confirming / confirmed / failed
               stats_json TEXT, issues_path TEXT, rows_path TEXT, job_id INTEGER, created_at, updated_at, confirmed_at)
 jobs(id PK, kind TEXT, ref_type TEXT, ref_id INTEGER, status TEXT,  -- queued/running/paused/done/failed/cancelled/interrupted
      params_json, progress_json, message, cancel_requested INTEGER DEFAULT 0, pause_requested INTEGER DEFAULT 0,
@@ -170,9 +168,16 @@ llm_calls(cache_key PK, raw_text, parsed_json, model, params_json, structured_mo
           import_id)   -- この応答を払った取り込み（マイグレーション _m7_llm_calls_owner。古いDBの行は NULL）
 ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, source_hash, context_hash, segments_hash, cache_key,
          status TEXT,   -- pending/ok/flagged/rule_only/error/skipped/outdated/excluded
-         result_json, checks_json, override TEXT, attempts INTEGER, error TEXT, job_id, updated_at,
+         result_json, checks_json, attempts INTEGER, error TEXT, job_id, updated_at,
          UNIQUE(import_id, template_id, stage_id, row_key))   -- 取り込みごと（マイグレーション _m6_ai_items_per_import）
 ```
+**取り込み設定の表は無い**（`table_templates` ・ `table_template_versions` はマイグレーション `_m9_import_spec` で落とした。
+利用者の指示 2026-09-20：「表の方には、取り込み設定を保持しておく機能はいらない」）。設定は取り込みの行（`spec_json`）が持ち、
+取り込みを消せば設定も一緒に消える。`template_id` と `template_version_id` は取り込み自身の `id` にそろえて残してある:
+AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込みを束ねているため。
+`aiproc/runner.load_spec` は取り込みの行（`table_imports.spec_json`）から設定を読む。
+`_m9` が一時的に置いた同名の互換ビューは `_m10_drop_unused` で落とした（同じマイグレーションで使わない `period_json` 列も落とす）。
+
 一覧表の行データはDBに持たない。取り込み中だけ `data/tables/imports/<import_id>/`（`rows.jsonl.gz`・`issues.csv`・`md/`・`preview_md/`・`source_cache.json`）に置き、ダウンロードしたらフォルダごと消す（3.3）。確定済み全行の保存（`state/current.jsonl.gz`）は作らない（8.1）。
 
 
@@ -188,8 +193,8 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 | 一覧表 | `uploads/tables/<保存名>`、`TABLES_DIR/imports/<id>/`（rows.jsonl.gz・issues・控え・md・preview_md）、`table_imports` の行、`jobs`（`ref_type='table_import'`）、`ai_items`（`import_id` がこの取り込みの分）、どの `ai_items` からも参照されなくなった `llm_calls` | `GET /tables/imports/<id>/download.zip` を**送り終えたあと** |
 
 
-- **残すもの**：帳票の種類（`patterns` 系）・一覧表の取り込み設定（`table_templates` 系）・AI接続の設定（`data/model_settings.yaml`・`data/prefs.yaml`）。これらは設定であってデータではない。
-- **履歴は持たない**：何をいつ取り込んだかの1行も残さない。だから取り込み履歴の画面が無い（2.5）。
+- **残すもの**：帳票の種類（`patterns` 系）・AI接続の設定（`data/model_settings.yaml`）。これらは設定であってデータではない。一覧表の取り込み設定は残さない（取り込みの行にあるので、取り込みと一緒に消える）。
+- **履歴は持たない**：何をいつ取り込んだかの1行も残さない。だから取り込み履歴の画面が無い（0.1）。
   番号の続き（`sqlite_sequence`。AUTOINCREMENT の表が「これまでに使った一番大きい番号」＝取り込んだ件数を覚えている）も、
   取り込みの表（`documents`・`table_imports`・`jobs`・`ai_items`）が空になったとき乱数（2^31〜2^52）に置き換える
   （`core/purge.forget_id_counters`。消すたびの後始末 `_shrink` と起動時の片付けで行う）。AUTOINCREMENT は外さない:
@@ -206,8 +211,8 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
   これまでどおり誰からでも扱える。セッション単位の片付けは拾わず、起動時の一括片付けだけが拾う。
   ほかの人のものを番号で指しても **404**（403 にすると「その番号はある」ことが分かるため）。
   `/api/jobs/<id>` も同じで、ほかの人のジョブ・取り込みごと消えたジョブは 404 を返し、画面は静かに止まる。
-  分けないもの（みんなで共有する設定）：帳票の種類（`patterns` 系）・一覧表の取り込み設定（`table_templates` 系）・
-  AI接続。取り込み設定の削除チェックだけは、ほかの人の取り込みも数える（使用中の設定を消させないため）。
+  分けないもの（みんなで共有する設定）：帳票の種類（`patterns` 系）・AI接続。
+  一覧表の取り込み設定は取り込みの行にあるので、最初からそのブラウザのものだけ（ほかの人には名前も見えない）。
 - **途中のものは捨てる（2026-09-20）**：作業中の一覧もダウンロード待ちの一覧も持たない（0.1）ので、
   閉じた画面の続きを開く入口が無い。残しておく意味が無いので、**その場でダウンロードしなかったものはその場で捨てる**。
   捨てる機会は次の4つ。どれも `purge_documents` / `purge_table_import` を通る。
@@ -242,7 +247,7 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
   - **帳票登録の見本の Excel（`pattern_samples`）には持ち主を持たせていない**ので、上の 1.・2. では捨てない。
     捨てるのは［使用開始］のときと起動時（`purge_all_samples`）。画面にもそう書く。
   - どちらも `purge_documents` / `purge_table_import` を通るので、消えるものは上の表のとおり。
-    設定（帳票の種類・一覧表の取り込み設定・AI接続）は捨てない。
+    設定（帳票の種類・AI接続）は捨てない（一覧表の取り込み設定は取り込みの行にあるので一緒に捨てる）。
 - **消し方**：`core/purge.py`（`purge_documents` / `purge_batch` / `purge_table_import`）。消す表は名前で決め打ちせず、その取り込みを指す列（`document_id` / `import_id`）を持つ表を `sqlite_master` から探す（表が増えても消し残さない）。
 - **欠けないダウンロード**：md も zip も全体をメモリに作ってから消す。作れなかったとき（未確定・失敗）は何も消さない。
   消すのは**本文を最後まで送り終えたあと**（`core/purge.purge_after_send`）。通信が切れた・ブラウザを閉じたなどで
@@ -253,8 +258,8 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
   ことになるので、次のとおりになる。
   - 約48KB より大きい md・zip（一覧表の zip など）: 最後の約48KB より前で切れたら消えない。
   - 約48KB 以下の md・zip（帳票1件の md はほぼこれ）と、大きいファイルの最後の約48KB で切れた場合: 消える。
-    取り戻すには、手元の元の Excel をもう一度アップロードして読み取り・確認し直す（一覧表は取り込み設定が残るので
-    同じ設定で取り込み直せる。AI整形の結果は消えるので、AI を使う列は再度課金される）。
+    取り戻すには、手元の元の Excel をもう一度アップロードして読み取り・確認し直す（一覧表は列の対応づけももう一度決める。
+    候補は同じ見出し・同じ値なら同じになる。AI整形の結果は消えるので、AI を使う列は再度課金される）。
   ブラウザが受け取ったことをサーバーは知る方法が無い（画面からの受け取り確認は作っていない。8.0）。
   Range 付きの要求（ダウンロードマネージャー・途中からの再開）にも全体を 200 で返し（`send_file(conditional=False)`）、
   `purge_after_send` は 200 以外（206・304）の応答では消さない（一部だけ渡して消すことが無いように）。
@@ -267,8 +272,8 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
   その取り込みの分と、その取り込みが払った `llm_calls`（`llm_calls.import_id`。どの `ai_items` からも参照されていないもの）
   だけで、同じ設定で作業中の別の取り込みの結果と応答キャッシュは残す（巻き添えの再課金を避ける）。
   同じ表を取り込み直すと AI に再度課金される（承知のうえ）。
-  取り込み設定を消したときは、その設定の `ai_items` と、それで参照されなくなった `llm_calls` をその場で消す
-  （`tables/store.delete_template` → `core/purge.sweep_orphan_ai`。起動時の片付けでも同じ掃除をする）。
+  `ai_items` が消えたのに生の応答（`llm_calls`）が残る場面は、`core/purge.sweep_orphan_ai` がその場で消す
+  （起動時の片付けでも同じ掃除をする）。
 - **控えを書き戻さない**：`tables/source_cache.ImportSource` はフォルダを `__init__` でだけ作る。消したあとに
   別のタブの画面処理が控えを書いても、`imports/<id>/` は復活しない。
 - **消し損ね**：起動時に、DBから参照されていないアップロードファイルと `imports/<id>/` フォルダ、もう無い取り込みを指す `ai_items`（と、それで参照されなくなった `llm_calls`）を片付ける（`app._cleanup_leftovers` → `core/files.remove_orphan_uploads` / `remove_orphan_import_dirs`、`core/purge.delete_orphan_ai_items`）。`purge_table_import` も同じ掃除をする。作業中のものは DB に行があるので消さない。`purge_table_import` で `imports/<id>/` を消し切れなかったとき（Windows で掴まれていた）は、残ったファイルの中身を 0 バイトに切り詰め（`remove_upload` と同じ。名前は残っても読み込んだ行・md は残さない）、ログに残し、次の起動時に片付く。アップロードのファイルや `imports/<id>/` を消し切れなかったことは `core/purge.purge_incomplete()` で分かる。帳票・一覧表の［削除］の案内も「一部のファイルは使用中で消し切れず、中身を空にしました。次の起動時に片付きます」にする。
@@ -276,16 +281,16 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 - **他サイトからのダウンロード（＝削除）を断る**：消すダウンロード（`forms.download_md` / `forms.download_batch` / `tables.download_zip`）は GET でも、`Sec-Fetch-Site` が same-origin / none 以外、他サイトの `Origin`、（`Sec-Fetch-Site` が無いときは）他サイトの `Referer` なら 403（`views.PURGING_ENDPOINTS`）。
 - **読み取れないアップロード**：事前チェックや読み込みで思わぬ例外が出ても、アップロードしたファイルは消してから落とす（帳票・一覧表とも）。
 - **画面の知らせ**：ダウンロードのボタンには確認ダイアログ（`data-confirm`）、完了・確認画面には「ダウンロードするとサーバーからデータが消える／もう一度ダウンロードできない」の一文を出す。
-  修正中（確定済みの版あり）の帳票は、確定し直していない変更が入らずに消えることを確認文の先頭に書く（確認・完了画面とホームの .md / zip ボタン。`views.forms.delete_confirm` / `batch_zip_confirm`）。
-  消えないボタン（帳票の `download.json`・`original`）には「（消えません）」と書く。ホームではまとめ取り込みを1行にまとめ、
-  1件だけダウンロードするとまとまりが崩れることを押す前に知らせる。
+  修正中（確定済みの版あり）の帳票は、確定し直していない変更が入らずに消えることを確認文の先頭に書く（「確定してダウンロード」の段の .md / zip ボタン。`views.forms.delete_confirm` / `batch_zip_confirm`）。
+  消えないボタン（帳票の `original`）には「（消えません）」と書く。
 - **画面のメッセージにファイル名を出さない**：`flash` は署名付きセッションクッキーとしてブラウザに残るので、
   取引先名や「社外秘」を含みうるファイル名は載せない（サーバー側を消してもブラウザに残るため）。
 - **残ると分かっていて残すもの**：帳票の種類の見本ファイル（`uploads/samples/<uuid>.xlsx`＋`pattern_samples`。読み取りテストと
-  項目の見直しに使うため。画面に「サーバーに残り続けます」と書き、1件ずつ削除できる）、一覧表の取り込み設定の名前
-  （初期値はファイル名にしない。空欄＋プレースホルダ）。
+  項目の見直しに使うため。画面に「サーバーに残り続けます」と書き、1件ずつ削除できる）。
+  一覧表の「表の名前」は取り込みの行にしか無く、取り込みと一緒に消えるので、ファイル名を初期値にしてよい。
 - **新しい表**：取り込みを指す列は必ず `document_id` / `import_id` という名前にする（purge の探索に乗せるため）。
-  使わない表は置かない（`table_outputs`・`table_downloads`・`table_template_samples`・`alias_entries` はマイグレーション `_m5` で削除）。
+  使わない表はそもそも作らない（`table_outputs`・`table_downloads`・`table_template_samples`・`alias_entries` はスキーマから外し、
+  古いDBのためにマイグレーション `_m5` で落とす）。
 
 ## 4. モジュール構成と担当（並行実装の境界）
 
@@ -301,7 +306,7 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 | WP-forms | `excel/*`, `pattern/*`, `export/formats.py`, `tests/test_extraction.py`, `tests/test_forms_md.py` | 帳票の md 改善（タイトル・ファイル名・定型文削減・値の NFKC・単位・出さない項目）、種類定義の拡張、一覧表らしさ判定関数 |
 | WP-shell | `app.py`, `config.py`, `templates/base.html`, `templates/components/_ui.html`, `templates/errors/*`, `static/style.css`, `static/app.js`, `views/__init__.py` | レイアウト・デザイン・ヘッダー（3画面だけ）・段（`.step` と `ragSections`）・エラー画面、blueprint 登録。ホーム画面・設定画面・`views/home.py`・`views/settings.py`・`templates/home.html`・`templates/settings/*` は削除済み |
 | WP-formsui | `views/forms.py`, `views/form_types.py`, `templates/forms/*`, `templates/form_types/*`, `static/review.js`, `tests/test_forms_flow.py` | 帳票フロー画面と帳票の種類の管理画面 |
-| WP-tablesui | `views/tables.py`, `templates/tables/*`, `static/tables.js`, `tests/test_tables_flow.py` | 一覧表フロー画面・取り込み設定の編集画面・出力画面 |
+| WP-tablesui | `views/tables.py`, `templates/tables/*`, `static/tables.js`, `tests/test_tables_flow.py` | 一覧表の1画面（読み取り方・範囲・列の対応づけ・AI整形・確認・ダウンロード） |
 | WP-samples | `scripts/samples/*`（追記のみ）, `samples/`（生成物） | T1 に「対応内容」追記ログ列を追加（書き方の揺れを再現）など |
 
 依存：WP-core・WP-read・WP-log・WP-forms は並行（第1波）。WP-pipe・WP-ai は第1波の後（第2波）。WP-shell は第1波と並行可（テンプレートのみ）。WP-formsui・WP-tablesui は第2波の後（第3波）。
@@ -387,7 +392,8 @@ class ExcelSource: ...                   # openpyxl data_only=True（通常モ�
     confidence: float; warnings: list[str]
 def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: int | None = None, data_end: int | None = None) -> LayoutGuess
 def classify_rows(source, sheet, layout, key_columns: list[int] | None = None) -> Iterator[tuple[SourceRow, RowClass]]
-def looks_like_list(source, sheet) -> bool   # 帳票フローから「一覧表らしい」判定にも使う
+def list_kind(source, sheet) -> str   # 行が並ぶ表か。"list" / "crosstab" / ""（どちらでもない）
+def kind_from_layout(layout) -> str   # 上の判定のうち「表の形の見立てから決める」部分。控えを使う ImportSource.list_kind と共通
 def split_header_unit(header: str) -> tuple[str, str]   # "停止時間(分)" → ("停止時間","分")
 
 # tables/dictionary.py  … 表用の標準キー辞書（帳票の pattern/dictionary.py は変更しない）
@@ -397,14 +403,13 @@ STANDARD_COLUMNS: list[StdColumn(key, display, type, role, synonyms)]
 
 # tables/mapping.py
 @dataclass class ColumnSuggestion: index: int; header: str; unit: str; key: str | None; display: str; type: str; role: str; examples: list[str]; type_error_rate: float; blank_rate: float; md: str  # body/attribute/omit
-    fill_down_blank: bool = False; log: bool = False; matched_by: str = ""  # template/dictionary/similar/none
-def suggest_columns(headers, sample_rows, template_spec=None) -> list[ColumnSuggestion]
-def match_templates(headers: list[str], sheet_or_file_name: str, specs: list[TableSpec]) -> list[tuple[TableSpec, int, int]]  # (spec, 一致した必須列数, 必須列数)
+    fill_down_blank: bool = False; log: bool = False; matched_by: str = ""  # dictionary/similar/none
+def suggest_columns(headers, sample_rows) -> list[ColumnSuggestion]
 ```
 
 ### 5.3 tables（パイプライン）
 ```python
-# tables/spec.py … 取り込み設定（JSON で保存。dataclass ⇔ dict、validate、spec_hash）
+# tables/spec.py … 取り込み設定（取り込みの行に JSON で持つ。dataclass ⇔ dict、validate、spec_hash）
 @dataclass class ColumnSpec: key: str; display: str; headers: list[str]; type: str   # code/string/text/date/datetime/time/number/enum/status
     role: str = "attribute"   # key/date/entity/entity_label/category/measure/text/log/person/attribute
     unit: str = ""; unit_conversions: dict = {}; required: bool = False; md: str = "attribute"  # body/attribute/omit
@@ -438,13 +443,13 @@ def spec_from_dict(d) -> TableSpec; def spec_to_dict(spec) -> dict; def spec_has
 
 # tables/normalize.py
 @dataclass class RecordRow: key: str; values: dict[str, object]; originals: dict[str, str]; source: {"file","sheet","row"}; warnings: list[str]
-def read_records(source, source_opts: dict, layout: LayoutGuess, spec: TableSpec, aliases: AliasLookup, on_progress=None) -> tuple[list[RecordRow], list[Issue], ImportStats]
+def read_records(source, source_opts: dict | None, layout: LayoutGuess, spec: TableSpec, on_progress=None) -> tuple[list[RecordRow], list[Issue], ImportStats]
 # 型変換は excel/text.py を拡張して使う（和暦 令和/平成/昭和、年なし M/D を年度で補完、8桁日付、6桁時刻、△▲・末尾マイナス、桁区切り、%、timedelta→分、単位換算）
 
 # tables/checks.py
 @dataclass class Issue: level: str  # error/warning
     code: str; message: str; row: int | None = None; column: str | None = None
-def run_checks(records, spec, stats, period) -> list[Issue]
+def run_checks(records, spec, stats) -> list[Issue]
 
 # tables/state.py は作っていない（期間の置き換え・取り消しは 8.1 で外した）
 
@@ -482,7 +487,7 @@ def render_timeline(parse: LogParse, entity_label: str, types: dict[str, list[st
 
 ### 5.5 aiproc
 ```python
-# services/llm.py に追加（既存 ask_json は維持）
+# services/llm.py
 def job_client_settings() -> dict   # base_url, api_key, model, 固定（ジョブ開始時）。fingerprint（キー除く）
 def chat_raw(settings, messages, response_format=None, max_tokens=None, timeout=None) -> ChatResult(text, finish_reason, tokens_in, tokens_out, latency_ms, headers)  # timeout は1回ごとの上限（行の残り時間）。クライアントは設定のタイムアウトで作ったものを使い回す
 def detect_structured_mode(settings) -> str   # json_schema / json_object / prompt_only（メモリキャッシュ）
@@ -535,7 +540,6 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - ファイル名：`{種類名}_{タイトル項目値...}.md`。タイトル項目に報告番号が入らないときは末尾に `{file_hash先頭8}` を足す（タイトル項目が空なら `{種類名}_{file_hash先頭8}.md`）。
 - タイトル項目に報告番号も設備も入らないときは、元ファイル名（拡張子なし）をタイトルの末尾に足す。
 - 値（正規化後20文字以内・1行）が、その種類の他の欄の候補ラベル・表示名・明細表の列見出しと一致する項目は、読み取り誤りとみなして Markdown に出さない（タイトル・ファイル名にも使わない。JSON には残す。手修正した値は対象外）。
-- AI入力の値には（AI入力）、手修正は印なし（確定時に人が確認済みのため）。
 - 画像のセル座標・種類の版・DBの文書IDは出さない（JSON側に残す）。
 - 明細表（型「明細表」の項目）は長文項目と同じく `## 見出し` の下に1行1明細で書く：`- 品番: PW48-1591／品名: ベアリング／数量: 2`。空のセルは書かない。合計行は `- 合計: 投入数: 50枚／…`。パイプ表は使わない。連番だけの `No` 列は書かない（読み取った表・手で入れた行のどちらも）。
   - 見出しに識別子を入れる帳票では、明細表1節の推定トークン数が 800 を超えたところで `## {見出し}（続き）（{識別子}）` に分ける（分けないと、明細表の行だけで埋まった断片に識別番号も設備名も入らない）。
@@ -653,7 +657,7 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - ゴールデン：同じ入力→同じ md バイト列（ハッシュ比較）。
 - AI：`tests/fake_servers.py` を拡張し、リクエスト内容で応答を変える（壊れたJSON、原文にない型番、429、遅延）。
 - 画面：Flask test client で主要フロー（帳票: upload→type→read→review→confirm→done→download、一覧表: CSV upload→source→layout→columns→preview→confirm→done→zip）。
-- ブラウザ確認（統合時）：ホーム（作業中／ダウンロード待ち）、両フロー（帳票は1件・まとめ取り込みの両方）、設定、エラー画面（403/404/500）。
+- ブラウザ確認（統合時）：3つの画面（帳票取り込みは1件・まとめ取り込みの両方）、エラー画面（400/403/404/413/500）。
 - 帳票サンプルでの精度測定：`python -m scripts.samples.evaluate_forms`（見本ファイル数は `--samples`、見本の選び方をずらすのは `--offset`）。
   見本を変えても結果が同じ傾向か（特定の見本への当て込みでないか）を `--samples 2` や `--offset 3` で確かめる。
 
@@ -748,10 +752,11 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   一覧表 `tables/source.clean_text`）。「EQ-01」と「EQ-01＋ゼロ幅文字」は同じ設備になる。
 - 帳票でラベルは見つかったのに値が空で、すぐ右か下のセルが計算結果の保存されていない数式なら、「数式の計算結果が保存されていません…」の警告にする。
 - アップロードの事前確認は、図形・画像のアンカー数（参照するシートの数を掛けたもの）が 10,000、drawing の大きさ（同）が 20MB を超えるブックを受け付けない。
-- 一覧表の取り込み設定: 確定前の取り込みが使っている版は上書きせず新しい版を作る（画面の「次の取り込みから使われます」のとおり）。今回のファイルに無い列は
-  設定から消さずに残す（列の対応づけ画面に「今回のファイルにない列」として出る）。「ファイル名の先頭」が空か設定名と同じなら '' で保存し、設定名に従う。
-  JSON の読み込み・保存では、伏せ字の規則・人名・分割の正規表現（20個まで・各200文字まで・入れ子の繰り返しは不可）などの形を確かめて日本語で断る。
-  深く入れ子の JSON も「取り込み設定のJSONではありません」で断る。検証より前に保存された設定の書けない正規表現は、分割のときに使わずに進む。
+- 一覧表の取り込み設定: 保存しない（取り込みごとに列の対応づけを決め、`table_imports.spec_json` に入れる。利用者の指示 2026-09-20）。
+  画面で決めるのは「表の名前」と、列ごとの「使う」「役割」だけ。md の名前は常に「表の名前」を使う
+  （`markdown.file_prefix` は '' のまま。`TableSpec.file_prefix` が名前に落とす）。記録ファイルのまとめ方は常に月ごと。
+  設定の検査（`validate_spec`）は残す：伏せ字の規則・人名・分割の正規表現（20個まで・各200文字まで・入れ子の繰り返しは不可）などの
+  形を確かめて日本語で断る。設定の JSON 書き出し・読み込みは無い。
 - 一覧表で「担当者名を出さない」をオンにしたときの時系列の記入者は、ログに書かれたとおりの表記で出す（前の段落から引き継いだものは「（推定）」付き、
   書かれていなければ出さない）。担当者列の氏名に置き換えない。
 - 見出し行がデータのように見える（見出しの半分以上が数値・日付、または40文字を超えるセルがある）表は、範囲の画面で警告する。見出し行の無い表には対応しない。
@@ -774,15 +779,14 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   全行に何十万個のセルを作って読み込みが何十秒も止まるのを防ぐため。
   表から20列以上離れた、下にデータの無い見出しセル1つ（XFD1 のメモなど）は表に入れず警告にする。
   時間の単位の数値列では「1:30」「1時間30分」の文字も分として読む。確定の処理の途中で消えた取り込みのフォルダを作り直さない。
-  設定名を変えたとき、手で入れた「ファイル名の先頭」が前の名前と同じでも消さない。
 - 一覧表の md: 時系列の重複の削除で「(1)」「①」「⑴」「・」の行頭も外して比べ、1件だけのログも対象にする。見出しの1行目がタグと日付だけ
   なら次の行を使う。トークン数の見積もり（`core/mdtext.estimate_tokens`）は記号と数字を多めに数える（実測より少なく見積もらない）。
 - 利用者が設定で書いた正規表現（分割の目印・日付ではない書き方）は、選択肢（`|`）を含む繰り返しのグループも断り、照合には行の先頭
   200文字（`logproc/dates.USER_PATTERN_WINDOW`）だけを渡す。取り込み設定の JSON の確かめで思わぬ例外が出たときも「読み込めません」で断る。
 - 設定ファイル（`services/settings_store`）は UTF-16・CP932 でも読み、読めなければ空とみなす。読み書きは同じロックの中で行い、
-  書けないときは画面に日本語で知らせる（ヘッダーのモデル選択も）。すべての応答に `X-Frame-Options: DENY` と
+  書けないときは画面に日本語で知らせる。すべての応答に `X-Frame-Options: DENY` と
   `frame-ancestors 'none'` を付ける。
-- AI: 帳票の AI 呼び出しとモデル一覧は明示のタイムアウト（ローカル300秒・クラウド120秒・一覧30秒）で、SDK の自動再試行はしない。
+- AI: AI の呼び出しとモデル一覧は明示のタイムアウト（ローカル300秒・クラウド120秒・一覧30秒）で、SDK の自動再試行はしない。
   構造化出力の確かめは推論モデルでも切れない長さで行う。429 で失敗した行が3行続いたら、エラーにせず未処理に戻して一時停止する
   （「混み合っています…再開を押してください」）。一時停止を押してから止まるまでの間も［再開］を出す。
   2つ目の起動が、1つ目のアプリの待機中のジョブを「中断」にしない（待機中のジョブの生存時刻も更新する）。
@@ -796,7 +800,7 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   （範囲は10行まで）。役割「追記ログ」は1列だけに付ける。日付の役割が変わらなければ期間の日付列を保つ。キーの重複を断る。
   確定済みの取り込みでは試し実行をしない。読み込み直しが始まって渡せなかったときは 404 ではなく画面に戻して知らせる。
   Excel は 16,384 列・1,048,576 行を超えるシートを断り、値のある列が 2,000 列を超えるシートも CSV と同じ文で断る。
-  md のフォルダのパスが長すぎるときは「設定名」「ファイル名の先頭」を短くするよう知らせる。
+  md のフォルダのパスが長すぎるときは「表の名前」を短くするよう知らせる。
 - 一覧表の md: 月別・設備別の要約の設備名は、取り込み全体でいちばん多い名前にする（グループの先頭行ではなく）。平均は小数1桁に丸める。
   「10:00以降」「4/3から」のように範囲の語が続く日時は見出しから外さない。CSV の数式よけは全角の ＝＋－＠ で始まる値にも付ける。
 - 分割（`logproc`）: 「1.5mm」「2.5A」のような寸法・電気量を日付にしない規則（`DEFAULT_NOT_DATE_PATTERNS`）は、単位の後ろに英数字・「-」・
@@ -810,12 +814,11 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
 - 帳票: 値が「2024年7月28日 22:46」のように日付だけで書かれていれば、ラベルに日付の語が無くても（「発生」など）日付の項目にする
   （`pattern/builder._date_value`。値の全体が元号・年月日（＋曜日・時刻）で、`to_date` が警告なしで読めるときだけ。
   「2/12」「12:30」「2026-09-14 に復旧」は文字列のまま）。まとめ取り込みが1件だけになったら、まとまりとして扱わない
-  （確認文から「残りの帳票はまとまりに残ります」が消え、ホームにも1件の帳票として出る）。
+  （確認文から「残りの帳票はまとまりに残ります」が消える）。
 - 一覧表: 記録番号・担当者の列の「〃」「同上」も直前のデータ行の値で補う（`ditto_filled` の警告にまとめる。
   重複キーの警告が「〃」ではなく本当の伝票番号を指すようになる）。取り込み設定の記録キーは「列:文字数」の書き方も受け取り、
   手で書いた `record.fallback_key` の列も確かめる。右側の別表・遠くの見出しの警告は、無い「列の範囲指定」ではなく
   「Excel で分ける／右隣に移す」を案内する。データの行が0行のときは、見出し行ではなく指定した「終わりの行」を理由として知らせる。
-  取り込み設定の保存が UNIQUE で断られたとき、名前の重複でなければ「別の名前にしてください」と言わない（版番号は INSERT の中で数える）。
   中止は、押す直前に読み込みが終わっていれば状態を巻き戻さない。取り込みの［削除］の確認文と、処理中は出さない規則は
   `templates/components/_ui.html` の `table_import_delete_form` に1か所化した。
 - AI: 対応していない引数の学習は「値を固定する」ではなく「名前を置き換える」（`max_tokens` → `max_completion_tokens`）。
@@ -824,9 +827,8 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
   分割プレビュー・試し実行・送る文面・できる md で同じ日付になる。AI接続が外れていても、動いている AI整形は［中止］できる。
 - AI整形の試し実行の片付けは、まだある別の取り込みが払った応答を消さない（`core/purge.NO_LIVE_OWNER` を `aiproc/runner._ensure_trial_import`
   でも使う。消すと払った取り込みの再開・再実行で再課金になる）。
-- 画面: 列の対応づけの保存が複数の理由で断られたら全部並べる（`static/app.js` の `postJson` が `errors` を例外に載せる）。
+- 画面: 列の対応づけの保存が複数の理由で断られたら全部並べる（`static/app.js` の `ragFetch` が `errors` を例外に載せる）。
   AI整形の［見積もる］は答えが返るまで押せない。待ち画面のポーリングは、ジョブが消えた（404）ら止まって画面を読み直す。
-  ホームの「作業中の一覧表」の副題は、そこに出る状態（`views.TABLE_IMPORT_ACTIVE`）をすべて言う。
 
 **Markdown の断片**
 - 明細表を読むようになったため、帳票の md が 1,200トークン（LightRAG の既定の固定窓）を超えて2つ以上の断片に分かれる様式がある（サンプルでは F2・F3・F4）。長文項目の見出しには識別子が入る。明細表の行だけで埋まった断片には識別番号も設備名も出なかったので、識別子を入れる帳票では明細表1節が 800トークンを超えたところで `## {見出し}（続き）（{識別子}）` に分けるようにした（6.1）。明細表の各行への設備番号の付与・帳票へのヒント付与は、出力仕様の変更になるため入れていない（`docs/research/LightRAGオフライン評価.md` 8.5/8.7）。
@@ -836,7 +838,9 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
 - **一覧表の更新管理**: 期間の置き換え（`tables/state.py` の current/previous、`replace_period`）、投入済みとの差分（`table_outputs.delivered_hash`、差分zip、「削除すべき旧ファイル」）、[投入済みにする]（`table_downloads`）、`/tables/templates/<tid>/outputs` 画面、直前の確定の取り消し。現状は「取り込みごとに全 md を作り、全ファイルを zip で渡す」（`tables/pipeline.py` の `run_read` / `run_render` / `build_download`）。md は `TABLES_DIR/imports/<id>/md/` に保存。
 - **クロス集計**（縦持ち変換、`TableSpec.kind="crosstab"`、年月見出しの解釈、設備×月の値の集計ファイル）。表の形の判定（`tables/detect.py`）はクロス集計を見分けるが、範囲確認の画面で「対応していません」と止める。
 - **名寄せ辞書**（`/settings/aliases`、`alias_entries` の参照、`ColumnSpec.alias_dictionary`）。値は NFKC と空白の畳み込みだけで揃える。
-- **取り込み設定の版の履歴画面**（版は内部で保持: 確定に使った版は上書きせず次の版を作る）。
+- **取り込み設定を保存する仕組み**（設定の一覧・名前での選び直し・必須列の一致数での候補提示・版の履歴・削除・JSON の書き出し読み込み、
+  `table_templates` 系の表と `tables/mapping.match_templates`）。取り込みごとに列の対応づけを決める（利用者の指示 2026-09-20）。
+- **列の対応づけでキー・表示名・型・単位・説明・md での扱い・空欄＝上と同じを手で直すこと**（見出しと値から自動で決める。同上）。
 - **構築後のレビュー・評価フェーズ、LightRAG へのオフライン評価**（利用者が後で行う）。
 - **表の読み取り方を取り込み設定で変える項目**（`header.search_rows`、`data_end`（`blank_rows` / `stop_first_col` / `stop_prefix`）、
   `exclude.aggregate_keywords`）。判定は `tables/detect.py` が持つ（合計・小計の語は「設計」「稼働時間累計」などと混ざらないよう
@@ -845,4 +849,4 @@ F1 98.5% ／ F2 97.7% ／ F3 96.4% ／ F4 100.0% ／ F5 93.9%、
 
 DB のスキーマ（3.2）にあった `table_outputs`・`table_downloads`・`alias_entries`・`table_template_samples` は、取り込みを指す列
 （`document_id` / `import_id`）を持たず purge の探索から漏れるため、マイグレーション `_m5` で削除した（どこからも書いていなかった）。
-これらの機能を作り直すときは、取り込み単位の行を持つ表に `import_id` 列を付けてから作る。`table_imports.period_json` は書かない（常に全期間）。
+これらの機能を作り直すときは、取り込み単位の行を持つ表に `import_id` 列を付けてから作る。期間の列（`period_json`）も落とした（常に全期間）。

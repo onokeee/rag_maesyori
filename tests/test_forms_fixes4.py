@@ -25,16 +25,15 @@ def test_instrument_names_ending_in_kei_are_not_total_rows():
     assert table_markdown_lines({"columns": ["品名"], "rows": [["ノギス"], ["小計"]]}) == ["- 品名: ノギス"]
 
 
-# ---- F4-3: AIが入れた値を手で消すと、確定済みの状態に戻る -----------------------------------------------
+# ---- F4-3: 手で入れた値を消すと、確定済みの状態に戻る -------------------------------------------------
 
-def test_clearing_an_ai_filled_value_returns_the_field_to_the_confirmed_one():
+def test_clearing_a_hand_typed_value_returns_the_field_to_the_confirmed_one():
     from views.forms import _apply_values
 
     confirmed = json.loads(_extraction())
     confirmed["fields"][0].update(value=None, sheet=None, value_cell=None, warning="ラベルはありますが値が空です")
     working = json.loads(json.dumps(confirmed))
-    working["fields"][0].update(value="AIの値", sheet="報告書", value_cell="Z99", ai_filled=True,
-                                warning="AI（m）が入力しました。元のファイルと照合してください。")
+    working["fields"][0].update(value="手で入れた値", sheet="報告書", value_cell="Z99", edited=True, warning=None)
     assert _apply_values(working, {"equipment_name": ""}, confirmed)
     assert working["fields"][0] == confirmed["fields"][0]
 
@@ -92,9 +91,9 @@ def test_ditto_marks_in_a_detail_table_take_the_value_above():
 def test_same_value_input_with_a_warning_is_kept_as_an_edit():
     ex = {"fields": [
         {"field_name": "w", "display_name": "作業時間", "data_type": "number", "required": False, "value": 1.5,
-         "unit": "時間", "spec_unit": "時間", "warning": None, "edited": False, "ai_filled": False},
+         "unit": "時間", "spec_unit": "時間", "warning": None, "edited": False},
         {"field_name": "d", "display_name": "発生日", "data_type": "date", "required": False,
-         "value": "2026-09-14", "warning": None, "edited": False, "ai_filled": False}]}
+         "value": "2026-09-14", "warning": None, "edited": False}]}
     apply_manual_values(ex, {"value-w": "1.5～3時間", "value-d": "2026-09-14 24:30"})
     w, d = ex["fields"]
     assert w["edited"] and w["warning"]
@@ -106,8 +105,7 @@ def test_same_value_input_with_a_warning_is_kept_as_an_edit():
 
 def test_same_value_without_warning_is_still_not_an_edit():
     ex = {"fields": [{"field_name": "w", "display_name": "作業時間", "data_type": "number", "required": False,
-                      "value": 1.5, "unit": "時間", "spec_unit": "時間", "warning": None, "edited": False,
-                      "ai_filled": False}]}
+                      "value": 1.5, "unit": "時間", "spec_unit": "時間", "warning": None, "edited": False}]}
     apply_manual_values(ex, {"value-w": "1.50"})
     assert not ex["fields"][0]["edited"]
 

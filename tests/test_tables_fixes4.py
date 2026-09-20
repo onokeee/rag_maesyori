@@ -51,88 +51,70 @@ def test_plain_subtotal_row_is_still_subtotal(tmp_path):
     assert kinds[8] == "subtotal"
 
 
-# ---- T4-2 / T4-3 / T4-5: 列の対応づけ・設定の編集の保存で、前の設定を黙って変えない --------------------
+# ---- T4-2 / T4-3 / T4-5: 列の対応づけの保存で、値から決めた内容を壊さない ------------------------
 
-def _editor_body(app, client, spec, text=None):
-    """設定を持つ取り込みの「列の対応づけ」の段を開き、画面が送る形の表を返す。"""
-    from tests.tables_helpers import SPEC_CSV, editor_body, template_import
+def _editor_body(app, client, text=None):
+    """取り込みを置いて「列の対応づけ」の段を開き、画面が送る形の表を返す。"""
+    from tests.tables_helpers import SPEC_CSV, editor_body, spec_import
 
-    import_id, template_id = template_import(app, client, spec, text=text or SPEC_CSV)
-    return import_id, template_id, editor_body(client, import_id)
+    import_id = spec_import(app, client, text=text or SPEC_CSV)
+    return import_id, editor_body(client, import_id)
 
 
-def _saved(app, client, import_id, template_id, body):
-    from tables import store
+def _saved(app, client, import_id, body):
+    from tables import pipeline, store
     from tests.tables_helpers import save_columns, wait_import_job
 
     res = save_columns(client, import_id, body)
     assert res.status_code == 200, res.get_json()
     wait_import_job(app, import_id)
     with app.app_context():
-        return store.get_template(template_id)["spec"]
+        return pipeline.spec_for_import(store.get_import(import_id))
 
 
-def test_column_missing_from_this_file_is_kept_with_its_metrics_stages_and_title(app, client):
-    from tables.spec import CustomStageSpec
-    from tests.tables_helpers import json_only_spec
+def test_the_editor_only_asks_for_use_and_role(app, client):
+    """画面に出すのは「使う・見出し・役割」だけ（キー・型・単位・出し方は値から決める）。"""
+    from tests.tables_helpers import panel_html, spec_import
 
-    spec = json_only_spec()
-    spec.custom_stages.append(CustomStageSpec(id="loss", inputs=["symptom", "downtime"], prompt="損失の大きさ",
-                                              output_type="text"))
-    spec.markdown["title_columns"] = ["equipment_name", "downtime"]
-    import_id, template_id, body = _editor_body(app, client, spec)
-    # 停止時間の列が無いファイル（画面にその行が無い）
-    body["columns"] = [r for r in body["columns"] if r.get("key") != "downtime"]
-    after = _saved(app, client, import_id, template_id, body)
-    assert after.column("downtime") is not None
-    assert after.column("downtime").unit_conversions == {"h": 60, "時間": 60}
-    assert [s.metrics for s in after.summaries()] == [["count", "sum:downtime"], ["count", "avg:downtime"]]
-    assert [s.id for s in after.custom_stages] == ["cause_class", "loss"]
-    assert after.markdown["title_columns"] == ["equipment_name", "downtime"]
+    import_id = spec_import(app, client)
+    html = panel_html(client, import_id, "columns")
+    for gone in ('data-field="key"', 'data-field="type"', 'data-field="unit"', 'data-field="md"',
+                 'data-field="display"', 'data-field="description"', 'data-field="fill_down_blank"',
+                 'data-field="ai"', 'data-setting="file_prefix"', 'data-setting="description"',
+                 'data-setting="group_by"'):
+        assert gone not in html, gone
+    assert 'data-field="use"' in html and 'data-field="role"' in html and 'data-setting="name"' in html
 
 
 def test_unticked_column_is_still_removed(app, client):
-    from tests.tables_helpers import json_only_spec
-
-    import_id, template_id, body = _editor_body(app, client, json_only_spec())
+    import_id, body = _editor_body(app, client)
     for r in body["columns"]:
-        if r.get("key") == "downtime":
+        if r["header"].startswith("停止時間"):
             r["use"] = False
-    after = _saved(app, client, import_id, template_id, body)
+    after = _saved(app, client, import_id, body)
     assert after.column("downtime") is None
+    assert after.column("record_no") is not None
 
 
-def test_noop_save_keeps_a_composite_record_key(app, client):
-    from tests.tables_helpers import json_only_spec
+def test_the_record_key_follows_the_role_picked_on_screen(app, client):
+    from tests.tables_helpers import set_role
 
-    spec = json_only_spec()
-    spec.record = {"key": ["record_no", "symptom"], "fallback_key": ["occurred_at"]}
-    import_id, template_id, body = _editor_body(app, client, spec)
-    after = _saved(app, client, import_id, template_id, body)
-    assert after.record == {"key": ["record_no", "symptom"], "fallback_key": ["occurred_at"]}
+    import_id, body = _editor_body(app, client)
+    after = _saved(app, client, import_id, body)
+    assert after.record["key"] == ["record_no"]
 
-    # 記録番号の役割を別の列に変えたときは画面の役割から決め直す
-    body["columns"] = [dict(r) for r in body["columns"]]
-    for r in body["columns"]:
-        if r.get("key") == "record_no":
-            r["role"] = "attribute"
-        if r.get("key") == "equipment_name":
-            r["role"] = "key"
-    after = _saved(app, client, import_id, template_id, body)
-    assert after.record["key"] == ["equipment_name"]
+    set_role(body, "管理No", "attribute")
+    set_role(body, "設備名", "key")
+    after = _saved(app, client, import_id, body)
+    assert after.record["key"] == [after.first_role("key").key]
+    assert after.first_role("key").display == "設備名"
 
 
-def test_blank_file_prefix_follows_a_renamed_setting(app, client):
-    from tests.tables_helpers import json_only_spec
-
-    spec = json_only_spec()
-    spec.markdown["file_prefix"] = ""
-    import_id, template_id, body = _editor_body(app, client, spec)
-    assert body["file_prefix"] == ""
-    after = _saved(app, client, import_id, template_id, body)
-    assert after.markdown["file_prefix"] == ""
+def test_the_table_name_decides_the_file_names(app, client):
+    """「ファイル名の先頭」は無くなった。md の名前は「表の名前」を使う。"""
+    import_id, body = _editor_body(app, client)
     body["name"] = "新しい名前"
-    after = _saved(app, client, import_id, template_id, body)
+    after = _saved(app, client, import_id, body)
     assert after.markdown["file_prefix"] == "" and after.file_prefix == "新しい名前"
 
 
@@ -316,39 +298,6 @@ def test_reread_is_refused_while_ai_format_is_running_or_paused(ai_app, ai_clien
         assert job is None or job["id"] == before["job_id"]
 
 
-# ---- C4-2 / BR4-1: 確定前の取り込みが使っている版は、設定の編集で書き換えない -------------------------------
-
-def test_editing_a_setting_keeps_the_version_of_an_unconfirmed_import(ai_app, ai_client):
-    """同じ設定の別の取り込みで列の対応づけを変えても、まだ確定していない取り込みは読んだときの設定のまま。"""
-    from tables import pipeline, store
-    from tests.tables_helpers import editor_body, save_columns, save_layout, save_source, upload_csv, wait_import_job
-
-    first = _read_import(ai_app, ai_client)
-    with ai_app.app_context():
-        imp = store.get_import(first)
-        template_id = imp["template_id"]
-        before = pipeline.spec_for_import(imp)
-
-    second = upload_csv(ai_client, "b.csv")
-    save_source(ai_client, second, encoding="cp932", delimiter=",", template=str(template_id))
-    res = save_layout(ai_client, second)
-    assert res.status_code == 200, res.get_json()
-    if res.get_json().get("job"):
-        wait_import_job(ai_app, second)
-    body = editor_body(ai_client, second)
-    for r in body["columns"]:
-        if r.get("key") == "downtime":
-            r["unit"] = "時間"
-    assert save_columns(ai_client, second, body).status_code == 200
-    wait_import_job(ai_app, second)
-
-    with ai_app.app_context():
-        imp = store.get_import(first)
-        assert pipeline.spec_for_import(imp).column("downtime").unit == before.column("downtime").unit == "分"
-        assert store.get_template(template_id)["spec"].column("downtime").unit == "時間"   # 次の取り込みから使われる
-        assert store.get_template(template_id)["current_version_id"] != imp["template_version_id"]
-
-
 # ---- R4-FUZZ-1 / R4-FUZZ-2: 列数の上限・読めない値はアップロードの時点で断る ---------------------------------
 
 def _no_import_left(app):
@@ -415,12 +364,11 @@ def test_xlsx_with_an_unreadable_value_far_down_is_refused_at_upload(app, client
 # ---- BR4-3: AI整形の対象を2列にして保存しない ------------------------------------------------------------
 
 def test_two_ai_columns_are_refused_on_save(app, client):
-    from tests.tables_helpers import json_only_spec, save_columns
+    from tests.tables_helpers import save_columns, set_role
 
-    import_id, _template_id, body = _editor_body(app, client, json_only_spec())
-    for r in body["columns"]:
-        if r.get("key") in ("symptom", "response_log"):
-            r["ai"] = True
+    import_id, body = _editor_body(app, client)
+    set_role(body, "現象", "log")
+    set_role(body, "対応内容", "log")
     res = save_columns(client, import_id, body)
     assert res.status_code == 400 and res.get_json()["error"] == "AI整形の対象は1列だけにしてください"
 

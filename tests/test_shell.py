@@ -83,23 +83,31 @@ def test_old_deep_links_come_back_to_the_one_page_screens(client):
 
 
 def test_ui_macros_render(app):
+    grid = [{"name": "修理報告書", "letters": ["A", "B"], "truncated": False, "images": 1, "click_cells": ["A1"],
+             "rows": [{"index": 1, "cells": [{"coord": "A1", "text": "報告番号", "rowspan": 1, "colspan": 2,
+                                              "label": True},
+                                             {"coord": "B1", "text": "R-1", "rowspan": 1, "colspan": 1,
+                                              "label": False}]}]}]
     source = """{% import "components/_ui.html" as ui %}
-    {% call ui.step("sheet", 2, "帳票の種類とシート", done=True, summary="設備修理報告書") %}本文{% endcall %}
+    {% call ui.step("sheet", 2, "帳票の種類とシート", open=True) %}本文{% endcall %}
     {% call ui.card("見出し") %}本文{% endcall %}
     {{ ui.badge("modified") }}{{ ui.badge("active") }}
-    {{ ui.chips([{"label": "要確認", "count": 2, "kind": "warn"}, ("AIが入力", 0, "ai")]) }}
-    {{ ui.empty_state("何もありません") }}
+    {{ ui.work_line("read") }}
     {{ ui.progress({"status": "running", "progress": {"done": 3, "total": 10}, "message": "処理中"}, url="/api/jobs/1") }}
     {{ ui.data_grid([{"index": 1, "cells": ["管理No", "設備"], "kind": "header"},
                      {"index": 2, "cells": ["TR-1", "CMP-101"], "kind": "data", "strike": True}] + [{"index": 3, "cells": ["x"] * 28}]) }}
     {{ ui.grid_legend() }}
+    {{ ui.sheet_grid(grids, click_cells=True) }}
     {{ ui.file_drop("file", ".xlsx,.xlsm") }}"""
     with app.test_request_context("/forms/new"):
-        html = render_template_string(source)
-    assert 'data-step="sheet"' in html and "is-done" in html and "設備修理報告書" in html
+        html = render_template_string(source, grids=grid)
+    assert 'data-step="sheet"' in html and "is-open" in html
     assert "修正中" in html and "使用中" in html
+    assert 'data-work="read"' in html
     assert 'data-job-url="/api/jobs/1"' in html and 'aria-valuenow="30"' in html
     assert "row-header" in html and "row-strike" in html and ">AB<" in html
+    assert 'data-cell="A1"' in html and 'colspan="2"' in html and 'class="is-label"' in html
+    assert 'data-table-head="1"' in html and "画像が1件" in html
     assert 'accept=".xlsx,.xlsm"' in html
 
 
@@ -263,7 +271,7 @@ def test_the_startup_notice_says_there_is_no_login(monkeypatch):
 def test_pages_and_json_are_not_kept_in_the_browser_cache(app, client):
     """取り込んだ値の載る画面・JSON はブラウザに保存させない（ダウンロードで消したあと、戻るで出さない）。"""
     doc_id, _path = add_confirmed_document(app, "キャッシュ.xlsx")
-    for url, code in (("/forms/new", 200), ("/tables/new", 200), (f"/forms/{doc_id}/review", 200),
+    for url, code in (("/forms/new", 200), ("/tables/new", 200), (f"/forms/finish?ids={doc_id}", 200),
                       ("/forms/999/original", 404), ("/api/jobs/999", 404)):
         res = client.get(url)
         assert res.status_code == code, url

@@ -1,6 +1,6 @@
 {#- 段3「表の範囲」の中身。色分けで見出し・データ・小計・注記・除外を確かめる。 -#}
 {% import "components/_ui.html" as ui %}
-<div data-layout-page data-detect-url="{{ url_for('tables.layout_detect', import_id=imp.id) }}">
+<div data-layout-page>
   <p class="hint">{% if imp.source.kind == 'excel' %}シート: {{ sheet }}／{% endif %}
     行番号をクリックすると見出し行になります（Shift を押しながらで2段）。データの終わりは右の欄で指定できます。</p>
 
@@ -30,7 +30,7 @@
   <div class="form-actions">
     <button type="button" class="btn primary" data-layout-submit {{ 'disabled' if layout.table_kind == 'crosstab' }}>この範囲で読み込む</button>
     <button type="button" class="btn danger-outline" data-import-delete
-            data-confirm="この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます（取り込み設定は残ります）。元に戻せません。"
+            data-confirm="この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
             data-confirm-ok="削除する">この取り込みを削除</button>
   </div>
 </div>

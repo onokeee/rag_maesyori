@@ -29,7 +29,7 @@ def test_persistent_rate_limit_pauses_job_instead_of_failing_rows(ai_app, fake, 
         job = _wait(lambda: (j := jobs.get_job(job_id))["status"] == "paused" and j, timeout=30)
         assert "混み合っています" in job["message"] and "再開" in job["message"]
         # 打ち切りになった行はエラーとして保存せず、未処理に戻している
-        assert not [v for v in items.items_by_key(1, "log", import_id=iid).values() if v["status"] == "error"]
+        assert not [v for v in items.items_by_key(iid, "log", import_id=iid).values() if v["status"] == "error"]
         sent = sum(1 for r in fake.chat_requests() if segments_of(r["body"]))
         assert sent <= runner.RATE_LIMIT_PAUSE_ROWS * 5      # 残りの行に送り続けない
 
@@ -38,7 +38,7 @@ def test_persistent_rate_limit_pauses_job_instead_of_failing_rows(ai_app, fake, 
         done = jobs.wait_job(job_id, timeout=60)
         assert done["status"] == "done", done["message"]
         assert done["message"] == ""                         # 案内は再開で消える
-        got = items.items_by_key(1, "log", import_id=iid)
+        got = items.items_by_key(iid, "log", import_id=iid)
         assert len(got) == len(rows)
         assert not [v for v in got.values() if "混み合っています" in (v["error"] or "")]
 
@@ -58,7 +58,7 @@ def test_rate_limited_rows_are_errors_when_other_rows_succeed(ai_app, fake, monk
     with ai_app.app_context():
         job = jobs.wait_job(runner.start_ai_job(iid, concurrency=1, stage_ids=["log"]), timeout=60)
         assert job["status"] == "done"
-        got = items.items_by_key(1, "log", import_id=iid)
+        got = items.items_by_key(iid, "log", import_id=iid)
         assert got["R5"]["status"] == "error" and "混み合っています" in got["R5"]["error"]
         assert got["R1"]["status"] != "error" and got["R2"]["status"] != "error"
 
@@ -90,30 +90,11 @@ def test_detect_mode_truncated_every_time_is_not_remembered(ai_app, fake):
         assert (s["chat_url"], "gpt-test") not in llm._MODES     # 次回また判定する
 
 
-# ---- R5-AI-3 AIのクライアントは明示タイムアウト・SDK の再試行なし ------------------------------------
+# ---- R5-AI-3 モデル一覧のクライアントは明示タイムアウト・SDK の再試行なし --------------------------------
 
-def test_ask_json_client_has_finite_timeout_and_no_sdk_retries(ai_app, fake):
+def test_models_client_has_finite_timeout_and_no_sdk_retries(ai_app):
     with ai_app.app_context():
-        cli = llm.client()
-        assert cli.max_retries == 0 and cli.timeout == llm.LOCAL_TIMEOUT     # 偽サーバーは 127.0.0.1
         assert llm.models_client().max_retries == 0 and llm.models_client().timeout == llm.MODELS_TIMEOUT
-        fake.responder = lambda body, srv: Reply(status=500, body={"error": {"message": "boom"}})
-        with pytest.raises(Exception):
-            llm.ask_json("system", "user")
-        assert len(fake.chat_requests()) == 1                  # SDK が投げ直さない
-
-
-# ---- R5-AI-5 ask_json は <think> を除いてから読む。読めなければ日本語 ------------------------------------
-
-def test_ask_json_strips_think_blocks_and_errors_in_japanese(ai_app, fake):
-    with ai_app.app_context():
-        fake.chat_replies = ['<think>候補は {"values": ...} かな</think>\n{"values": {"a": null}}']
-        assert llm.ask_json("s", "u") == {"values": {"a": None}}
-        fake.chat_replies = ['{"values": {"a": ']
-        with pytest.raises(ValueError) as e:
-            llm.ask_json("s", "u", what="項目の補完")
-        assert str(e.value).startswith("項目の補完をJSONとして解析できませんでした") and "Expecting" not in str(e.value)
-        assert llm.friendly_error(e.value) == str(e.value)
 
 
 # ---- R5-AI-4 一時停止を頼んだ直後（まだ実行中）でも［再開］を出す ------------------------------------------

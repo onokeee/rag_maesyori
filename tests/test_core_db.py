@@ -76,10 +76,13 @@ def test_migrates_old_db_with_registered_document(tmp_path):
         assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == db.BUSY_TIMEOUT_MS
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"table_templates", "table_template_versions", "table_imports", "jobs", "llm_calls",
-                "ai_items"} <= tables
+        assert {"table_imports", "jobs", "llm_calls", "ai_items"} <= tables
         # 使っていない表は残さない（取り込みを指す列が無く、行が入ると purge の探索から漏れる。design.md 3.3）
         assert tables.isdisjoint({"table_outputs", "table_downloads", "table_template_samples", "alias_entries"})
+        # 取り込み設定は保存しない（表もビューも落とし、設定は取り込みの行が持つ）
+        objects = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")}
+        assert objects.isdisjoint({"table_templates", "table_template_versions"})
+        assert {"spec_json", "spec_hash"} <= {r[1] for r in conn.execute("PRAGMA table_info(table_imports)")}
         # AI整形の控えは取り込み単位で消せる（同じ設定の別の取り込みを巻き添えにしない）
         assert "import_id" in {r[1] for r in conn.execute("PRAGMA table_info(ai_items)")}
 
@@ -107,7 +110,7 @@ def test_migrates_old_db_with_registered_document(tmp_path):
 
 def test_new_db_document_states_and_filters(core_app):
     with core_app.app_context():
-        pid = db.create_pattern("設備修理報告書", "v1", "")
+        pid = db.create_pattern("設備修理報告書")
         d1 = db.create_document("修理報告書_標準.xlsx", "hash1", "forms/x.xlsx", pattern_id=pid)
         d2 = db.create_document("点検記録表.xlsx", "hash2", "forms/y.xlsx")
         assert db.get_document(d1)["state"] == "unread"
@@ -125,18 +128,8 @@ def test_new_db_document_states_and_filters(core_app):
 
         db.save_draft(d1, {"values": {"report_id": "R2026-00124"}})
         assert db.get_document(d1)["state"] == "modified"
-        assert db.discard_changes(d1)
-        doc = db.get_document(d1)
-        assert doc["state"] == "confirmed"
-        assert json.loads(doc["data_json"])["values"]["report_id"] == "R2026-00123"
-        assert db.discard_changes(d2) is False
+        assert json.loads(db.get_document(d1)["confirmed_json"])["values"]["report_id"] == "R2026-00123"
 
-        # 状態で絞って数える（画面に一覧は無いが、片付け・重複の判定がこの絞り込みを使う）
-        assert [r["id"] for r in db.list_documents()] == [d2, d1]
-        rows = db.list_documents(state="confirmed")
-        assert len(rows) == 1 and rows[0]["pattern_name"] == "設備修理報告書" and rows[0]["state"] == "confirmed"
-        assert len(db.list_documents(state=["unread", "reviewing"])) == 1
-        assert [r["id"] for r in db.list_documents(limit=1)] == [d2]
         assert [d["id"] for d in db.list_confirmed_documents()] == [d1]
         assert db.list_confirmed_documents([]) == []
 
@@ -190,16 +183,35 @@ def test_foreign_keys_cascade_with_background_connection(core_app):
         conn = db.connect()
         try:
             ts = db.now()
-            tid = conn.execute("INSERT INTO table_templates (name, created_at, updated_at) VALUES (?, ?, ?)",
-                               ("故障履歴", ts, ts)).lastrowid
-            conn.execute("INSERT INTO table_template_versions (template_id, version, spec_json, spec_hash, created_at) "
-                         "VALUES (?, 1, '{}', 'x', ?)", (tid, ts))
-            iid = conn.execute("INSERT INTO table_imports (template_id, file_name, file_hash, stored_path, created_at, "
-                               "updated_at) VALUES (?, 'a.csv', 'h', 'tables/a.csv', ?, ?)", (tid, ts, ts)).lastrowid
+            pid = conn.execute("INSERT INTO patterns (name, created_at, updated_at) VALUES (?, ?, ?)",
+                               ("不具合連絡票", ts, ts)).lastrowid
+            conn.execute("INSERT INTO pattern_sheets (pattern_id, sheet_name) VALUES (?, '報告書')", (pid,))
+            conn.execute("INSERT INTO pattern_fields (pattern_id, field_name, display_name) VALUES (?, 'a', 'A')", (pid,))
+            did = conn.execute("INSERT INTO documents (file_name, file_hash, stored_path, pattern_id, created_at) "
+                               "VALUES ('a.xlsx', 'h', 'forms/a.xlsx', ?, ?)", (pid, ts)).lastrowid
             conn.commit()
-            conn.execute("DELETE FROM table_templates WHERE id = ?", (tid,))
+            conn.execute("DELETE FROM patterns WHERE id = ?", (pid,))
             conn.commit()
-            assert conn.execute("SELECT COUNT(*) FROM table_template_versions").fetchone()[0] == 0
-            assert conn.execute("SELECT template_id FROM table_imports WHERE id = ?", (iid,)).fetchone()[0] is None
+            assert conn.execute("SELECT COUNT(*) FROM pattern_fields").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM pattern_sheets").fetchone()[0] == 0
+            assert conn.execute("SELECT pattern_id FROM documents WHERE id = ?", (did,)).fetchone()[0] is None
+        finally:
+            conn.close()
+
+
+def test_the_import_spec_can_be_written_after_the_templates_are_gone(core_app):
+    """table_templates を落としたあとも、取り込みの行は書ける（外部キーの参照先が消えていない）。"""
+    with core_app.app_context():
+        conn = db.connect()
+        try:
+            ts = db.now()
+            iid = conn.execute("INSERT INTO table_imports (file_name, file_hash, stored_path, spec_json, spec_hash, "
+                               "created_at, updated_at) VALUES ('a.csv', 'h', 'tables/a.csv', '{}', 'x', ?, ?)",
+                               (ts, ts)).lastrowid
+            conn.execute("UPDATE table_imports SET template_id = id, template_version_id = id WHERE id = ?", (iid,))
+            conn.commit()
+            # aiproc.runner.load_spec は取り込みの行から設定を読む
+            row = conn.execute("SELECT spec_json FROM table_imports WHERE id = ?", (iid,)).fetchone()
+            assert row["spec_json"] == "{}"
         finally:
             conn.close()

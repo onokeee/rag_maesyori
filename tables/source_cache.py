@@ -19,7 +19,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Callable, Iterator
 
-from tables.detect import HEAD_ROWS, LayoutGuess, RowClass, guess_layout, sample_data_rows
+from tables.detect import HEAD_ROWS, LayoutGuess, RowClass, guess_layout, kind_from_layout, sample_data_rows
 from tables.source import CellInfo, SheetInfo, SourceRow
 
 CACHE_FILE = "source_cache.json"
@@ -266,13 +266,7 @@ class ImportSource:
             layout = self.layout(sheet, max_scan_rows=200)
         except Exception:
             return ""
-        if layout.table_kind in ("list", "crosstab") and layout.counts.get("data", 0) >= 10:
-            return layout.table_kind
-        return ""
-
-    def looks_like_list(self, sheet: str) -> bool:
-        """detect.looks_like_list と同じ判定（クロス集計も含む）。"""
-        return bool(self.list_kind(sheet))
+        return kind_from_layout(layout)
 
     def sample_rows(self, sheet: str, layout: LayoutGuess, n: int = 200) -> list[SourceRow]:
         """sample_data_rows と同じ行（同じ表の形なら控えから）。"""

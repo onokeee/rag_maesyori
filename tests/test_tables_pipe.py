@@ -235,7 +235,7 @@ def test_spec_roundtrip_validate_and_resolve():
         "log_stage": {"column": "zzz"}})
     errors = validate_spec(bad)
     joined = "\n".join(errors)
-    for fragment in ("設定名", "1bad", "重複", "表示名", "型「weird」", "mdでの扱い", "記録キーの列「missing」",
+    for fragment in ("表の名前", "1bad", "重複", "表示名", "型「weird」", "mdでの扱い", "記録キーの列「missing」",
                      "日付", "設備×月", "sum:nothing", "median", "zzz"):
         assert fragment in joined, fragment
 
@@ -447,23 +447,21 @@ class FakeCtx:
         pass
 
 
-def _new_import(app, spec_dict=None, template_id=None, name="list.xlsx"):
+def _new_import(app, spec_dict=None, name="list.xlsx"):
+    """取り込みを1件つくり、その取り込みの設定（spec）を持たせる。戻り値: (spec, import_id)"""
     upload_dir = Path(app.config["UPLOAD_DIR"]) / "tables"
     upload_dir.mkdir(parents=True, exist_ok=True)
     path = make_list_book(upload_dir / name)
-    if template_id is None:
-        spec = spec_from_dict(spec_dict or list_spec_dict())
-        template_id, version_id = store.create_template(spec.name, spec)
-    else:
-        version_id = store.get_template(template_id)["current_version_id"]
+    spec = spec_from_dict(spec_dict or list_spec_dict())
     file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-    import_id = store.create_import(name, file_hash, f"tables/{name}", {"sheet": "2026年8月"}, template_id, version_id)
-    return template_id, import_id
+    import_id = store.create_import(name, file_hash, f"tables/{name}", {"sheet": "2026年8月"})
+    store.save_spec(import_id, spec)
+    return spec, import_id
 
 
 def test_pipeline_read_render_download(app):
     with app.app_context():
-        template_id, import_id = _new_import(app)
+        spec, import_id = _new_import(app)
         ctx = FakeCtx()
         result = pipeline.run_read(ctx, import_id)
         assert result["records"] == 5 and result["error"] == 0
@@ -483,7 +481,6 @@ def test_pipeline_read_render_download(app):
         imp = store.get_import(import_id)
         assert imp["status"] == "confirmed" and imp["confirmed_at"] and done["records"] == 5
         assert len(pipeline.md_paths(import_id)) == done["files"]
-        assert store.get_version(imp["template_version_id"])["used"] == 1
         data = pipeline.build_download(import_id, imp, pipeline.spec_for_import(imp))
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             names = zf.namelist()
@@ -494,26 +491,26 @@ def test_pipeline_read_render_download(app):
             assert normalized[0][:3] == ["記録キー", "管理No", "発生日"]
             assert "'+停止(セル先頭が記号)" in next(r for r in normalized if r[0] == "TR-004")
 
-        # 確定に使った版は上書きせず、新しい版にする
-        spec = store.get_template(template_id)["spec"]
+        # 設定は取り込みの行にあり、保存し直せば上書きされる（版は作らない）
         spec.description = "v2"
-        v2 = store.save_template_version(template_id, spec)
-        assert v2 != imp["template_version_id"] and store.save_template_version(template_id, spec) == v2
+        store.save_spec(import_id, spec)
+        again = store.get_import(import_id)
+        assert again["spec"].description == "v2" and again["spec_hash"] != imp["spec_hash"]
 
 
 def test_pipeline_blocking_and_broken_file(app):
     with app.app_context():
         spec_dict = list_spec_dict()
         spec_dict["columns"][5].update(required=True, headers=["不具合内容"], display="不具合内容")
-        template_id, import_id = _new_import(app, spec_dict)
+        spec, import_id = _new_import(app, spec_dict)
         pipeline.run_read(FakeCtx(), import_id)
         assert store.get_import(import_id)["stats"]["issue_counts"]["error"] == 1
         assert has_blocking(pipeline.load_issues(import_id))
 
         bad_path = Path(app.config["UPLOAD_DIR"]) / "tables" / "broken.xlsx"
         bad_path.write_bytes(b"not a zip")
-        bad = store.create_import("broken.xlsx", "x", "tables/broken.xlsx", {}, template_id,
-                                  store.get_template(template_id)["current_version_id"])
+        bad = store.create_import("broken.xlsx", "x", "tables/broken.xlsx", {})
+        store.save_spec(bad, spec)
         with pytest.raises(Exception):
             pipeline.run_read(FakeCtx(), bad)
         failed = store.get_import(bad)
@@ -524,7 +521,7 @@ def test_read_job_runs_in_worker(app):
     from core import jobs
 
     with app.app_context():
-        _tid, import_id = _new_import(app)
+        _spec, import_id = _new_import(app)
         job_id = pipeline.start_read_job(import_id)
         job = jobs.wait_job(job_id, timeout=60)
         assert job["status"] == "done", job
@@ -552,7 +549,7 @@ def test_scan_memo_gives_same_layout(tmp_path):
 
 
 def test_import_source_cache_reuses_results_without_reopening(tmp_path):
-    from tables.detect import looks_like_list
+    from tables.detect import list_kind
     from tables.source_cache import CACHE_FILE, ImportSource
 
     path = make_list_book(tmp_path / "list.xlsx")
@@ -568,7 +565,7 @@ def test_import_source_cache_reuses_results_without_reopening(tmp_path):
     auto = first.layout(sheet)
     assert auto == guess_layout(direct, sheet)
     assert first.layout(sheet, max_scan_rows=200) == guess_layout(direct, sheet, max_scan_rows=200)
-    assert first.looks_like_list(sheet) == looks_like_list(direct, sheet)
+    assert first.list_kind(sheet) == list_kind(direct, sheet)
     samples = first.sample_rows(sheet, auto, 200)
     assert samples == sample_data_rows(direct, sheet, auto, 200)
     assert list(first.rows(sheet, 1, 60)) == list(direct.rows(sheet, 1, 60)) and first.sheets() == direct.sheets()
@@ -578,7 +575,7 @@ def test_import_source_cache_reuses_results_without_reopening(tmp_path):
     again = ImportSource(tmp_path / "imp", "key1", "excel", path.name, _must_not_open)
     assert again.layout(sheet) == auto and again.sample_rows(sheet, auto, 200) == samples
     assert list(again.rows(sheet, 5, 3)) == list(direct.rows(sheet, 5, 3)) and again.sheets() == direct.sheets()
-    assert again.looks_like_list(sheet) == looks_like_list(direct, sheet)
+    assert again.list_kind(sheet) == list_kind(direct, sheet)
     assert again.layout(sheet, header_rows=auto.header_rows) == guess_layout(direct, sheet, header_rows=auto.header_rows)
 
     # 鍵（ファイル・読み込み設定）が変われば作り直す。Excel を開き直すときはシートの大きさの控えを渡す
@@ -613,7 +610,7 @@ def test_rows_page_and_render_reuses_preview(app, monkeypatch):
     import tables.source_cache as source_cache
 
     with app.app_context():
-        _tid, import_id = _new_import(app)
+        _spec, import_id = _new_import(app)
         pipeline.run_read(FakeCtx(), import_id)
         rows = pipeline.load_rows(import_id)
         assert pipeline.load_rows_page(import_id, 1, 2) == (rows[1:3], 5)

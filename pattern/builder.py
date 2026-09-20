@@ -17,8 +17,7 @@ from excel.text import (MAX_LABEL_LENGTH, cell_text, nfkc_value, normalize_label
 from excel.workbook import Cell, SheetGrid, WorkbookInfo
 from pattern.dictionary import (BY_FIELD_NAME, COMBINED_EQUIPMENT_NORMS, COMBINED_EQUIPMENT_PARTS,
                                 DICTIONARY_NORMS, LOOKUP, is_person_field)
-from pattern.forms import pattern_to_rows
-from pattern.model import DEFAULT_TITLE_KEYS, FieldDef, PatternDef
+from pattern.model import DEFAULT_TITLE_KEYS, FieldDef
 
 _VALUE_LIKE = re.compile(r"^[\x20-\x7e]+$")  # 英数字記号のみ（EQ-001, CMP, 2026/09/14 など）
 # 注記・凡例の書き出し（「※判定　○」「※故障発生日時…は事後保全時に記入」）
@@ -160,45 +159,6 @@ def suggest_title_fields(field_rows: list[dict]) -> list[str]:
     """タイトル項目の候補。使う項目のうち 報告番号→設備番号→設備名→発生日 の順で並べる。"""
     used = {r["field_name"] for r in field_rows if r.get("use")}
     return [key for key in DEFAULT_TITLE_KEYS if key in used]
-
-
-_AUTO_FIELD_NAME = re.compile(r"^field_\d+$")
-
-
-def merge_with_existing(pattern: PatternDef, sheet_rows: list[dict], field_rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """登録済みテンプレートに、サンプルから見つかった新しいラベルを追加候補として足す。"""
-    existing_sheets, existing_fields = pattern_to_rows(pattern)
-    known_sheets = {normalize_sheet_name(r["sheet_name"]) for r in existing_sheets}
-    for row in sheet_rows:
-        if normalize_sheet_name(row["sheet_name"]) not in known_sheets:
-            existing_sheets.append({**row, "use": False})
-
-    norms_by_row = [FieldDef("", "", r["candidates"].splitlines()).label_norms() for r in existing_fields]
-    for row in field_rows:
-        norms = FieldDef("", "", row["candidates"].splitlines()).label_norms()
-        # 名前で合わせるのは辞書の項目名だけ。field_1 などの自動の名前はサンプルの順で振るので、
-        # 登録済みの同じ名前の項目とは無関係（ラベルが重なるときだけ同じ項目とみなす）
-        by_name = not _AUTO_FIELD_NAME.match(row["field_name"])
-        target = next(
-            (er for er, en in zip(existing_fields, norms_by_row)
-             if (by_name and er["field_name"] == row["field_name"]) or en & norms),
-            None,
-        )
-        if target:
-            labels = target["candidates"].splitlines() + row["candidates"].splitlines()
-            target["candidates"] = "\n".join(dict.fromkeys(l for l in labels if l.strip()))
-            target["examples"], target["seen"] = row["examples"], row["seen"]
-            target["unit"] = target.get("unit") or row.get("unit", "")
-            target["section"] = target.get("section") or row.get("section", "")
-            if target.get("data_type") == "table" and row.get("table_columns"):
-                columns = (target.get("table_columns") or "").splitlines() + row["table_columns"].splitlines()
-                target["table_columns"] = "\n".join(dict.fromkeys(c for c in columns if c.strip()))
-        else:
-            used = {r["field_name"] for r in existing_fields}
-            if row["field_name"] in used:
-                row["field_name"] = _next_field_name(used)
-            existing_fields.append({**row, "use": False})
-    return existing_sheets, existing_fields
 
 
 def _suggest_sheets(infos: list[WorkbookInfo]) -> list[dict]:

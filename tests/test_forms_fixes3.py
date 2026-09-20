@@ -6,11 +6,12 @@ from datetime import time, timedelta
 from excel.extractor import apply_manual_values, refresh_summary
 from excel.text import cell_text, format_unit, to_date, to_number
 from tests.test_extraction import LABEL_FILL, _book, _fields, _values
+from tests.test_forms_fixes import _doc_version
 
 
 def _number_field(**kw) -> dict:
     f = {"field_name": "downtime", "display_name": "停止時間", "data_type": "number", "required": False,
-         "value": None, "unit": "", "spec_unit": "", "warning": None, "edited": False, "ai_filled": False}
+         "value": None, "unit": "", "spec_unit": "", "warning": None, "edited": False}
     f.update(kw)
     return f
 
@@ -146,7 +147,7 @@ def test_empty_table_add_and_remove_row_is_not_an_edit():
 
     f = {"field_name": "parts", "display_name": "使用部品", "data_type": "table", "required": False,
          "value": None, "table_columns": ["部品名", "数量"], "warning": "表に行がありません",
-         "edited": False, "ai_filled": False, "unit": ""}
+         "edited": False, "unit": ""}
     ex = {"fields": [f], "pattern": {"id": 1, "version_no": 1}, "sheets": ["S"]}
     refresh_summary(ex)  # 保存済みの読み取り結果と同じ形にする
     confirmed = copy.deepcopy(ex)
@@ -170,7 +171,7 @@ def _working_doc(app):
 
 def test_a_beacon_from_the_same_page_is_not_refused_as_another_page(app, client):
     doc_id = _working_doc(app)
-    old = client.get(f"/forms/{doc_id}/review").get_json()["version"]
+    old = _doc_version(app, doc_id)
     first = client.post(f"/forms/{doc_id}/draft",
                         json={"values": {"equipment_name": "A"}, "version": old, "page_token": "page-1"})
     assert first.status_code == 204
@@ -189,7 +190,7 @@ def test_a_beacon_from_the_same_page_is_not_refused_as_another_page(app, client)
 
 def test_a_beacon_is_refused_after_another_page_saved(app, client):
     doc_id = _working_doc(app)
-    old = client.get(f"/forms/{doc_id}/review").get_json()["version"]
+    old = _doc_version(app, doc_id)
     res = client.post(f"/forms/{doc_id}/draft",
                       json={"values": {"equipment_name": "A"}, "version": old, "page_token": "page-a"})
     new = res.headers["X-Doc-Version"]
@@ -205,7 +206,7 @@ def test_draft_page_marks_are_forgotten_when_the_form_is_purged(app, client):
     from views import forms
 
     doc_id = _working_doc(app)
-    old = client.get(f"/forms/{doc_id}/review").get_json()["version"]
+    old = _doc_version(app, doc_id)
     assert client.post(f"/forms/{doc_id}/draft",
                        json={"values": {"equipment_name": "A"}, "version": old, "page_token": "page-1"}).status_code == 204
     assert doc_id in forms._DRAFT_TOKENS

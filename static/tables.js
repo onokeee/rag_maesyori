@@ -22,7 +22,7 @@
     const hit = /\/imports\/(\d+)\//.exec(url || "");
     return hit ? Number(hit[1]) : null;
   };
-  const guard = (window.ragDiscard || { watch: () => ({ now: async () => {}, clear() {}, arm() {} }) })
+  const guard = (window.ragDiscard || { watch: () => ({ now: async () => {} }) })
     .watch(page.dataset.discardUrl || "/tables/discard", () => ({ import_ids: importId ? [importId] : [] }));
 
   const el = (tag, attrs = {}, ...children) => {
@@ -211,17 +211,7 @@
     // 取りに行かないと灰色のまま何も書かれず、なぜ使えないのかが分からない
     const skipped = (res.reset || [])
       .filter((name) => name !== next && STEP_ORDER.indexOf(name) < STEP_ORDER.indexOf(next));
-    // 飛ばしたが「済み」として畳んでおく段（例: 保存してある取り込み設定をそのまま使った「列の対応づけ」）。
-    // 中身は入れておくので、見出しをクリックすれば開いて直せる
-    const settled = Object.entries(res.done || {});
-    const loadSkipped = () => {
-      skipped.forEach((name) => loadPanel(name, { open: false, scroll: false }));
-      settled.forEach(async ([name, text]) => {
-        await loadPanel(name, { open: false, scroll: false });
-        setNote(name, text);
-        sections.done(name, text);
-      });
-    };
+    const loadSkipped = () => skipped.forEach((name) => loadPanel(name, { open: false, scroll: false }));
     if (res.job && !res.job.finished) {
       // 処理が終わってから取りに行く（動いている間は、どの段も同じジョブの進み具合を映してしまう）
       runJob(next, res.job, () => { loadSkipped(); loadPanel(next, { open: true, scroll: false }); });
@@ -306,22 +296,6 @@
   // ---- 共通のクリック -------------------------------------------------------------------
   page.addEventListener("click", async (event) => {
     const hit = (selector) => event.target.closest(selector);
-
-    // 取り込み設定を消す（読み取り方の段）
-    const delTemplate = hit("[data-delete-template]");
-    if (delTemplate) {
-      if (!confirmed(delTemplate)) return;
-      try {
-        const url = delTemplate.closest("[data-source-form]").dataset.deleteTemplateUrl
-          .replace("/templates/0/", `/templates/${delTemplate.dataset.deleteTemplate}/`);
-        const res = await rf(url, { json: {}, quiet: true });
-        toast(res.message || "削除しました");
-        await loadPanel("source", { open: true, scroll: false });
-      } catch (e) {
-        toast(e.message, "err");
-      }
-      return;
-    }
 
     // この取り込みを削除
     const delImport = hit("[data-import-delete]");
@@ -453,7 +427,7 @@
     }
   });
 
-  // ---- 2 読み取り方と取り込み設定（変えるたびに保存し、下の段をやり直す） -----------------------
+  // ---- 2 読み取り方（変えるたびに保存し、下の段をやり直す） ---------------------------------
   async function saveSource() {
     const form = page.querySelector("[data-source-form]");
     if (!form) return;
@@ -467,24 +441,12 @@
         data[input.name] = input.value;
       }
     });
-    const warn = form.querySelector("[data-source-warning]");
     sections.working("source", "読み取り方を保存しています…");
     try {
       const res = await rf(urls.source, { json: data, quiet: true });
       if (res.note) setNote("source", res.note);
-      if (warn) {
-        warn.textContent = res.warning || "";
-        warn.hidden = !res.warning;
-      }
-      (res.reset || []).forEach((name) => {
-        if (name === "layout") return;
-        stopPoller(name);
-        const section = sections.el(name);
-        if (!section) return;
-        section.classList.remove("is-open", "is-done");
-        setNote(name, "");
-        body(name).replaceChildren();
-      });
+      // 「表の範囲」はこのあとすぐ読み込み直すので、ここでは消さない
+      (res.reset || []).forEach((name) => { if (name !== "layout") clearStep(name); });
       await loadPanel("layout", { open: true, scroll: false });
     } catch (e) {
       toast(e.message, "err");
@@ -609,27 +571,15 @@
     const editor = tr.closest("[data-columns-editor]");
     const field = input.dataset.field;
     if (field === "use") tr.classList.toggle("is-unused", !input.checked);
-    // AI整形の対象（役割＝追記ログ）は1列だけ。ほかの行のチェックを外し、追記ログの役割は長文に戻す
-    const onlyThisLog = () => {
+    // AI整形の対象（追記ログ）は1列だけ。ほかの行が選んでいたら「その他」に戻し、この行は「使う」にする
+    if (field === "role" && input.value === "log") {
       editor.querySelectorAll("tr[data-col]").forEach((other) => {
         if (other === tr) return;
-        const box = other.querySelector("input[data-field=ai]");
-        if (box) box.checked = false;
         const role = other.querySelector("[data-field=role]");
-        if (role && role.value === "log") role.value = "text";
+        if (role && role.value === "log") role.value = "attribute";
       });
-    };
-    if (field === "ai" && input.checked) {
-      onlyThisLog();
-      tr.querySelector("[data-field=role]").value = "log";
-      tr.querySelector("[data-field=type]").value = "text";
       tr.querySelector("[data-field=use]").checked = true;
       tr.classList.remove("is-unused");
-    }
-    if (field === "role" && input.value === "log") {
-      onlyThisLog();
-      tr.querySelector("[data-field=ai]").checked = true;
-      tr.querySelector("[data-field=type]").value = "text";
     }
   }
 
@@ -637,24 +587,19 @@
     const editor = page.querySelector("[data-columns-editor]");
     if (!editor) return;
     const errors = editor.querySelector("[data-editor-errors]");
-    const settings = {};
-    editor.querySelectorAll("[data-setting]").forEach((input) => {
-      settings[input.dataset.setting] = input.type === "checkbox" ? input.checked : input.value;
-    });
-    const columns = [...editor.querySelectorAll("tr[data-col]")].map((tr) => {
-      const row = { index: Number(tr.dataset.index), header: tr.dataset.header };
-      tr.querySelectorAll("[data-field]").forEach((input) => {
-        row[input.dataset.field] = input.type === "checkbox" ? input.checked : input.value;
-      });
-      return row;
-    });
+    const name = editor.querySelector("[data-setting=name]")?.value || "";
+    // 送るのは「使う・役割」だけ。キー・型・単位・出し方はサーバーが見出しと値から決める
+    const columns = [...editor.querySelectorAll("tr[data-col]")].map((tr) => ({
+      index: Number(tr.dataset.index),
+      use: tr.querySelector("[data-field=use]").checked,
+      role: tr.querySelector("[data-field=role]").value,
+    }));
     button.disabled = true;
     errors.replaceChildren();
     try {
-      const res = await rf(editor.dataset.saveUrl,
-        { json: { ...settings, header_rows_count: Number(editor.dataset.headerRowsCount || 1), columns }, quiet: true });
-      setNote("columns", settings.name || "");
-      sections.done("columns", settings.name || "");
+      const res = await rf(editor.dataset.saveUrl, { json: { name, columns }, quiet: true });
+      setNote("columns", name);
+      sections.done("columns", name);
       afterAction(res);
     } catch (e) {
       // 問題が複数あれば全部並べる（1件だけ直して保存し直す、を繰り返さずに済む）

@@ -9,11 +9,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils.datetime import CALENDAR_MAC_1904
 
-from tables.csv_source import CsvSource, describe_sniff, sniff_csv
-from tables.detect import classify_rows, guess_layout, is_month_label, looks_like_list, sample_data_rows, split_header_unit
-from tables.dictionary import BY_KEY, lookup_header
+from tables.csv_source import CsvSource, sniff_csv
+from tables.detect import classify_rows, guess_layout, is_month_label, list_kind, sample_data_rows, split_header_unit
+from tables.dictionary import STANDARD_COLUMNS, lookup_header
 from tables.excel_source import ExcelSource
-from tables.mapping import match_templates, suggest_columns
+from tables.mapping import suggest_columns
 from tables.source import UploadError, open_source, value_kind
 
 SAMPLES = Path(__file__).resolve().parents[1] / "samples" / "tables"
@@ -48,7 +48,6 @@ def test_sniff_cp932_preamble_multiline_and_trailer(tmp_path):
     assert sniff.header_row == 5 and sniff.preamble_rows == 4
     assert sniff.trailer_rows == 1
     assert sniff.warnings == []
-    assert describe_sniff(sniff) == "文字コード: CP932（Shift_JIS） / 区切り: カンマ / 前置き行: 4行"
 
     src = open_source(path, "故障履歴.csv")
     rows = list(src.rows("故障履歴.csv"))
@@ -265,7 +264,7 @@ def test_excel_list_rows_classes_and_end(tmp_path):
     assert classified[0][0].cells[1].value == datetime(2026, 8, 1)
     assert classified[0][0].cells[1].text == "2026-08-01"
     assert len(sample_data_rows(src, "故障履歴", layout, n=5)) == 5
-    assert looks_like_list(src, "故障履歴")
+    assert list_kind(src, "故障履歴") == "list"
 
 
 def test_excel_anchor_and_manual_header_row(tmp_path):
@@ -440,7 +439,7 @@ def test_form_like_sheet_is_not_list(tmp_path):
     src = ExcelSource(tmp_path / "form.xlsx")
     layout = guess_layout(src, "Sheet")
     assert layout.table_kind in ("form_like", "unknown")
-    assert not looks_like_list(src, "Sheet")
+    assert not list_kind(src, "Sheet")
 
 
 # ---- 見出し・辞書・対応づけ ----
@@ -475,11 +474,12 @@ def test_dictionary_lookup():
     std, how = lookup_header("作業内容（詳細）")
     assert (std.key, how) == ("action", "similar")
     assert lookup_header("2025年_4月") is None
+    by_key = {c.key: c for c in STANDARD_COLUMNS}
     for key in ("record_no", "occurred_at", "equipment_id", "equipment_name", "line", "process", "failure_category",
                 "severity", "symptom", "cause", "action", "response_log", "downtime", "work_hours", "cost", "status",
                 "worker", "part_name", "quantity", "unit_price"):
-        assert key in BY_KEY, key
-    assert BY_KEY["worker"].md != "omit" and BY_KEY["action"].log_candidate
+        assert key in by_key, key
+    assert by_key["worker"].md != "omit" and by_key["action"].log_candidate
 
 
 def test_suggest_columns_types_rates_and_log():
@@ -507,36 +507,6 @@ def test_suggest_columns_types_rates_and_log():
     assert result["担当者"].key == "worker" and result["担当者"].md != "omit"
     assert result["担当"].key == "worker_2"  # 同じ標準キーは後の列に番号を付ける
     assert result["管理No"].examples == ["TR-000", "TR-001", "TR-002"]
-
-
-def test_suggest_columns_with_template_spec():
-    spec = {"name": "故障履歴一覧", "columns": [
-        {"key": "equipment_id", "display": "設備", "headers": ["号機", "設備番号"], "type": "code", "role": "entity",
-         "md": "attribute", "required": True},
-    ]}
-    s = suggest_columns(["号機", "謎の列"], [["CMP-1", "x"], ["CMP-2", "y"]], template_spec=spec)
-    assert (s[0].key, s[0].display, s[0].matched_by) == ("equipment_id", "設備", "template")
-    assert (s[1].key, s[1].matched_by, s[1].type) == (None, "none", "string")
-
-
-def test_match_templates_uses_header_band_and_name():
-    trouble = {"name": "トラブル一覧", "name_patterns": ["トラブル"], "columns": [
-        {"key": "record_no", "headers": ["管理No"], "required": True},
-        {"key": "occurred_at", "headers": ["発生日"], "required": True},
-        {"key": "symptom", "headers": ["現象"], "required": True},
-    ]}
-    parts = {"name": "部品交換", "name_patterns": ["部品"], "columns": [
-        {"key": "part_name", "headers": ["部品名"], "required": True},
-        {"key": "quantity", "headers": ["数量"], "required": True},
-    ]}
-    downtime = {"name": "月別停止時間", "name_patterns": ["停止時間"], "crosstab": {"value_key": "downtime"}, "columns": [
-        {"key": "equipment_id", "headers": ["設備番号"], "required": True},
-    ]}
-    headers = ["管理No", "発生日", "設備番号", "現象", "部品名"]
-    ranked = match_templates(headers, "T1_トラブル対応一覧.xlsx", [parts, downtime, trouble])
-    assert ranked[0] == (trouble, 3, 3)
-    assert (ranked[1][0]["name"], ranked[1][1], ranked[1][2]) in {("部品交換", 1, 2), ("月別停止時間", 1, 1)}
-    assert {r[0]["name"]: (r[1], r[2]) for r in ranked}["部品交換"] == (1, 2)
 
 
 def test_value_kind():
@@ -581,7 +551,7 @@ def test_sample_t1_clean_list():
     cols = {s.header: s for s in suggest_columns(layout.headers, sample_data_rows(src, "トラブル一覧", layout))}
     assert cols["停止時間(分)"].key == "downtime" and cols["停止時間(分)"].unit == "分"
     assert cols["処置内容"].key == "action" and cols["担当者"].md != "omit"
-    assert looks_like_list(src, "トラブル一覧")
+    assert list_kind(src, "トラブル一覧") == "list"
 
 
 @pytest.mark.samples

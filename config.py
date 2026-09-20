@@ -28,7 +28,7 @@ class Config:
     SECRET_KEY = None
     DATABASE = Path(os.environ.get("DATABASE", BASE_DIR / "instance" / "app.db"))
     UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", BASE_DIR / "uploads"))
-    # 画面から保存する設定（model_settings.yaml / prefs.yaml）の置き場所
+    # 画面から保存する設定（model_settings.yaml）の置き場所
     DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
     # 一覧表の行データ・状態ファイルの置き場所（DATA_DIR/tables。create_app で DATA_DIR に合わせて決め直す）
     TABLES_DIR = Path(os.environ.get("TABLES_DIR", DATA_DIR / "tables"))
@@ -56,5 +56,3 @@ class Config:
     OPENAI_MAX_TOKENS = _optional_int("OPENAI_MAX_TOKENS")
     LLM_RATE_LIMIT_RETRIES = int(os.environ.get("LLM_RATE_LIMIT_RETRIES", "3"))
     LLM_RATE_LIMIT_MAX_WAIT = float(os.environ.get("LLM_RATE_LIMIT_MAX_WAIT", "20"))
-    # AIに渡すExcelの文字数の上限（コストと文脈長の保護）
-    AI_SHEET_MAX_CHARS = int(os.environ.get("AI_SHEET_MAX_CHARS", "15000"))

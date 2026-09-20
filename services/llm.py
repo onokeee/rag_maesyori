@@ -25,8 +25,7 @@ from openai import OpenAI
 from services import settings_store
 
 SETTINGS_FILE = "model_settings.yaml"
-PREFS_FILE = "prefs.yaml"
-ADMIN_KEYS = ("models", "default", "api_key", "chat_url", "models_url")
+ADMIN_KEYS =("models", "default", "api_key", "chat_url", "models_url")
 CATALOG_TTL = 300
 _MAX_FIX = 4
 
@@ -40,10 +39,6 @@ _lock = threading.RLock()
 
 class LLMNotConfigured(Exception):
     pass
-
-
-class RateLimited(Exception):
-    """待って投げ直しても解消しなかったレート制限。"""
 
 
 def _cfg(name: str):
@@ -102,30 +97,8 @@ def available() -> list[str]:
 
 
 def current_model() -> str:
-    """ヘッダーのモデル選択で選んだモデル（候補から外れていれば既定モデル）。"""
-    chosen = str(get_pref("model") or "").strip()
-    return chosen if chosen and chosen in available() else default_model()
-
-
-def choose_model(model: str) -> str:
-    model = str(model or "").strip()
-    if not model:
-        raise ValueError("モデル名が空です。")
-    if model not in available():
-        raise ValueError(f"{model} は選べません。「AI接続」で候補に追加してください。")
-    set_pref("model", model)
-    return model
-
-
-def get_pref(key: str, default=None):
-    return settings_store.read_yaml(PREFS_FILE).get(key, default)
-
-
-def set_pref(key: str, value) -> None:
-    with settings_store.lock():
-        prefs = settings_store.read_yaml(PREFS_FILE)
-        prefs[key] = value
-        settings_store.write_yaml(PREFS_FILE, prefs)
+    """いま使うモデル（画面のモデル選択は無くなったので既定モデル）。"""
+    return default_model()
 
 
 # ---- クライアント ---------------------------------------------------------------
@@ -146,12 +119,6 @@ def _client_for(base: str, timeout: float) -> OpenAI:
         if key not in _clients:
             _clients[key] = OpenAI(base_url=base or None, api_key=key[1] or "not-set", timeout=key[2], max_retries=0)
         return _clients[key]
-
-
-def client() -> OpenAI:
-    url = llm_chat_url()
-    return _client_for(_derived_base(url, "/chat/completions"),
-                       LOCAL_TIMEOUT if is_local_endpoint(url) else CLOUD_TIMEOUT)
 
 
 def models_client() -> OpenAI:
@@ -344,89 +311,8 @@ def _apply_quirks(kwargs: dict, endpoint: str = "") -> dict:
 _RETRY_IN = re.compile(r"try again in\s+([\d.]+)\s*(ms|s|m)\b", re.IGNORECASE)
 
 
-def _is_rate_limit(e: Exception) -> bool:
-    return getattr(e, "status_code", None) == 429 or "rate_limit" in str(e).lower()
-
-
-def _rate_limit_wait(e: Exception, attempt: int) -> float:
-    max_wait = _cfg("LLM_RATE_LIMIT_MAX_WAIT")
-    try:
-        raw = e.response.headers.get("retry-after")
-        if raw:
-            return min(float(raw), max_wait)
-    except Exception:
-        pass
-    m = _RETRY_IN.search(str(e))
-    if m:
-        value, unit = float(m.group(1)), m.group(2).lower()
-        sec = value / 1000 if unit == "ms" else (value * 60 if unit == "m" else value)
-        return min(sec + 0.5, max_wait)
-    return min(2.0 ** attempt, max_wait)
-
-
-def _create(**kwargs):
-    """chat.completions.create の呼び出し口。受け付けない引数はエラーを見て直しながら投げ直す。"""
-    endpoint = llm_chat_url()
-    key = _quirk_key(endpoint, str(kwargs.get("model") or ""))
-    attempt = _apply_quirks(kwargs, endpoint)
-    fixes = waits = 0
-    waited_total = 0.0
-    while fixes < _MAX_FIX:
-        try:
-            return client().chat.completions.create(**attempt)
-        except Exception as e:
-            if _is_rate_limit(e):
-                if waits >= _cfg("LLM_RATE_LIMIT_RETRIES"):
-                    raise RateLimited(f"混み合っています（レート制限）。{waits}回・合計{waited_total:.1f}秒待ちましたが"
-                                      "解消しませんでした。少し時間をおいてから再実行してください。") from e
-                waits += 1
-                sec = _rate_limit_wait(e, waits)
-                waited_total += sec
-                print(f"[llm] レート制限。{sec:.1f}秒待って投げ直します（{waits}/{_cfg('LLM_RATE_LIMIT_RETRIES')}回目）")
-                time.sleep(sec)
-                continue
-            fixes += 1
-            fix = _fix_for(str(e), attempt)
-            if fix is None:
-                raise
-            set_, drop, rename = fix
-            if _no_progress(attempt, set_, drop, rename):
-                raise
-            _learn(key, set_=set_, drop=drop, rename=rename)
-            attempt = _apply_quirks(kwargs, endpoint)
-    return client().chat.completions.create(**attempt)
-
-
-def ask_json(system: str, user: str, what: str = "AIの応答", model: str | None = None) -> dict:
-    """AIに聞いて、応答からJSONオブジェクトを取り出す（``` で囲まれていても可）。"""
-    if not is_configured():
-        raise LLMNotConfigured("AIの接続先が未設定です。「AI接続」でAPIキーと接続先を設定してください。")
-    kwargs = dict(
-        model=model or current_model(),
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=_cfg("OPENAI_TEMPERATURE"),
-    )
-    if _cfg("OPENAI_TOP_P") is not None:
-        kwargs["top_p"] = _cfg("OPENAI_TOP_P")
-    if _cfg("OPENAI_MAX_TOKENS") is not None:
-        kwargs["max_tokens"] = _cfg("OPENAI_MAX_TOKENS")
-    resp = _create(**kwargs)
-    if not hasattr(resp, "choices"):
-        # 200 でも HTML（プロキシのブロック画面・接続先URLの誤り）などは SDK が文字列のまま返す
-        raise ValueError("AIの接続先がAPIの形式で応答しませんでした（接続先URLやプロキシを確認してください）。")
-    if not resp.choices or not resp.choices[0].message:
-        raise ValueError("AIの応答が空でした。")
-    content = resp.choices[0].message.content or ""
-    try:
-        # <think>…</think>（推論の途中に書かれた { } を含む）を除いてから取り出す。失敗は日本語の ValueError
-        return parse_json_text(content)
-    except ValueError as e:
-        shown = _THINK_RE.sub("", content).strip()[:200]
-        raise ValueError(f"{what}をJSONとして解析できませんでした（{str(e).rstrip('。')}）: {shown}") from e
-
-
 def friendly_error(exc: Exception) -> str:
-    if isinstance(exc, (LLMNotConfigured, RateLimited, ValueError, LLMCallError)):
+    if isinstance(exc, (LLMNotConfigured, ValueError, LLMCallError)):
         return str(exc)
     from openai import APIConnectionError, APITimeoutError
 
@@ -443,7 +329,7 @@ def friendly_error(exc: Exception) -> str:
 
 
 # ---- ジョブ用の呼び出し口（一覧表のAI整形） -------------------------------------------
-# ask_json（帳票側）とは別に持つ。設定はジョブ開始時に固定し、専用クライアント（明示タイムアウト・SDK再試行なし）で呼ぶ。
+# 設定はジョブ開始時に固定し、専用クライアント（明示タイムアウト・SDK再試行なし）で呼ぶ。
 # ワーカースレッドから呼ぶため、ここの関数は current_app を使わない（job_client_settings だけは app_context 内で呼ぶ）。
 
 CLOUD_TIMEOUT = 120.0

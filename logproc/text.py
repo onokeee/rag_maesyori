@@ -55,3 +55,13 @@ def is_empty_log(text: str) -> bool:
 
 def nfkc(text: str) -> str:
     return unicodedata.normalize("NFKC", text or "")
+
+
+def dedupe(items) -> list[str]:
+    """順番を保ったまま重複を落とす（空の要素は入れない）。"""
+    seen, out = set(), []
+    for x in items:
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out

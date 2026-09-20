@@ -104,8 +104,6 @@ STANDARD_COLUMNS: list[StdColumn] = [
     _c("registered_by", "登録者", "string", "attribute", ["登録者ID", "登録者", "更新者ID", "更新者"]),
 ]
 
-BY_KEY: dict[str, StdColumn] = {c.key: c for c in STANDARD_COLUMNS}
-
 _STRIP_RE = re.compile(r"[\s・()（）\[\]【】「」『』_\-‐－/／:：.。、,，#＃*＊]")
 
 

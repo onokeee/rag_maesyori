@@ -11,7 +11,7 @@ import pytest
 from core import jobs
 from tables import pipeline, store
 from tests.tables_helpers import (  # noqa: F401  (COLUMNS/CSV_TEXT は他のテストからも読まれる)
-    COLUMNS, CSV_TEXT, columns_payload, name_source, panel, panel_html, preview_panel, save_columns, save_layout,
+    COLUMNS, CSV_TEXT, columns_payload, csv_source, panel, panel_html, preview_panel, save_columns, save_layout,
     save_source, upload, upload_csv, wait_import_job,
 )
 
@@ -20,9 +20,9 @@ def test_csv_import_flow(app, client, monkeypatch):
     import_id = upload_csv(client, "トラブル一覧.csv")
 
     source = panel(client, import_id, "source")
-    # 取り込み設定の名前は残り続けるので、アップロードしたファイル名を初期値にしない（design.md 3.3）
-    assert 'name="new_template_name" class="input" value=""' in source["html"]
-    assert name_source(client, import_id, "トラブル対応一覧")["next"] == "layout"
+    # 取り込み設定は保存しないので、読み取り方の段に設定の選択は出ない
+    assert "new_template_name" not in source["html"] and "取り込み設定" not in source["html"]
+    assert csv_source(client, import_id)["next"] == "layout"
 
     layout = panel(client, import_id, "layout")
     assert "row-header" in layout["html"]
@@ -31,7 +31,9 @@ def test_csv_import_flow(app, client, monkeypatch):
     res = save_layout(client, import_id)
     assert res.status_code == 200 and res.get_json()["next"] == "columns"
 
-    assert "対応内容" in panel_html(client, import_id, "columns")
+    columns = panel_html(client, import_id, "columns")
+    # 表の名前はファイル名から入れておく（設定は残らないので、この取り込みだけの名前）
+    assert "対応内容" in columns and 'data-setting="name" value="トラブル一覧"' in columns
     # 2回目からは取り込みの控えで画面を作る（CSV を開き直さない）
     monkeypatch.setattr(pipeline, "open_import_source", lambda *a, **k: pytest.fail("CSV を開き直した"))
     assert "row-header" in panel_html(client, import_id, "layout")
@@ -71,19 +73,15 @@ def test_csv_import_flow(app, client, monkeypatch):
     assert {"管理用_RAGには入れない/正規化データ.csv", "管理用_RAGには入れない/問題一覧.csv",
             "管理用_RAGには入れない/取込レポート.csv"} <= set(names)
     with app.app_context():
-        assert store.get_import(import_id) is None      # ダウンロードしたら残さない
-        assert store.get_template(imp["template_id"]) is not None   # 取り込み設定は残る
+        assert store.get_import(import_id) is None      # ダウンロードしたら残さない（設定も一緒に消える）
 
-    # 2回目: 同じ設定を選べば列の対応づけを飛ばす
+    # 2回目も同じ順で進む（設定は残らないので、列の対応づけは毎回決める）
     second = upload_csv(client, "トラブル一覧2.csv")
-    tid = imp["template_id"]
-    assert "必須列" in panel_html(client, second, "source")
-    save_source(client, second, encoding="cp932", delimiter=",", template=str(tid))
+    save_source(client, second, encoding="cp932", delimiter=",")
     res = save_layout(client, second)
-    body = res.get_json()
-    assert res.status_code == 200 and body["next"] == "ai"
-    # 飛ばした段は灰色のままにせず、使った設定の名前を出す
-    assert "トラブル対応一覧" in body["done"]["columns"]
+    assert res.status_code == 200 and res.get_json()["next"] == "columns"
+    res = save_columns(client, second, columns_payload("トラブル対応一覧2"))
+    assert res.status_code == 200, res.get_json()
     assert wait_import_job(app, second)["status"] == "preview"
 
 
@@ -149,7 +147,7 @@ def test_cancel_without_running_job_is_reported(app, client):
 
 def test_layout_panel_without_headers(app, client):
     import_id = upload_csv(client, "1列.csv", "あ\r\nい\r\n", encoding="utf-8")
-    name_source(client, import_id, "1列", encoding="utf-8")
+    csv_source(client, import_id, encoding="utf-8")
     data = panel(client, import_id, "layout")
     # 見出し行が見つからないときに「1〜0行目」のような存在しない行番号を出さない
     assert "データの行が見つかりません" in data["html"] and "〜0行目" not in data["html"]
@@ -191,12 +189,12 @@ def test_delete_is_refused_while_a_job_is_running(app, client):
 def test_source_rejects_an_encoding_that_is_not_offered(app, client):
     """画面にない文字コードを保存させない（保存できると読み込みで落ちて段が開けなくなる）。"""
     import_id = upload_csv(client, "文字コード.csv")
-    res = save_source(client, import_id, encoding="rot13", delimiter=",", template="new", new_template_name="x")
+    res = save_source(client, import_id, encoding="rot13", delimiter=",")
     assert res.status_code == 400 and "この画面にない文字コード" in res.get_json()["error"]
     with app.app_context():
         assert store.get_import(import_id)["source"].get("encoding") != "rot13"
     # 画面にある文字コードは保存できる
-    assert name_source(client, import_id, "x", encoding="utf-16")["next"] == "layout"
+    assert csv_source(client, import_id, encoding="utf-16")["next"] == "layout"
     # 中身と合わない文字コードでも、500 ではなく段を出して選び直せる（読めなければ理由を1行出す）
     assert panel(client, import_id, "source")["html"]
     layout = panel(client, import_id, "layout")
@@ -210,7 +208,7 @@ def test_column_editor_shows_japanese_type_names(app, client):
     text = "管理No,発生日,設備番号,設備名,状態コード,対応内容,停止時間\r\n" + "".join(
         f"MS-{i:04d},2026-08-{i:02d},EQ-01,搬送ロボット1号機,{i % 3},点検した,{i * 5}\r\n" for i in range(1, 29))
     import_id = upload_csv(client, "型.csv", text)
-    name_source(client, import_id, "型")
+    csv_source(client, import_id)
     save_layout(client, import_id)
     html = panel_html(client, import_id, "columns")
     shown = re.findall(r"値は「([^」]+)」らしい", html)
@@ -221,7 +219,7 @@ def test_column_editor_shows_japanese_type_names(app, client):
 def test_preview_panel_says_it_is_already_confirmed(app, client):
     """確定済みの取り込みを開き直したときに、黙って作り直せるボタンだけを出さない。"""
     import_id = upload_csv(client, "確定済み.csv")
-    name_source(client, import_id, "確定済み")
+    csv_source(client, import_id)
     save_layout(client, import_id)
     assert save_columns(client, import_id, columns_payload("確定済み")).status_code == 200
     wait_import_job(app, import_id)
@@ -273,7 +271,7 @@ def test_source_is_not_changed_while_reading(app, client):
     """読み込み中に読み取り方を保存しても、文字コード・区切り文字を書き換えない
     （古い設定の読み込み結果で確定させない）。"""
     import_id, _job_id = _pending_import(app)
-    res = save_source(client, import_id, encoding="utf-8", delimiter=";", template="new", new_template_name="x")
+    res = save_source(client, import_id, encoding="utf-8", delimiter=";")
     assert res.status_code == 409 and "処理中は変更できません" in res.get_json()["error"]
     assert save_layout(client, import_id, header_rows="2").status_code == 409
     assert save_columns(client, import_id, {"name": "x", "columns": []}).status_code == 409
@@ -288,7 +286,7 @@ def test_utf16_without_bom_can_pass_the_source_panel(app, client):
     with app.app_context():
         assert store.get_import(import_id)["source"]["encoding"] == "utf-16-le"
     assert 'value="utf-16-le"' in panel_html(client, import_id, "source")
-    assert name_source(client, import_id, "u16", encoding="utf-16-le")["next"] == "layout"
+    assert csv_source(client, import_id, encoding="utf-16-le")["next"] == "layout"
     assert panel(client, import_id, "layout").get("locked") is None
 
 

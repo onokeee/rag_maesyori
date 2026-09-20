@@ -1,32 +1,28 @@
 {#- 画面共通の部品。使い方: {% import "components/_ui.html" as ui %} -#}
 
-{#- 状態 → (表示語, 色) 。帳票・帳票の種類・一覧表の取り込み・ジョブ・AI整形の行 -#}
+{#- 状態 → (表示語, 色)。ui.badge で出すものだけ（帳票・帳票の種類・ジョブ）。
+    AI整形の行の状態は aiproc/items.STATUS_LABELS、読み取った値の出どころは
+    templates/forms/_review.html の SOURCE_LABELS と static/review.js の SOURCES が持つ。 -#}
 {% set STATE_LABELS = {
   "unread": ("読み取り前", "gray"), "reviewing": ("確認中", "amber"), "modified": ("修正中", "violet"),
   "confirmed": ("確定済み", "green"),
   "draft": ("作成中", "amber"), "active": ("使用中", "green"), "inactive": ("停止中", "gray"),
-  "uploaded": ("読み込み前", "gray"), "reading": ("読み込み中", "blue"), "preview": ("確認中", "amber"),
-  "confirming": ("確定処理中", "blue"), "failed": ("失敗", "red"),
   "queued": ("待ち", "gray"), "running": ("実行中", "blue"), "paused": ("一時停止", "amber"), "done": ("完了", "green"),
-  "cancelled": ("中止", "gray"), "interrupted": ("中断", "red"),
-  "ok": ("OK", "green"), "flagged": ("要確認", "amber"), "rule_only": ("ルールのみ", "gray"), "error": ("エラー", "red"),
-  "skipped": ("対象外", "gray"), "outdated": ("古い結果", "amber"), "excluded": ("除外", "gray"),
-  "auto": ("自動で読み取り", "blue"), "ai": ("AIが入力（要確認）", "violet"), "manual": ("手で修正", "teal"),
-  "required": ("要確認", "amber"),
+  "failed": ("失敗", "red"), "cancelled": ("中止", "gray"), "interrupted": ("中断", "red"),
 } %}
 
 {#- 1画面の中の「段」。①→②→③と画面を移らず、同じ画面に段が増えていく（利用者の指示 2026-09-20）。
     使い方:
       {% call ui.step("sheet", 2, "どのシートを使うか", open=false) %}…中身…{% endcall %}
-    開け閉ては static/app.js の window.ragSections（open / done / reset / body / working）が行う。
+    開け閉て（済みの印・要約・開く／閉じる）は static/app.js の window.ragSections が行う。
     id は ragSections.open("sheet") のように呼ぶときの名前。 -#}
-{% macro step(id, no, title, open=False, done=False, summary="") -%}
-<section class="step{{ ' is-open' if open }}{{ ' is-done' if done }}" data-step="{{ id }}" id="step-{{ id }}">
+{% macro step(id, no, title, open=False) -%}
+<section class="step{{ ' is-open' if open }}" data-step="{{ id }}" id="step-{{ id }}">
   <div class="step-head">
     <span class="step-no" aria-hidden="true"><span class="step-no-text">{{ no }}</span></span>
     <h2 class="step-title">{{ title }}</h2>
-    <p class="step-summary" data-step-summary title="{{ summary }}">{{ summary }}</p>
-    <span class="step-toggle" data-step-toggle {{ 'hidden' if not done }}>開く</span>
+    <p class="step-summary" data-step-summary></p>
+    <span class="step-toggle" data-step-toggle hidden>開く</span>
   </div>
   <div class="step-body">
     {{ caller() if caller else "" }}
@@ -34,58 +30,25 @@
 </section>
 {%- endmacro %}
 
-{#- カード。{% call ui.card("見出し", actions=...) %}本文{% endcall %} -#}
-{% macro card(title=None, subtitle=None, class="", id=None, level=2) -%}
-<section class="card {{ class }}" {% if id %}id="{{ id }}"{% endif %}>
+{#- カード。{% call ui.card("見出し", "説明") %}本文{% endcall %}。level は見出しの深さ -#}
+{% macro card(title=None, subtitle=None, level=2) -%}
+<section class="card">
   {%- if title %}
   <div class="card-head">
     <div>
       <h{{ level }} class="card-title">{{ title }}</h{{ level }}>
       {%- if subtitle %}<p class="card-subtitle">{{ subtitle }}</p>{% endif %}
     </div>
-    {%- if kwargs.actions %}<div class="btn-row">{{ kwargs.actions }}</div>{% endif %}
   </div>
   {%- endif %}
   {{ caller() if caller else "" }}
 </section>
 {%- endmacro %}
 
-{#- 状態タグ。label を渡すとその語で表示 -#}
-{% macro badge(state, label=None) -%}
+{#- 状態タグ -#}
+{% macro badge(state) -%}
 {%- set info = STATE_LABELS.get(state, (state, "gray")) -%}
-<span class="badge badge-{{ info[1] }} badge-{{ state }}">{{ label or info[0] }}</span>
-{%- endmacro %}
-
-{#- チップ列。items: [{"label","count","kind","href"(任意)}] または (label, count, kind) -#}
-{% macro chips(items, label="内訳") -%}
-<ul class="chips" aria-label="{{ label }}">
-  {%- for item in items %}
-  {%- if item is mapping %}{% set lb, cnt, kind, href = item.label, item.count, item.kind, item.href %}
-  {%- else %}{% set lb, cnt, kind, href = item[0], item[1], (item[2] if item|length > 2 else ''), None %}{% endif %}
-  <li>
-    {%- if href %}<a class="chip chip-{{ kind or 'plain' }}{{ ' is-zero' if cnt == 0 }}" href="{{ href }}">{% else %}<span class="chip chip-{{ kind or 'plain' }}{{ ' is-zero' if cnt == 0 }}">{% endif %}
-      {{ lb }}{% if cnt is not none %} <strong>{{ cnt }}</strong>{% endif %}
-    {%- if href %}</a>{% else %}</span>{% endif %}
-  </li>
-  {%- endfor %}
-</ul>
-{%- endmacro %}
-
-{#- 何もないときの表示 -#}
-{% macro empty_state(title, text=None, action_url=None, action_label=None, icon="inbox") -%}
-<div class="empty-state">
-  <svg class="empty-icon" viewBox="0 0 48 48" aria-hidden="true">
-    {%- if icon == "search" %}
-    <circle cx="21" cy="21" r="11" fill="none" stroke="currentColor" stroke-width="3"/><path d="m29 29 9 9" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
-    {%- else %}
-    <path d="M8 26 13 10h22l5 16v12H8z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/><path d="M8 26h10l2 4h8l2-4h10" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
-    {%- endif %}
-  </svg>
-  <p class="empty-title">{{ title }}</p>
-  {%- if text %}<p class="empty-text">{{ text }}</p>{% endif %}
-  {%- if action_url %}<a class="btn primary" href="{{ action_url }}">{{ action_label }}</a>{% endif %}
-  {{ caller() if caller else "" }}
-</div>
+<span class="badge badge-{{ info[1] }} badge-{{ state }}">{{ info[0] }}</span>
 {%- endmacro %}
 
 {#- ジョブの進捗。job: {"id","status","progress" or "progress_json", "message"}、url を渡すと app.js が自動で更新 -#}
@@ -109,16 +72,14 @@
 {#- セルグリッド（元のシートのプレビュー）。
     rows: [{"index": 行番号, "cells": [文字列...], "kind": "header|data|subtotal|note|continuation|excluded|title|blank",
             "hidden": bool, "strike": bool, "reason": str}] または 文字列の二重配列 -#}
-{% macro data_grid(rows, max_cols=None, caption=None, show_letters=True, cell_ids=False, class="") -%}
+{% macro data_grid(rows, max_cols=None, caption=None) -%}
 {%- set ncols = max_cols or (rows | map(attribute="cells") | map("length") | max if rows and rows[0] is mapping else (rows | map("length") | max if rows else 0)) -%}
-<div class="grid-wrap {{ class }}" tabindex="0" {% if caption %}aria-label="{{ caption }}"{% endif %}>
+<div class="grid-wrap" tabindex="0" {% if caption %}aria-label="{{ caption }}"{% endif %}>
   <table class="data-grid">
     {%- if caption %}<caption class="sr-only">{{ caption }}</caption>{% endif %}
-    {%- if show_letters %}
     <thead><tr><th class="corner" scope="col"></th>
       {%- for c in range(ncols) %}<th scope="col">{{ col_letter(c + 1) }}</th>{% endfor %}
     </tr></thead>
-    {%- endif %}
     <tbody>
     {%- for row in rows %}
       {%- if row is mapping %}{% set idx, cells = row.index, row.cells %}{% else %}{% set idx, cells = loop.index, row %}{% endif %}
@@ -126,13 +87,41 @@
         <th scope="row" class="rownum">{{ idx }}</th>
         {%- for c in range(ncols) %}
         {%- set v = cells[c] if c < cells|length else "" %}
-        <td {% if cell_ids %}data-cell="{{ col_letter(c + 1) }}{{ idx }}"{% endif %}>{{ v if v is not none else "" }}</td>
+        <td>{{ v if v is not none else "" }}</td>
         {%- endfor %}
       </tr>
     {%- endfor %}
     </tbody>
   </table>
 </div>
+{%- endmacro %}
+
+{#- 段の中に出す「処理中…」の1行（中身は static/app.js を通さず各画面の JS が書く） -#}
+{% macro work_line(name) -%}
+<p class="work-line" data-work="{{ name }}" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
+{%- endmacro %}
+
+{#- 元のシート・見本のシートの表示（views の _sheet_grids が作る grids）。
+    click_cells=True にすると、1回のクリックで表ごと項目にできるセルに目印を付ける（帳票登録）。 -#}
+{% macro sheet_grid(grids, click_cells=False) -%}
+{%- for g in grids %}
+<div class="sheet-grid" data-sheet="{{ g.name }}" {% if not loop.first %}hidden{% endif %}>
+  {% if g.truncated %}<p class="hint">大きいシートのため、先頭の一部だけ表示しています。</p>{% endif %}
+  {% if g.images %}<p class="hint">このシートに画像が{{ g.images }}件あります。</p>{% endif %}
+  <div class="grid-wrap" tabindex="0" aria-label="シート {{ g.name }}">
+    <table class="data-grid">
+      <thead><tr><th class="corner"></th>{% for l in g.letters %}<th scope="col">{{ l }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for row in g.rows %}
+        <tr><th scope="row" class="rownum">{{ row.index }}</th>
+        {% for c in row.cells %}<td data-cell="{{ c.coord }}"{% if c.rowspan > 1 %} rowspan="{{ c.rowspan }}"{% endif %}{% if c.colspan > 1 %} colspan="{{ c.colspan }}"{% endif %}{% if c.label %} class="is-label"{% endif %}{% if click_cells and c.coord in g.click_cells %} data-table-head="1" title="この表を1つの項目にします"{% endif %}>{{ c.text }}</td>{% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{%- endfor %}
 {%- endmacro %}
 
 {#- 行の色の凡例（一覧表の範囲確認） -#}
@@ -155,10 +144,10 @@
 {%- endmacro %}
 
 {#- ファイル選択（ドラッグ＆ドロップ可）。accept: ".xlsx,.xlsm" -#}
-{% macro file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False, required=True, id=None) -%}
-{%- set fid = id or ("drop-" ~ name) -%}
+{% macro file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False) -%}
+{%- set fid = "drop-" ~ name -%}
 <div class="file-drop" data-file-drop>
-  <input type="file" id="{{ fid }}" name="{{ name }}" {% if accept %}accept="{{ accept }}"{% endif %} {{ 'multiple' if multiple }} {{ 'required' if required }} class="file-drop-input">
+  <input type="file" id="{{ fid }}" name="{{ name }}" {% if accept %}accept="{{ accept }}"{% endif %} {{ 'multiple' if multiple }} required class="file-drop-input">
   <label for="{{ fid }}" class="file-drop-zone">
     <svg class="file-drop-icon" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 31V11m0 0-8 8m8-8 8 8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 29v8a3 3 0 0 0 3 3h24a3 3 0 0 0 3-3v-8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
     <span class="file-drop-label">{{ label }}</span>

@@ -82,25 +82,10 @@ def _count_connects(app, monkeypatch, iid) -> tuple[int, dict]:
 
 
 def _import_named(app, name: str, rows: dict) -> int:
-    """取り込み設定の名前は一意なので、2つの取り込みを作るために名前を変えて登録する。"""
-    spec = dict(SPEC, name=name)
-    with app.app_context():
-        conn = database.connect()
-        now = database.now()
-        try:
-            tid = conn.execute("INSERT INTO table_templates (name, created_at, updated_at) VALUES (?, ?, ?)",
-                               (name, now, now)).lastrowid
-            vid = conn.execute("INSERT INTO table_template_versions (template_id, version, spec_json, spec_hash,"
-                               " created_at) VALUES (?, 1, ?, 'h', ?)",
-                               (tid, json.dumps(spec, ensure_ascii=False), now)).lastrowid
-            iid = conn.execute("INSERT INTO table_imports (template_id, template_version_id, file_name, file_hash,"
-                               " stored_path, status, created_at, updated_at)"
-                               " VALUES (?, ?, 'T1.xlsx', 'x', 'x', 'preview', ?, ?)", (tid, vid, now, now)).lastrowid
-            conn.commit()
-        finally:
-            conn.close()
-        _write_rows(app, iid, rows)
-    return iid
+    """名前だけ変えた取り込みを1件作る（設定は取り込みの行が持つ）。"""
+    from tests.test_aiproc import _make_import
+
+    return _make_import(app, rows=rows, spec=dict(SPEC, name=name))
 
 
 def test_estimate_opens_db_a_constant_number_of_times(ai_app, fake, monkeypatch):
