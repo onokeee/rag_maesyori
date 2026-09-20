@@ -7,6 +7,7 @@
 <div id="formsPage" data-steps-open
      data-upload-url="{{ url_for('forms.upload') }}"
      data-discard-url="/forms/discard"
+     data-type-url="{{ url_for('forms.type_all') }}"
      data-finish-url="{{ url_for('forms.finish') }}">
 
   {#- 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）を先に伝える。
@@ -33,13 +34,12 @@
   {% endcall %}
 
   {% call ui.step("type", 2, "帳票の種類とシート", open=True) %}
-      <div class="doc-tabs" data-doc-tabs role="tablist" aria-label="取り込む帳票" hidden></div>
-      <div data-type-body><p class="muted">上で Excel を置くと、ここに帳票の種類と読み取るシートが出ます。</p></div>
+      <div data-type-body><p class="muted">上で Excel を置くと、ここに帳票の種類と読み取るシートが出ます。まとめて置いた帳票には、同じ帳票の種類とシートを使います。</p></div>
       {{ ui.work_line("read") }}
   {% endcall %}
 
   {% call ui.step("review", 3, "読み取り結果", open=True) %}
-      <div data-review-body><p class="muted">読み取ると、ここに元のシートと読み取った値が並びます。値はその場で直せます。</p></div>
+      <div data-review-body><p class="muted">読み取ると、ここに元のシートと読み取った値が並びます（まとめて置いた帳票は縦に全部並びます）。値はその場で直せます。</p></div>
   {% endcall %}
 
   {% call ui.step("finish", 4, "確定してダウンロード", open=True) %}

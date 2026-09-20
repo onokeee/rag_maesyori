@@ -57,8 +57,7 @@ SCOPE_LABELS = {"pending": "まだ整形していない行と、内容が変わ�
 # CSV の文字コード・区切り文字は画面の選択肢だけを受け付ける（他の値は読み込みで落ちて画面が開けなくなるため）
 # ダウンロードでデータが消えることの案内（design.md 3.3）
 DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この取り込みのデータはサーバーから消えます"
-                           "（もう一度ダウンロードすることはできません）。正規化CSVは zip の"
-                           "「管理用_RAGには入れない」フォルダにも入っています。")
+                           "（もう一度ダウンロードすることはできません）。")
 DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込みのデータはサーバーから消えます。"
                               "もう一度ダウンロードすることはできません。")
 ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
@@ -1177,7 +1176,7 @@ def download_zip(import_id: int):
         flash(TRIAL_BUSY_MESSAGE, "error")
         return redirect(url_for("tables.new"))
     try:
-        data = pipeline.build_download(import_id, imp, spec)
+        data = pipeline.build_download(import_id)
     except FileNotFoundError:
         # 同時に押した別のダウンロードが渡し終えてデータを消した（ダブルクリックなど）。500 ではなく「ダウンロード済み」。
         return _handout_lost(import_id, "ダウンロード")
@@ -1196,18 +1195,6 @@ def _handout_lost(import_id: int, what: str):
         abort(404)
     flash(f"読み込み直しが始まったため、{what}を取りやめました。確定し直してからもう一度押してください", "error")
     return redirect(url_for("tables.new"))
-
-
-@bp.get("/imports/<int:import_id>/normalized.csv")
-def download_csv(import_id: int):
-    imp = _load_import(import_id)
-    spec = _spec_for(imp)
-    if spec is None or imp["status"] not in ("preview", "confirmed"):
-        abort(404)
-    data = outputs.normalized_csv(spec, pipeline.load_rows(import_id))
-    name = f"{_download_base(imp, spec)}_正規化データ.csv"
-    return set_download_name(
-        send_file(io.BytesIO(data), mimetype="text/csv", as_attachment=True, download_name=name), name, "records")
 
 
 # ---- 段の割り当て ---------------------------------------------------------------------------

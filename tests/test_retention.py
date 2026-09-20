@@ -202,7 +202,7 @@ def test_downloading_the_table_zip_removes_everything(app, client):
 
     res = client.get(f"/tables/imports/{import_id}/download.zip")
     assert res.status_code == 200 and res.mimetype == "application/zip"
-    assert "RAG投入用/トラブル対応一覧_2026-08.md" in zipfile.ZipFile(io.BytesIO(res.data)).namelist()
+    assert "トラブル対応一覧_2026-08.md" in zipfile.ZipFile(io.BytesIO(res.data)).namelist()
 
     assert not stored.exists() and not folder.exists()
     assert _uploaded_files(app) == []
@@ -329,9 +329,9 @@ def test_only_the_confirmed_forms_of_a_batch_can_be_downloaded(app, client):
     with app.app_context():
         pending = db.create_document("2.xlsx", "0" * 64, "documents/2.xlsx", batch_id="B", batch_order=1)
 
-    # 未確定が残っていても、確定済みだけを渡せる（作業が止まらない）
+    # 画面のボタンは「残りも確定してから渡す」1つだけ。それでも zip に入るのは確定済みの分だけ
     page = _finish(client, [first, pending], current=first)["html"]
-    assert "確定済み1件だけをダウンロード（zip）" in page
+    assert "残り1件も確定して、まとめてダウンロード（zip）" in page
 
     res = client.get("/forms/batches/B/download.zip")
     assert res.status_code == 200 and res.mimetype == "application/zip"
@@ -768,7 +768,7 @@ def test_a_ranged_download_gets_the_whole_file_and_removes_the_item(app, client)
     import_id = _confirmed_import(app, client)
     res = client.get(f"/tables/imports/{import_id}/download.zip", headers={"Range": "bytes=0-99"})
     assert res.status_code == 200
-    assert "RAG投入用/" in " ".join(zipfile.ZipFile(io.BytesIO(res.data)).namelist())
+    assert "トラブル対応一覧_2026-08.md" in zipfile.ZipFile(io.BytesIO(res.data)).namelist()
     with app.app_context():
         assert store.get_import(import_id) is None
 

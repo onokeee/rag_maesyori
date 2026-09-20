@@ -185,31 +185,6 @@ def _code_entity_spec():
     ], "period": {"date_column": "occurred_at"}})
 
 
-def test_summary_display_name_comes_from_the_group_not_the_first_row():
-    from tables.spec import SummarySpec
-    from tables.summaries import entity_fiscal_year_summaries, month_summaries
-
-    spec = _code_entity_spec()
-    records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment="CLN-502"),
-               _rec("A-2", record_no="A-2", occurred_at="2026-08-04", equipment="枚葉洗浄 2号機（CLN-502）"),
-               _rec("A-3", record_no="A-3", occurred_at="2026-09-04", equipment="CLN-502")]
-    fy = entity_fiscal_year_summaries(records, spec, None, SummarySpec("entity_fiscal_year"))
-    assert [(s["entity"], s["display"]) for s in fy] == [("CLN-502", "枚葉洗浄 2号機（CLN-502）")]
-    months = month_summaries(records, spec, None, SummarySpec("month"))
-    assert [m["top"][0]["display"] for m in months] == ["枚葉洗浄 2号機（CLN-502）"] * 2
-
-
-# ---- R6-MD-2: 整数だけの列の平均を整数に丸めない ----------------------------------------------------------------
-
-def test_average_of_integer_values_keeps_one_decimal():
-    from tables.summaries import fmt_average
-
-    assert fmt_average(9, 18, True) == 0.5
-    assert fmt_average(57, 39, True) == 1.5
-    assert fmt_average(150, 2, True) == 75 and isinstance(fmt_average(150, 2, True), int)
-    assert fmt_average(0, 3, True) == 0
-
-
 # ---- R6-MD-4: 「0:28以降、…」の時刻は見出しに残す ------------------------------------------------------------------
 
 @pytest.mark.parametrize("text, expected", [
@@ -256,18 +231,15 @@ def test_write_helpers_do_not_create_a_missing_folder(tmp_path):
 # ---- R6-SEC-1: 全角の ＝ ＋ － ＠ で始まるシート名・ファイル名も式にしない --------------------------------------------
 
 def test_full_width_formula_prefixes_are_guarded():
-    from tables.outputs import guard_formula, import_report_items, normalized_csv, report_csv
+    from tables.checks import Issue
+    from tables.outputs import guard_formula, issues_csv
 
     for s in ("＝SUM(1,1)", "＋1", "－1", "＠SUM(1,1)"):
         assert guard_formula(s) == "'" + s
     assert guard_formula("設備") == "設備"
-    spec = _code_entity_spec()
-    rec = {"key": "A-1", "values": {"record_no": "A-1"}, "source": {"file": "＋1.xlsx", "sheet": "＝SUM(1,1)", "row": 2}}
-    rows = list(csv.reader(io.StringIO(normalized_csv(spec, [rec]).decode("utf-8-sig"))))
-    assert rows[1][-3:] == ["'＋1.xlsx", "'＝SUM(1,1)", "2"]
-    imp = {"id": 1, "file_name": "＋1.xlsx", "stats": {"sheet": "＝SUM(1,1)"}}
-    report = dict(csv.reader(io.StringIO(report_csv(import_report_items(imp, spec, 1)).decode("utf-8-sig"))))
-    assert report["ファイル名"] == "'＋1.xlsx" and report["シート"] == "'＝SUM(1,1)"
+    rows = list(csv.reader(io.StringIO(issues_csv([Issue("warning", "x", "＝SUM(1,1)", row=2, column="＋1")])
+                                       .decode("utf-8-sig"))))
+    assert rows[1][2:] == ["2", "'＋1", "'＝SUM(1,1)"]
 
 
 
@@ -428,7 +400,7 @@ def test_ditto_in_the_record_number_and_person_columns_is_filled(tmp_path):
     assert [r.key for r in records] == ["TR-001", "TR-001#2", "TR-001#3", "TR-002", "TR-002#2"]
     assert stats.ditto_filled.get("record_no") == 3 and stats.ditto_filled.get("worker") == 2
     assert "〃" not in stats.duplicate_keys
-    text = "\n".join(f.text for f in render_all(spec, [r.to_dict() for r in records], {}, {}))
+    text = "\n".join(f.text for f in render_all(spec, [r.to_dict() for r in records], {}))
     assert "〃" not in text and "同上" not in text
 
 

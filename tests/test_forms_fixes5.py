@@ -7,9 +7,10 @@ from tests.test_forms_fixes import _confirmed_doc, _review_html
 def test_enter_in_the_review_form_submits_nothing(app):
     doc_id = _confirmed_doc(app, "1.xlsx")
     html = _review_html(app, doc_id)
-    form = html[html.index('id="reviewForm"'):html.index("</form>", html.index('id="reviewForm"'))]
+    start = html.index(f'id="reviewForm-{doc_id}"')
+    form = html[start:html.index("</form>", start)]
     # 暗黙の送信（Enter）を止める。送信ボタンも action も持たせない（値は途中保存で送る）
-    assert '<form id="reviewForm" onsubmit="return false">' in html
+    assert f'<form id="reviewForm-{doc_id}" data-review-form onsubmit="return false">' in html
     assert 'type="submit"' not in form and "formaction" not in form and "action=" not in form
 
 

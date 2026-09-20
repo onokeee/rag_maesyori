@@ -1,4 +1,4 @@
-"""一覧表の Markdown 生成（記録ファイル・集計ファイル・データセット説明）。
+"""一覧表の Markdown 生成（記録ファイル）。
 
 決まり（docs/design.md 6章）: 同じ入力から同じバイト列。生成日時・取込ID・行番号の一覧を本文に書かない。
 レコード内に空行を入れない。パイプ表を使わない。出す列の中身は1文字も削らない（人名・コードの列も出す）。
@@ -14,12 +14,11 @@ from datetime import date
 
 from core.mdtext import escape_md_line, estimate_tokens, join_blocks, md_bullet
 from core.naming import md_filename
-from tables.spec import TableSpec, base_date_from
-from tables.summaries import (
-    category_column, dataset_counts, entity_columns, entity_display, entity_fiscal_year_summaries, entity_value,
-    fmt_measure, fmt_number, is_month, measure_columns, month_first_day, month_label, month_last_day, month_summaries,
+from tables.records import (
+    entity_columns, entity_display, entity_value, fmt_number, is_month, month_first_day, month_label, month_last_day,
     unit_label,
 )
+from tables.spec import TableSpec, base_date_from
 
 # 記録1件の上限（推定トークン）。これを超えたら「（続きn/m）」に分ける。
 # 取り込み側の設定は見えないので、狭い固定窓（600/overlap 50）でも記録が途中で切られない大きさにする。
@@ -32,7 +31,7 @@ TITLE_TEXT_CHARS = 40
 class MdFile:
     name: str
     text: str
-    kind: str  # dataset/records/summary
+    kind: str = "records"  # 作るのは記録ファイルだけ（集計・データセット説明は外した）
 
     @property
     def data(self) -> bytes:
@@ -535,61 +534,18 @@ class _Names:
         return name
 
 
-def render_all(spec: TableSpec, records: list[dict], ai_results: dict | None, meta: dict | None) -> list[MdFile]:
+def render_all(spec: TableSpec, records: list[dict], ai_results: dict | None) -> list[MdFile]:
     """全 md ファイルを作る（決定的）。records は確定済み全行（RecordRow.to_dict の形）。
 
-    meta: {"coverage": {"start": "YYYY-MM", "end": "YYYY-MM"}}（取り込み範囲。なければ記録の日付から）
+    作るのは RAG に入れる記録ファイルだけ（集計・データセット説明は 2026-09-20 に外した。docs/design.md 6.3）。
     """
-    meta = dict(meta or {})
     md = spec.markdown or {}
     names = _Names()
-    prefix = spec.file_prefix
-    coverage = _coverage(meta.get("coverage"), records, spec)
-    files: list[MdFile] = []
     time_col = _time_column(spec)
     ordered = sorted(records, key=lambda r: _sort_key(r, spec, time_col))
-
-    if md.get("dataset_card", True):
-        name = names.make([prefix, "00", "データセット説明"])
-        files.append(MdFile(name, render_dataset_card(spec, ordered, coverage), "dataset"))
-
-    if md.get("records", True):
-        files += _record_files(spec, ordered, ai_results or {}, names)
-
-    for summary in spec.summaries():
-        if summary.id == "month":
-            for item in month_summaries(ordered, spec, coverage, summary):
-                name = names.make([prefix, "集計", "月次", item["month"]])
-                files.append(MdFile(name, _render_month_summary(spec, item, coverage), "summary"))
-        elif summary.id == "entity_fiscal_year":
-            entity, _label = entity_columns(spec)
-            group_word = "設備別" if (entity is not None and entity.key.startswith("equipment")) or entity is None \
-                else f"{entity.display}別"
-            for item in entity_fiscal_year_summaries(ordered, spec, coverage, summary):
-                name = names.make([prefix, "集計", group_word, item["entity"], f"{item['fiscal_year']}年度"])
-                files.append(MdFile(name, _render_entity_fy(spec, item, coverage), "summary"))
-    return files
-
-
-def _coverage(coverage: dict | None, records: list[dict], spec: TableSpec) -> dict:
-    counts = dataset_counts(records, spec)
-    start = (coverage or {}).get("start") or (counts["months"][0] if counts["months"] else None)
-    end = (coverage or {}).get("end") or (counts["months"][-1] if counts["months"] else None)
-    if counts["months"]:
-        start = min(start, counts["months"][0]) if start else counts["months"][0]
-        end = max(end, counts["months"][-1]) if end else counts["months"][-1]
-    # 最初と最後の記録の日（月の途中で始まる・終わるデータを、月全体と書かないため）
-    first = counts["date_min"] if len(str(counts["date_min"] or "")) == 10 else None
-    last = counts["date_max"] if len(str(counts["date_max"] or "")) == 10 else None
-    return {"start": start, "end": end, "first_date": first, "last_date": last}
-
-
-def _period_text(start_month: str, end_month: str, coverage: dict) -> str:
-    """start_month〜end_month の期間。取り込んだ記録の最初・最後の月なら、実際の最初・最後の日で書く。"""
-    first, last = coverage.get("first_date"), coverage.get("last_date")
-    a = first if first and first[:7] == start_month else month_first_day(start_month)
-    b = last if last and last[:7] == end_month else month_last_day(end_month)
-    return f"{a}〜{b}"
+    if not md.get("records", True):
+        return []
+    return _record_files(spec, ordered, ai_results or {}, names)
 
 
 def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names: _Names) -> list[MdFile]:
@@ -660,203 +616,5 @@ def join_file(blocks: list[list[str]]) -> str:
     return join_blocks(expanded)
 
 
-# ---- データセット説明 ------------------------------------------------------------------------
-
-def _range_text(coverage: dict) -> str:
-    start, end = coverage.get("start"), coverage.get("end")
-    if not start or not end:
-        return "日付なし"
-    return _period_text(start, end, coverage)
-
-
-def render_dataset_card(spec: TableSpec, records: list[dict], coverage: dict) -> str:
-    counts = dataset_counts(records, spec)
-    name = spec.name
-    entity, label = entity_columns(spec)
-    measures = measure_columns(spec)
-    cat = category_column(spec)
-    entity_word = _entity_label_name(spec)
-    head = [f"# データセット説明：{name}"]
-    body: list[str] = []
-    body.append(f"- データ種別: 表データ（1行＝1件の{name}）をRAG用に変換した資料群の説明")
-    body.append(f"- 取り込み範囲: {_range_text(coverage)}（記録 {counts['records']:,}件）")
-    if spec.description:
-        body += md_bullet("説明", spec.description)
-    if entity is not None:
-        body.append(f"- 記録に出てくる{entity_word}: {counts['entities']:,}件（期間中に1件以上の記録がある{entity_word}だけです。"
-                    f"{entity_word}の一覧ではありません）")
-
-    structure = ["## 資料の構成"]
-    md = spec.markdown or {}
-    if md.get("records", True):
-        if md.get("group_by") == "entity_month":
-            structure.append(f"- 記録（{entity_word}×月）: 1件ごとの内容。各ファイルには、その{entity_word}・その月の記録を全件載せています"
-                             "（長い記録は「（続きn/m）」に分かれていますが、内容は削っていません）。")
-        else:
-            structure.append("- 記録（月ごと）: 1件ごとの内容。各ファイルには、その月の記録を全件載せています"
-                             "（長い記録は「（続きn/m）」に分かれていますが、内容は削っていません）。")
-    measure_words = "・".join(d for _k, d, _u in measures)
-    for summary in spec.summaries():
-        if summary.id == "month":
-            text = f"- 月次集計: 月ごとの全{entity_word}の件数"
-            if measure_words:
-                text += f"、{measure_words}の合計"
-            if entity is not None:
-                text += f"、上位{summary.top_n}件の{entity_word}"
-            if cat is not None:
-                text += f"、{cat.display}の内訳"
-            structure.append(text + "。")
-        elif summary.id == "entity_fiscal_year":
-            text = f"- {entity_word}別年度集計: {entity_word}ごとの年度内の件数"
-            if measure_words:
-                text += f"、{measure_words}の合計・平均"
-            text += "、月別の内訳"
-            if cat is not None:
-                text += f"、{cat.display}の内訳"
-            structure.append(text + "。")
-
-    notes = ["## 数値についての注意"]
-    units = [s.id for s in spec.summaries()]
-    unit_words = []
-    if "entity_fiscal_year" in units:
-        unit_words.append(f"{entity_word}×年度")
-    if "month" in units:
-        unit_words.append(f"月×全{entity_word}")
-    if unit_words:
-        notes.append(f"- 件数・合計・平均は、集計ファイルにある単位（{'、'.join(unit_words)}）でのみ、アプリが元データから計算しています。")
-    notes.append("- それ以外の条件（例: 特定の区分だけの月別の平均）の件数・合計は、この資料群からは確定できません。")
-    if entity is not None:
-        notes.append(f"- 記録が1件もない{entity_word}は、この資料群には出てきません。")
-
-    columns = ["## 列の意味"]
-    for col in spec.columns:
-        if _is_hidden(col, spec):
-            continue
-        text = col.description or f"元の見出し「{col.headers[0] if col.headers else col.display}」"
-        if col.unit and col.type == "number":
-            text += f"（単位: {unit_label(col.unit)}）"
-        columns += md_bullet(col.display, text)
-    # 画面で「出さない」にした列は名前だけ書く（出さない列があること自体は分かるように）
-    omitted = [col.display for col in spec.columns if col.md == "omit"]
-    if omitted:
-        columns.append(f"- 記録に出していない列: {'、'.join(omitted)}"
-                       "（取り込み設定で「出さない」にした列です。元の値は管理用の正規化CSVにあります）")
-
-    questions = ["## 答えられる質問の例"]
-    no_questions = ["## 答えられない質問の例"]
-    m0 = measures[0][1] if measures else None
-    questions.append(f"- 特定の{entity_word}で過去に起きた記録と、その内容（検索で取り出された記録の範囲。全件の列挙は保証しません）")
-    if "month" in units:
-        questions.append(f"- ある月の{name}の件数" + (f"、{m0}の合計、{m0}が長い{entity_word}（上位{spec.summaries()[0].top_n}件）" if m0 else ""))
-    if "entity_fiscal_year" in units and entity is not None:
-        questions.append(f"- ある{entity_word}のある年度の件数" + (f"と{m0}の合計" if m0 else "") + "、月別の件数")
-    no_questions.append("- 集計ファイルにない条件の件数・合計・平均（例: 複数の条件を組み合わせた件数）")
-    if entity is not None:
-        no_questions.append(f"- 記録が1件もなかった{entity_word}（{entity_word}の一覧を持っていません）")
-    return join_file([_Block(head[0], body), structure, notes, columns, questions, no_questions])
-
-
-# ---- 集計ファイル --------------------------------------------------------------------------
-
-def _measure_meta(spec: TableSpec) -> dict[str, tuple[str, str]]:
-    return {k: (d, u) for k, d, u in measure_columns(spec)}
-
-
-def _render_month_summary(spec: TableSpec, item: dict, coverage: dict) -> str:
-    name = spec.name
-    month = item["month"]
-    ml = month_label(month)
-    mm = _measure_meta(spec)
-    entity, _label = entity_columns(spec)
-    entity_word = _entity_label_name(spec)
-    cat = category_column(spec)
-    head = f"# {name} 月次集計 {ml}"
-    body = [
-        f"- データ種別: {name}からアプリが計算した集計値（AIは使っていません）",
-        f"- 集計対象: {_period_text(month, month, coverage)} の記録（{name}の取り込み範囲: {_range_text(coverage)}）",
-    ]
-    overview = ["## 概要", f"- {ml}の{name}の記録は{item['count']:,}件です。"]
-    for key, total in item["sums"].items():
-        display, unit = mm.get(key, (key, ""))
-        overview.append(f"- {ml}の{display}の合計は{fmt_measure(total, unit, with_hours=True)}です。")
-    blocks: list = [_Block(head, body), overview]
-    if item["count"] and item["top"]:
-        rank_key = item["rank_key"]
-        if rank_key:
-            display, unit = mm.get(rank_key, (rank_key, ""))
-            top = [f"## {display}が長い{entity_word}（上位{len(item['top'])}件）"]
-        else:
-            top = [f"## 記録が多い{entity_word}（上位{len(item['top'])}件）"]
-        for n, t in enumerate(item["top"], start=1):
-            parts = []
-            if rank_key:
-                display, unit = mm.get(rank_key, (rank_key, ""))
-                parts.append(f"{display} {fmt_measure(t['sum'] or 0, unit)}")
-            parts.append(f"{t['count']:,}件")
-            if t["main_category"] and cat is not None:
-                parts.append(f"主な{cat.display}: {t['main_category']}")
-            top.append(f"- {n}位: {t['display']} {'、'.join(parts)}")
-        blocks.append(top)
-    if item["count"] and item["categories"] and cat is not None:
-        cats = [f"## {cat.display}の内訳"]
-        rank_key = item["rank_key"]
-        for c in item["categories"]:
-            text = f"{c['count']:,}件"
-            if rank_key and c["sum"] is not None:
-                display, unit = mm.get(rank_key, (rank_key, ""))
-                text += f"、{display} {fmt_measure(c['sum'], unit)}"
-            cats += md_bullet(c["name"], text)
-        blocks.append(cats)
-    return join_file(blocks)
-
-
-def _render_entity_fy(spec: TableSpec, item: dict, coverage: dict) -> str:
-    name = spec.name
-    fy = item["fiscal_year"]
-    mm = _measure_meta(spec)
-    entity, label = entity_columns(spec)
-    eid = item["entity"]
-    start, end = item["range"]
-    period_words = f"{month_label(start)}〜{month_label(end)}"
-    head = f"# {name} {_entity_label_name(spec)}別年度集計 {item['display']} {fy}年度"
-    body = [f"- データ種別: {name}からアプリが計算した集計値（AIは使っていません）"]
-    body += md_bullet(entity.display, eid)
-    if label is not None and item["name"]:
-        body += md_bullet(label.display, item["name"])
-    body.append(f"- 集計対象: {_period_text(start, end, coverage)} の記録（{name}の取り込み範囲: {_range_text(coverage)}）")
-    overview = ["## 概要"]
-    metrics = item["metrics"]
-    overview.append(f"- {eid}の{fy}年度（{period_words}）の記録は{item['count']:,}件です。")
-    for key in item["keys"]:
-        display, unit = mm.get(key, (key, ""))
-        st = item["stats"][key]
-        if not st["n"]:
-            overview.append(f"- {display}の値はありません。")  # 空欄は 0 ではない
-            continue
-        text = f"- {display}の合計は{fmt_measure(st['sum'], unit, with_hours=True)}"
-        if key in metrics["avg"] and st["avg"] is not None:
-            base = f"（値のある{st['n']:,}件）" if st["n"] < st.get("rows", st["n"]) else ""
-            text += f"、1件あたり平均{base}{fmt_measure(st['avg'], unit)}"
-        overview.append(text + "です。")
-        if key in metrics["max"] and st["max"]:
-            overview.append(f"- 1件の{display}の最大は{fmt_measure(st['max']['value'], unit)}（{month_label(st['max']['month'])}）です。")
-    if item["categories"]:
-        cat = category_column(spec)
-        detail = "、".join(f"{c['name']} {c['count']:,}件" for c in item["categories"])
-        overview.append(f"- {cat.display}の内訳: {detail}。")
-    months = ["## 月別"]
-    for mi in item["months"]:
-        parts = [f"{mi['count']:,}件"]
-        for key in item["keys"]:
-            display, unit = mm.get(key, (key, ""))
-            if key in metrics["sum"]:
-                if mi["count"] and not mi["has_value"][key]:
-                    parts.append(f"{display} 値なし")  # 記録はあるが値がすべて空欄（0 と書かない）
-                else:
-                    parts.append(f"{display} {fmt_measure(mi['sums'][key], unit)}")
-        months.append(f"- {month_label(mi['month'])}: {'、'.join(parts)}")
-    return join_file([_Block(head, body), overview, months])
-
-
 __all__ = ["MdFile", "ai_point_lines", "parse_log_cell", "people_index_for", "record_block", "record_blocks",
-           "record_title", "render_all", "render_dataset_card"]
+           "record_title", "render_all"]

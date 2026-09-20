@@ -283,15 +283,19 @@ input[type=checkbox], input[type=radio] { width: 1rem; height: 1rem; accent-colo
      .step.is-open      いま作業する段（開いている）
      .step.is-done      済んだ段（見出しに ✓ と要約が出る。畳んでも開き直せる）
    開け閉ては static/app.js の window.ragSections が行う。 */
+/* overflow は hidden にしない（段の中の position: sticky（読み取り結果の見出し・元のシート）が効かなくなる）。
+   角の丸みは見出しの側で付ける。 */
 .step {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
-  margin-bottom: var(--sp-4); box-shadow: var(--shadow-sm); overflow: hidden;
+  margin-bottom: var(--sp-4); box-shadow: var(--shadow-sm);
 }
 .step > .step-head {
   display: flex; align-items: center; gap: var(--sp-3); width: 100%; text-align: left;
   padding: var(--sp-3) var(--sp-4); background: var(--surface-2); border: 0; border-bottom: 1px solid transparent;
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
   font: inherit; color: var(--muted); cursor: default;
 }
+.step:not(.is-open) > .step-head { border-radius: calc(var(--radius) - 1px); }
 .step > .step-head > .step-title { font-size: 1.05rem; font-weight: 700; margin: 0; }
 .step > .step-head > .step-summary { color: var(--muted); font-size: .88rem; margin: 0; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -342,18 +346,21 @@ details.sub-block[open] > summary.sub-title { margin-bottom: var(--sp-3); }
   margin: var(--sp-3) 0 0; }
 .work-line[hidden] { display: none; }
 
-/* まとめて置いた帳票の切り替え（1件ずつ同じ画面で読み取る） */
-.doc-tabs { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
-.doc-tabs[hidden] { display: none; }
-.doc-tab {
-  border: 1px solid var(--border); background: var(--surface); color: var(--text-2); border-radius: 999px;
-  padding: .2rem .8rem; font: inherit; font-size: .85rem; cursor: pointer; max-width: 22rem;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+/* まとめて置いた帳票の一覧（下の選択は全部に効く。合わないファイルは ✕ で外す） */
+.file-chips { list-style: none; display: flex; flex-wrap: wrap; gap: var(--sp-2); padding: 0; margin: 0 0 var(--sp-3); }
+.file-chip {
+  display: flex; align-items: center; gap: .35rem; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); padding: .15rem .3rem .15rem .7rem; font-size: .85rem; max-width: 24rem;
 }
-.doc-tab:hover { border-color: var(--primary-line); }
-.doc-tab.is-current { background: var(--primary-soft); border-color: var(--primary-line); color: var(--primary-dark); font-weight: 700; }
-.doc-tab.is-done { background: var(--ok-soft); border-color: var(--ok-line); color: var(--ok); }
-.doc-tab.is-done.is-current { box-shadow: inset 0 0 0 1px var(--ok); }
+.file-chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chip-count { color: var(--muted); font-size: .8rem; white-space: nowrap; }
+.file-chip.is-weak { border-color: var(--warn-line); background: var(--warn-soft); }
+.file-chip.is-weak .file-chip-count { color: var(--warn); }
+.file-chip-drop {
+  border: 0; background: transparent; color: var(--muted); cursor: pointer; font: inherit; line-height: 1;
+  padding: .25rem .4rem; border-radius: 999px;
+}
+.file-chip-drop:hover { background: var(--danger-soft); color: var(--danger); }
 
 /* 帳票の種類とシートを横に並べる */
 .type-sheet-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: var(--sp-4); }
@@ -482,6 +489,28 @@ details summary { cursor: pointer; color: var(--primary); }
 }
 
 /* ---- 帳票: 読み取り結果の確認・修正 ---- */
+/* まとめて置いた帳票は、1件ずつの塊（.review-doc）を縦に並べてスクロールして見ていく */
+.batch-bar {
+  position: sticky; top: var(--topbar-h); z-index: 6; display: flex; align-items: center; gap: var(--sp-3);
+  background: var(--primary-soft); border: 1px solid var(--primary-line); border-radius: var(--radius);
+  padding: .45rem var(--sp-4); margin-bottom: var(--sp-3);
+}
+.batch-bar-text { margin: 0; font-weight: 600; }
+.review-doc { margin-bottom: var(--sp-5); }
+.review-doc + .review-doc { border-top: 2px solid var(--border); padding-top: var(--sp-4); }
+.review-doc-head {
+  position: sticky; top: var(--topbar-h); z-index: 5; display: flex; align-items: center; gap: var(--sp-2);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: .4rem var(--sp-3); margin-bottom: var(--sp-3);
+}
+.review-stack.is-batch .review-doc-head { top: calc(var(--topbar-h) + 2.6rem); }
+.review-stack.is-batch .split-pane.sticky { top: calc(var(--topbar-h) + 5.6rem); max-height: calc(100vh - var(--topbar-h) - 7rem); }
+.review-doc-no {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 1.6rem; height: 1.6rem;
+  border-radius: 999px; background: var(--primary); color: #fff; font-size: .8rem; font-weight: 700;
+}
+.review-doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 26rem; }
+.review-doc.is-jumped .review-doc-head { box-shadow: 0 0 0 2px var(--primary); }
 .review-toolbar { margin-bottom: var(--sp-3); align-items: center; }
 .review-toolbar button.chip { cursor: pointer; font: inherit; }
 .review-field { padding: .5rem .6rem; border-radius: 6px; border: 1px solid transparent; margin-bottom: .4rem; }

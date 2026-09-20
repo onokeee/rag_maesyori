@@ -210,25 +210,6 @@ def test_ai_results_of_another_import_leave_the_preview_signature_alone(app, cli
         assert pipeline._preview_signature(import_id, imp, spec) != before
 
 
-# ---- md3-4: 月の途中で終わるデータの期間 ----------------------------------------------------------
-
-def test_partial_first_and_last_month_are_stated_with_actual_dates():
-    from tables.markdown import render_all
-    from tables.spec import spec_from_dict
-    from tests.test_tables_pipe import _rec, list_spec_dict
-
-    spec = spec_from_dict(list_spec_dict())
-    records = [_rec(f"TR-{i}", record_no=f"TR-{i}", occurred_at=d, equipment_id="CMP-101", symptom="停止", downtime=10)
-               for i, d in enumerate(["2026-07-15", "2026-08-03", "2026-09-10"])]
-    files = {f.name: f.text for f in render_all(spec, records, {}, {"coverage": {}})}
-    card = next(c for n, c in files.items() if n.endswith("データセット説明.md"))
-    assert "取り込み範囲: 2026-07-15〜2026-09-10" in card
-    sept = next(c for n, c in files.items() if "集計_月次_2026-09" in n)
-    aug = next(c for n, c in files.items() if "集計_月次_2026-08" in n)
-    assert "集計対象: 2026-09-01〜2026-09-10 の記録" in sept
-    assert "集計対象: 2026-08-01〜2026-08-31 の記録" in aug
-
-
 # ---- F2: Excel で計算されていない数式 -------------------------------------------------------------
 
 def test_uncached_formulas_are_warned(tmp_path):
@@ -281,7 +262,7 @@ def test_cached_formula_values_are_not_warned(tmp_path):
 
 # ---- F3: 打ち間違えた遠い年の日付 ----------------------------------------------------------------
 
-def test_far_off_date_is_warned_and_does_not_spread_empty_month_files():
+def test_far_off_date_is_warned():
     from tables.markdown import render_all
     from tables.spec import spec_from_dict
     from tests.test_tables_pipe import _rec, list_spec_dict
@@ -295,18 +276,17 @@ def test_far_off_date_is_warned_and_does_not_spread_empty_month_files():
     issues = run_checks(records, spec, {})
     outlier = [i for i in issues if i.code == "date_outlier"]
     assert len(outlier) == 1 and "12行目（2052-08-11）" in outlier[0].message
-    monthly = [f.name for f in render_all(spec, records, {}, {"coverage": {}}) if "_集計_月次_" in f.name]
-    assert len(monthly) == 2
+    # 記録ファイルは記録のある月だけ（間の月は作らない）
+    assert sorted(f.name for f in render_all(spec, records, {})) == ["トラブル対応一覧_2025-08.md",
+                                                                     "トラブル対応一覧_2052-08.md"]
 
 
-def test_short_gaps_between_months_are_still_filled_with_zero_months():
+def test_short_gaps_between_months_are_not_warned():
     from tables.spec import spec_from_dict
-    from tables.summaries import coverage_months
     from tests.test_tables_pipe import _rec, list_spec_dict
 
     spec = spec_from_dict(list_spec_dict())
     records = [_rec("a", occurred_at="2025-01-10"), _rec("b", occurred_at="2025-06-10")]
-    assert coverage_months({}, records, spec) == [f"2025-{m:02d}" for m in range(1, 7)]
     assert not [i for i in run_checks(records, spec, {}) if i.code == "date_outlier"]
 
 

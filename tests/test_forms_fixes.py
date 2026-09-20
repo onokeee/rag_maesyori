@@ -179,15 +179,15 @@ def test_a_partly_confirmed_batch_does_not_say_everything_is_deleted(app, client
     body = _finish(client, [first, pending], current=first)
     assert body["confirmed"] == 1 and body["total"] == 2 and body["next_id"] == pending
     page = body["html"]
-    assert "このまとまりの帳票のデータはサーバーからすべて消えます" not in page
-    assert "確定済みの1件だけを zip でダウンロードします" in page and "未確定の1件は残ります" in page
-    assert "確定済み1件だけをダウンロード（zip）" in page
+    # 未確定が残っているときは、その分もこのボタンで確定してから渡すと書く
+    assert "まだ確定していない1件も確定してから、2件をまとめて zip でダウンロードします" in page
+    assert "残り1件も確定して、まとめてダウンロード（zip）" in page
 
     # すべて確定すれば、まとめてのダウンロードだけになる
     with app.app_context():
         db.update_document(pending, data_json=_extraction(), confirmed_json=_extraction())
     page = _finish(client, [first, pending], current=first)["html"]
-    assert "まとめて Markdown をダウンロード（zip）" in page and "確定済み1件だけ" not in page
+    assert "まとめて Markdown をダウンロード（zip）" in page and "残り1件も確定して" not in page
     assert "このまとまりの帳票のデータはサーバーからすべて消えます" in page
 
 
@@ -448,7 +448,8 @@ def test_batch_progress_counts_the_confirmed_forms(app, client):
         db.update_document(ids[1], confirmed_json=None)
     body = _finish(client, ids, current=ids[0])
     assert body["confirmed"] == 1 and body["next_id"] == ids[1]
-    assert "確定済み <strong>1</strong> / 2 件" in body["html"] and "次の帳票へ（残り1件）" in body["html"]
+    assert "確定済み <strong>1</strong> / 2 件" in body["html"]
+    assert "残り1件も確定して、まとめてダウンロード（zip）" in body["html"]
 
 
 def test_upload_errors_do_not_put_the_file_name_in_the_session(app, client, sample_dir):

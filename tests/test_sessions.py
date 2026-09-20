@@ -30,8 +30,7 @@ def test_another_browser_cannot_see_or_delete_an_import(app, client, other_clien
     import_id = upload_csv(client, "他人の一覧.csv")
 
     for path in (f"/tables/imports/{import_id}/panel/source", f"/tables/imports/{import_id}/panel/preview",
-                 f"/tables/imports/{import_id}/download.zip", f"/tables/imports/{import_id}/normalized.csv",
-                 f"/tables/imports/{import_id}/issues.csv"):
+                 f"/tables/imports/{import_id}/download.zip", f"/tables/imports/{import_id}/issues.csv"):
         assert other_client.get(path).status_code == 404, path
     for path in (f"/tables/imports/{import_id}/source", f"/tables/imports/{import_id}/layout",
                  f"/tables/imports/{import_id}/columns", f"/tables/imports/{import_id}/read",

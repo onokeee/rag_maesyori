@@ -1,6 +1,6 @@
 """一覧表の取り込み設定（TableSpec）。JSON で保存する（dataclass ⇔ dict、検証、spec_hash）。
 
-- 列の定義（ColumnSpec）、追記ログ列の段（LogStageSpec）、AI の custom 段、集計の種類（SummarySpec）を持つ。
+- 列の定義（ColumnSpec）、追記ログ列の段（LogStageSpec）、AI の custom 段を持つ。
 - 取り込み時の見出しとの照合（resolve_columns）と、画面の候補からの設定作成（spec_from_suggestions）もここに置く。
 """
 from __future__ import annotations
@@ -16,14 +16,12 @@ COLUMN_TYPES = ("code", "string", "text", "date", "datetime", "time", "number", 
 COLUMN_ROLES = ("key", "date", "entity", "entity_label", "category", "measure", "text", "log", "person", "attribute")
 MD_MODES = ("body", "attribute", "omit")
 GROUP_BY = ("month", "entity_month")
-SUMMARY_IDS = ("month", "entity_fiscal_year")
 ROW_POLICIES = ("exclude_with_warning", "include")
 CONTINUATION_POLICIES = ("merge_into_previous", "keep")
 CUSTOM_OUTPUT_TYPES = ("text", "choice")
 
 DEFAULT_NA_TOKENS = ["-", "－", "―", "‐", "N/A", "n/a", "NA", "#N/A", "該当なし"]
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-_METRIC_RE = re.compile(r"^(count|(sum|avg|max):([A-Za-z_][A-Za-z0-9_]*))$")
 
 
 def _default_header() -> dict:
@@ -38,7 +36,9 @@ def _default_exclude() -> dict:
 RETIRED_KEYS = {"header": ("search_rows",), "exclude": ("aggregate_keywords",),
                 # lightrag_hint: ファイル名のヒントは付けない。dedupe_timeline/omit_person: 中身は削らない。
                 # max_records_per_file: 記録ファイルは月ごとで、件数では分けない。
-                "markdown": ("lightrag_hint", "dedupe_timeline", "omit_person", "max_records_per_file")}
+                # dataset_card/summaries: 出すのは RAG に入れる記録ファイルだけ（集計・説明は作らない。6.3）。
+                "markdown": ("lightrag_hint", "dedupe_timeline", "omit_person", "max_records_per_file",
+                             "dataset_card", "summaries")}
 
 
 def _default_record() -> dict:
@@ -55,9 +55,7 @@ def _default_checks() -> dict:
 
 
 def _default_markdown() -> dict:
-    return {"file_prefix": "", "group_by": "month", "dataset_card": True, "records": True,
-            "summaries": [SummarySpec("month"), SummarySpec("entity_fiscal_year")],
-            "title_columns": []}
+    return {"file_prefix": "", "group_by": "month", "records": True, "title_columns": []}
 
 
 @dataclass
@@ -109,13 +107,6 @@ class CustomStageSpec:
 
 
 @dataclass
-class SummarySpec:
-    id: str  # entity_fiscal_year / month
-    metrics: list[str] = field(default_factory=lambda: ["count"])  # count, sum:<key>, avg:<key>, max:<key>
-    top_n: int = 5
-
-
-@dataclass
 class TableSpec:
     name: str
     description: str = ""
@@ -162,10 +153,6 @@ class TableSpec:
     @property
     def file_prefix(self) -> str:
         return str((self.markdown or {}).get("file_prefix") or self.name)
-
-    def summaries(self) -> list[SummarySpec]:
-        return [s if isinstance(s, SummarySpec) else _summary_from(s) for s in (self.markdown or {}).get("summaries", [])]
-
 
 # ---- 追記ログの基準日 ------------------------------------------------------------------
 
@@ -227,17 +214,6 @@ def _as_list(value) -> list:
     return [value]
 
 
-def _summary_from(d) -> SummarySpec:
-    if isinstance(d, SummarySpec):
-        return d
-    if isinstance(d, str):
-        return SummarySpec(d)
-    s = SummarySpec(**_pick(SummarySpec, d))
-    s.metrics = [str(m) for m in _as_list(s.metrics)] or ["count"]
-    s.top_n = int(s.top_n or 5)
-    return s
-
-
 def _str_field(obj, name: str) -> None:
     value = getattr(obj, name)
     if value is not None and not isinstance(value, str):
@@ -287,9 +263,7 @@ def spec_from_dict(d: dict) -> TableSpec:
     spec.record = _merged(_default_record(), data.get("record"))
     spec.period = _merged(_default_period(), data.get("period"))
     spec.checks = _merged(_default_checks(), data.get("checks"))
-    markdown = _merged(_default_markdown(), data.get("markdown"), RETIRED_KEYS["markdown"])
-    markdown["summaries"] = [_summary_from(s) for s in _as_list(markdown.get("summaries"))]
-    spec.markdown = markdown
+    spec.markdown = _merged(_default_markdown(), data.get("markdown"), RETIRED_KEYS["markdown"])
     log = data.get("log_stage")
     spec.log_stage = LogStageSpec(**_pick(LogStageSpec, log)) if isinstance(log, dict) and log.get("column") else None
     if spec.log_stage is not None:
@@ -396,18 +370,6 @@ def validate_spec(spec: TableSpec) -> list[str]:
         base = str(key).split(":")[0]
         if base not in all_keys:
             errors.append(f"見出しに使う列「{base}」がありません")
-    for s in spec.summaries():
-        if s.id not in SUMMARY_IDS:
-            errors.append(f"集計の種類「{s.id}」は使えません")
-        for metric in s.metrics:
-            m = _METRIC_RE.match(metric)
-            if not m:
-                errors.append(f"集計の指標「{metric}」は count / sum:列 / avg:列 / max:列 で指定してください")
-            elif m.group(3):
-                target = m.group(3)
-                col = spec.column(target)
-                if col is None or col.type != "number":
-                    errors.append(f"集計の指標「{metric}」の列が数値の列ではありません")
 
     if spec.log_stage is not None:
         col = spec.column(spec.log_stage.column)

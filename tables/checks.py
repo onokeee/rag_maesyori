@@ -158,7 +158,8 @@ DATE_OUTLIER_YEARS = 5  # 記録の年の中央値からこれより離れた日
 
 
 def _date_outliers(records, date_key: str) -> list[Issue]:
-    """ほかの記録から何年も離れた日付（2025年のデータに 2052年 など）。遠い月まで0件の月次集計ができる原因になる。"""
+    """ほかの記録から何年も離れた日付（2025年のデータに 2052年 など）。記録ファイルは年月ごとに分かれるので、
+    離れた月に1件だけの記録ファイルができる原因になる。"""
     dated = []
     for rec in records:
         s = str(_values(rec).get(date_key) or "")

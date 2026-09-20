@@ -64,14 +64,10 @@ def test_csv_import_flow(app, client, monkeypatch):
     assert imp["status"] == "confirmed"
     assert "Markdownをまとめてダウンロード" in panel_html(client, import_id, "done")
 
-    # 正規化CSV は単独でも取れる（zip の 管理用_RAGには入れない フォルダにも入る）。
-    # zip をダウンロードするとこの取り込みのデータは消えるので、単独で取るのは zip の前だけ
-    assert client.get(f"/tables/imports/{import_id}/normalized.csv").status_code == 200
+    # zip は RAG に入れる md だけ（フォルダ分けも管理用CSVも無い）
     zdata = client.get(f"/tables/imports/{import_id}/download.zip").data
     names = zipfile.ZipFile(io.BytesIO(zdata)).namelist()
-    assert "RAG投入用/トラブル対応一覧_2026-08.md" in names
-    assert {"管理用_RAGには入れない/正規化データ.csv", "管理用_RAGには入れない/問題一覧.csv",
-            "管理用_RAGには入れない/取込レポート.csv"} <= set(names)
+    assert names == ["トラブル対応一覧_2026-08.md"]
     with app.app_context():
         assert store.get_import(import_id) is None      # ダウンロードしたら残さない（設定も一緒に消える）
 

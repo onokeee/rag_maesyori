@@ -31,7 +31,7 @@ def test_entities_differing_only_in_case_keep_every_record(tmp_path):
     spec = spec_from_dict(d)
     records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="ETC-302号機"),
                _rec("A-2", record_no="A-2", occurred_at="2026-08-04", equipment_id="Etc-302号機")]
-    files = render_all(spec, records, {}, {})
+    files = render_all(spec, records, {})
     assert len({f.name.casefold() for f in files}) == len(files)
     target = tmp_path / "imp"
     target.mkdir()

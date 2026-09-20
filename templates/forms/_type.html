@@ -1,4 +1,5 @@
-{#- 帳票の種類とシートの欄（HTML の断片。fetch でこの中身だけ入れ替える） -#}
+{#- 帳票の種類とシートの欄（HTML の断片。fetch でこの中身だけ入れ替える）。
+    まとめて置いた帳票は同じフォームなので、ここで決める種類とシートは置かれた全部に使う。 -#}
 
 {% if duplicate %}
 <div class="notice" role="note">同じ内容のファイルをこの画面でもう一度置いています（先に確定した分は、ダウンロードするまでサーバーに残っています）。</div>
@@ -16,8 +17,27 @@
   <p class="muted">使用中の帳票の種類がありません。<a href="{{ form_types_url }}">帳票登録</a>で見本の Excel から読み取る欄を決め、
     ［使用開始］を押すと、ここに出ます。</p>
 {% else %}
-<form data-type-form data-doc="{{ doc.id }}" data-read-url="{{ url_for('forms.read', doc_id=doc.id) }}"
-      data-suggested='{{ suggested | tojson }}'>
+<form data-type-form data-doc="{{ doc.id }}" data-read-url="{{ url_for('forms.read_all') }}"
+      data-suggested='{{ suggested | tojson }}' data-file-counts='{{ file_counts | tojson }}'>
+  <input type="hidden" name="ids" value="{{ files | map(attribute='id') | join(',') }}">
+
+  {% if files | length > 1 %}
+  <p>置かれた<strong>{{ files | length }}件</strong>すべてに、下で選んだ帳票の種類とシートを使います
+    （同じフォームの帳票をまとめて読み取ります）。合わないファイルは［このファイルは外す］で外してください。</p>
+  <ul class="file-chips" aria-label="まとめて読み取るファイル">
+    {% for f in files %}
+    <li class="file-chip" data-file-row="{{ f.id }}">
+      <span class="file-chip-name">{{ loop.index }}. {{ f.file_name }}</span>
+      <span class="file-chip-count"><span data-file-count="{{ f.id }}">{{ f.found }}</span>項目</span>
+      <button type="button" class="file-chip-drop" data-drop-doc="{{ f.id }}"
+              title="このファイルは外す" aria-label="{{ f.file_name }} は外す"
+              data-confirm="{{ f.file_name }} の取り込みをやめ、元のファイルと読み取り結果をサーバーから消します。元に戻せません。"
+              data-confirm-ok="このファイルを外す">✕</button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
   <div class="type-sheet-grid">
     <fieldset class="plain">
       <legend>帳票の種類</legend>
@@ -26,7 +46,7 @@
         <label class="check">
           <input type="radio" name="pattern_id" value="{{ m.pattern.id }}" {{ 'checked' if m.pattern.id == selected_id }} required>
           <span><strong>{{ m.pattern.name }}</strong></span>
-          <small>{{ m.total_fields }}項目中{{ m.found_fields }}項目が見つかりました{% if m.sheet_names %}（シート: {{ m.sheet_names | join('、') }}）{% endif %}</small>
+          <small>{{ m.found_label }}{% if m.sheet_names %}（シート: {{ m.sheet_names | join('、') }}）{% endif %}</small>
         </label>
         {% endfor %}
       </div>
@@ -43,7 +63,7 @@
         <label class="check">
           <input type="checkbox" name="sheets" value="{{ s.name }}" {{ 'checked' if s.name in selected_sheets }}>
           <span>{{ s.name }}{% if s.hidden %} <small class="muted">（非表示のシート）</small>{% endif %}</span>
-          <small>値のあるセル {{ s.cells }}個{% if s.images %} / 画像 {{ s.images }}件{% endif %}{% if s.name in table_sheets %} / 一覧表らしい{% endif %}</small>
+          <small>値のあるセル {{ s.cells }}個{% if s.images %} / 画像 {{ s.images }}件{% endif %}{% if s.name in table_sheets %} / 一覧表らしい{% endif %}{% if files | length > 1 and s.files < files | length %} / {{ files | length }}件中{{ s.files }}件のファイルにあります{% endif %}</small>
         </label>
         {% endfor %}
       </div>
@@ -55,16 +75,18 @@
 
   {% if lost_work %}
   <div class="notice" role="alert">
-    <p>この帳票は{{ '確定済み' if doc.state == 'confirmed' else '修正中' }}です。読み取り直すと、手で修正した値は失われます。</p>
+    <p>{% if files | length > 1 %}確定済み・修正中の帳票があります{% else %}この帳票は{{ '確定済み' if doc.state == 'confirmed' else '修正中' }}です{% endif %}。読み取り直すと、手で修正した値は失われます。</p>
     <label class="check"><input type="checkbox" name="acknowledge"> 手で修正した値が失われることを確認しました</label>
   </div>
   {% endif %}
 
   <div class="form-actions">
-    <button type="submit" class="btn primary">{{ '読み取り直す' if lost_work else '読み取る' }}</button>
+    <button type="submit" class="btn primary">{% if lost_work %}読み取り直す{% elif files | length > 1 %}{{ files | length }}件をまとめて読み取る{% else %}読み取る{% endif %}</button>
+    {% if files | length == 1 %}
     <button type="button" class="btn ghost" data-drop-doc="{{ doc.id }}"
             data-confirm="この帳票の取り込みをやめ、元のファイルと読み取り結果をサーバーから消します。元に戻せません。"
             data-confirm-ok="取り込みをやめる">この帳票はやめる</button>
+    {% endif %}
   </div>
 </form>
 {% endif %}

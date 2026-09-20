@@ -183,7 +183,7 @@ def test_ditto_marks_are_filled_from_the_row_above(tmp_path):
     assert str(by_key["TR-2"][date_key]).startswith("2025-03-01") and by_key["TR-2"][eq] == "CMP-101"
     assert by_key["TR-4"][eq] == "ETC-301"
     assert stats.ditto_filled
-    files = render_all(spec, [r.to_dict() for r in records], {}, {})
+    files = render_all(spec, [r.to_dict() for r in records], {})
     assert not any("〃" in f.name or "同上" in f.name for f in files)
     text = "\n".join(f.text for f in files)
     assert "〃" not in text and "日付なし" not in "".join(f.name for f in files)
@@ -191,7 +191,7 @@ def test_ditto_marks_are_filled_from_the_row_above(tmp_path):
 
 def test_ditto_without_a_row_above_is_not_an_equipment(tmp_path):
     from tests.test_tables_fixes3 import _auto
-    from tables.summaries import entity_value
+    from tables.records import entity_value
 
     lines = ["管理No,発生日,設備ID,現象,停止時間(分)",
              "TR-1,2025-03-01,〃,異音,30",

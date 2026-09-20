@@ -149,38 +149,19 @@ def test_huge_exponent_is_a_cell_issue_not_a_crash(tmp_path):
 
 def test_overflowing_sum_renders_without_error():
     from tables.markdown import render_all
-    from tables.summaries import fmt_number
+    from tables.records import fmt_number
 
     assert fmt_number(float("inf")) == "inf"
     spec = spec_from_dict(list_spec_dict(group_by="entity_month"))
     records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="CMP-101", cost=1e308),
                _rec("A-2", record_no="A-2", occurred_at="2026-08-10", equipment_id="CMP-101", cost=1e308)]
-    assert render_all(spec, records, {}, {})
-
-
-# ---- 集計の Markdown ---------------------------------------------------------------------------
-
-def test_month_with_only_blank_measures_is_not_written_as_zero():
-    from tables.markdown import render_all
-
-    spec = spec_from_dict(list_spec_dict(group_by="entity_month"))
-    records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="CMP-101", cost=500, downtime=10),
-               _rec("A-2", record_no="A-2", occurred_at="2026-09-10", equipment_id="CMP-101", downtime=20)]
-    files = render_all(spec, records, {}, {})
-    summary = next(f for f in files if f.kind == "summary" and "設備別" in f.name).text
-    assert "2026年9月: 1件" in summary
-    line = next(line for line in summary.split("\n") if line.startswith("- 2026年9月"))
-    assert "費用 値なし" in line and "費用 0円" not in line
-    # 1年分すべて空欄の測定値は「合計0」と書かない
-    records = [_rec("A-3", record_no="A-3", occurred_at="2026-08-03", equipment_id="CMP-101", downtime=10)]
-    summary = next(f for f in render_all(spec, records, {}, {}) if f.kind == "summary" and "設備別" in f.name).text
-    assert "費用の値はありません" in summary and "費用の合計は0円" not in summary
+    assert render_all(spec, records, {})
 
 
 def test_placeholder_equipment_is_not_an_equipment():
-    """対象設備が「調査中」だけの記録は、設備別の集計・ファイル分けに入れない（本文には原文のまま出す）。"""
+    """対象設備が「調査中」だけの記録は、設備別のファイル分けに入れない（本文には原文のまま出す）。"""
     from tables.markdown import render_all
-    from tables.summaries import dataset_counts, entity_value
+    from tables.records import entity_value
 
     d = list_spec_dict(group_by="entity_month")
     d["columns"] = [c for c in d["columns"] if c["key"] != "equipment_name"]
@@ -189,10 +170,9 @@ def test_placeholder_equipment_is_not_an_equipment():
     assert entity_value({"equipment_id": "CMP-101"}, spec) == ("CMP-101", "")
     records = [_rec("A-1", record_no="A-1", occurred_at="2026-08-03", equipment_id="調査中", symptom="停止"),
                _rec("A-2", record_no="A-2", occurred_at="2026-08-10", equipment_id="CMP-101", symptom="異音")]
-    files = render_all(spec, records, {}, {})
+    files = render_all(spec, records, {})
     assert not any("調査中" in f.name for f in files)
     assert "- 設備番号: 調査中" in "".join(f.text for f in files if f.kind == "records")
-    assert dataset_counts(records, spec)["entities"] == 1
 
 
 # ---- 画面（取り込み・削除・ダウンロード） -----------------------------------------------------------------
@@ -328,10 +308,12 @@ def test_workbook_with_unreadable_values_is_refused_at_upload(app, client, tmp_p
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []
 
 
-def test_retention_note_does_not_ask_for_the_csv_first():
+def test_retention_note_only_says_the_data_is_deleted():
+    """渡すのは zip だけになったので、案内も「消える」ことだけにする（CSVの順番の話は残さない）。"""
     from views.tables import DELETE_ON_DOWNLOAD_NOTE
 
-    assert "より先" not in DELETE_ON_DOWNLOAD_NOTE and "管理用_RAGには入れない" in DELETE_ON_DOWNLOAD_NOTE
+    assert "より先" not in DELETE_ON_DOWNLOAD_NOTE and "CSV" not in DELETE_ON_DOWNLOAD_NOTE
+    assert "管理用" not in DELETE_ON_DOWNLOAD_NOTE and "サーバーから消えます" in DELETE_ON_DOWNLOAD_NOTE
 
 
 def test_confirmed_import_can_be_deleted_without_downloading(app, client):

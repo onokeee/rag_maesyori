@@ -46,16 +46,15 @@
 
   <div class="sub-block">
     <h3 class="sub-title">作られる Markdown ファイル</h3>
-    <p class="hint">ファイル名をクリックすると中身を表示します。</p>
+    <p class="hint">RAG に入れる記録ファイルだけを作ります。ファイル名をクリックすると中身を表示します。</p>
     <div class="split">
       <div class="table-wrap">
         <table class="table compact file-list">
-          <thead><tr><th>ファイル名</th><th>種類</th><th class="num">記録</th></tr></thead>
+          <thead><tr><th>ファイル名</th><th class="num">記録</th></tr></thead>
           <tbody>
           {% for f in files %}
             <tr data-file="{{ f.name }}">
               <td><button type="button" data-file-open="{{ f.name }}">{{ f.name }}</button></td>
-              <td class="nowrap">{{ {"dataset": "データセット説明", "records": "記録", "summary": "集計"}.get(f.kind, f.kind) }}</td>
               <td class="num">{{ f.records if f.records is not none else "" }}</td>
             </tr>
           {% endfor %}
@@ -101,6 +100,5 @@
     <button type="button" class="btn primary" data-confirm-run {{ 'disabled' if blocking }}
       {%- if confirmed %} data-confirm="この取り込みは確定済みです。Markdownを作り直しますか？（作成済みのファイルは置き換わります）" data-confirm-ok="作り直す"{% endif %}>
       {{ "確定し直してMarkdownを作り直す" if confirmed else "確定してMarkdownを作成" }}</button>
-    <a class="btn" href="{{ url_for('tables.download_csv', import_id=imp.id) }}">正規化CSVをダウンロード</a>
   </div>
 </div>

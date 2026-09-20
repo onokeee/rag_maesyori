@@ -1,9 +1,10 @@
 {#- 確定してダウンロードの欄（HTML の断片） -#}
 {% import "components/_ui.html" as ui %}
 {% set done = current.state in confirmed_states %}
+{% set batch = docs | length > 1 %}
 
-{% if docs | length > 1 %}
-<p>確定済み <strong>{{ confirmed | length }}</strong> / {{ docs | length }} 件。1件ずつ確定して、最後にまとめて zip でダウンロードします。</p>
+{% if batch %}
+<p>確定済み <strong>{{ confirmed | length }}</strong> / {{ docs | length }} 件。下のボタンで、まだ確定していない帳票も確定してから zip にまとめます。</p>
 <ul class="list-plain list-rows">
   {% for d in docs %}
   <li>
@@ -13,47 +14,41 @@
     </div>
     <div class="cluster">
       {{ ui.badge(d.state) }}
-      {% if d.id != current.id %}<button type="button" class="btn small" data-open-doc="{{ d.id }}">開く</button>{% endif %}
+      <button type="button" class="btn small" data-goto-doc="{{ d.id }}">読み取り結果を見る</button>
     </div>
   </li>
   {% endfor %}
 </ul>
 {% endif %}
 
-{% if not done and not read_yet %}
+{% if not read_yet %}
   <p class="muted">上で帳票の種類とシートを選び、［読み取る］を押してください。読み取った値を確かめてから、ここで確定します。</p>
+{% elif batch %}
+  <p class="notice" role="note">{{ batch_confirm }} zip には帳票1件につき1つの .md が入っています。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.download_batch', batch_id=batch_id) }}"
+       data-confirm-all data-download data-confirm="{{ batch_confirm }}" data-confirm-ok="確定してダウンロード">
+      {% if to_confirm %}残り{{ to_confirm | length }}件も確定して、まとめてダウンロード（zip）{% else %}まとめて Markdown をダウンロード（zip）{% endif %}
+    </a>
+  </div>
+  <p class="hint">要確認の項目が残っていても確定できます（要確認は「ここを見てください」という目印です）。</p>
 {% elif not done %}
   <div class="form-actions">
-    <button type="button" class="btn primary" data-confirm-doc="{{ current.id }}">
-      {% if docs | length > 1 %}この帳票を確定する（{{ current.title or current.file_name }}）{% else %}確定して Markdown を作る{% endif %}
-    </button>
+    <button type="button" class="btn primary" data-confirm-doc="{{ current.id }}">確定して Markdown を作る</button>
   </div>
   <p class="hint">確定すると、入力中の値で Markdown が作られます。確定したあとでも、上の読み取り結果を直して確定し直せます。</p>
 {% else %}
-  {% if docs | length == 1 %}
-    <p>ファイル名: <code>{{ file_name }}</code></p>
-    <p class="notice" role="note">{{ delete_note }}</p>
-    <div class="btn-row">
-      <a class="btn primary" href="{{ url_for('forms.download_md', doc_id=current.id) }}"
-         data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す" data-download>Markdown をダウンロード（.md）</a>
-      <button type="button" class="btn" data-copy="#mdText">Markdownをコピー</button>
-    </div>
-    <details class="fold">
-      <summary>Markdownの内容を見る</summary>
-      <pre class="code md-preview" id="mdText">{{ markdown }}</pre>
-    </details>
-    <p class="hint">ダウンロードした .md は、LightRAG の画面にそのままドラッグして入れてください。</p>
-  {% else %}
-    <p class="notice" role="note">{{ batch_confirm }} zip には帳票1件につき1つの .md が入っています。</p>
-    <div class="btn-row">
-      {% if pending %}
-      <a class="btn" href="{{ url_for('forms.download_batch', batch_id=batch_id) }}"
-         data-confirm="{{ batch_confirm }}" data-confirm-ok="ダウンロードして消す" data-download>確定済み{{ confirmed | length }}件だけをダウンロード（zip）</a>
-      <button type="button" class="btn primary" data-open-doc="{{ pending[0].id }}">次の帳票へ（残り{{ pending | length }}件）</button>
-      {% else %}
-      <a class="btn primary" href="{{ url_for('forms.download_batch', batch_id=batch_id) }}"
-         data-confirm="{{ batch_confirm }}" data-confirm-ok="ダウンロードして消す" data-download>まとめて Markdown をダウンロード（zip）</a>
-      {% endif %}
-    </div>
-  {% endif %}
+  <p>ファイル名: <code>{{ file_name }}</code></p>
+  <p class="notice" role="note">{{ delete_note }}</p>
+  <div class="btn-row">
+    {#- 直したまま確定していない（修正中）ときは、zip と同じように確定し直してから渡す -#}
+    <a class="btn primary" href="{{ url_for('forms.download_md', doc_id=current.id) }}"
+       data-confirm-all data-download data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdown をダウンロード（.md）</a>
+    <button type="button" class="btn" data-copy="#mdText">Markdownをコピー</button>
+  </div>
+  <details class="fold">
+    <summary>Markdownの内容を見る</summary>
+    <pre class="code md-preview" id="mdText">{{ markdown }}</pre>
+  </details>
+  <p class="hint">ダウンロードした .md は、LightRAG の画面にそのままドラッグして入れてください。</p>
 {% endif %}

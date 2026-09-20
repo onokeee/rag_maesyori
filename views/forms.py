@@ -5,8 +5,9 @@
 HTML の断片をその場に入れ替える（views/forms.py のルートは JSON か HTML の断片を返す）。
 
 Markdown は常にデータから作る（読み取り結果のプレビュー＝作業中の値、ダウンロード＝確定済みの値）。
-複数ファイルをまとめて置くと「取り込みのまとまり（batch）」になり、同じ画面で1件ずつ読み取って
-最後に zip でまとめて渡す。
+複数ファイルをまとめて置くと「取り込みのまとまり（batch）」になり、同じフォームの帳票として
+まとめて1回だけ種類とシートを決め、読み取り結果は全部の帳票を縦に並べて見ていく（タブで1件ずつ
+切り替えない。利用者の指示 2026-09-20）。最後に zip でまとめて渡す。
 ダウンロードしたデータはその場で消す（design.md 3.3）。消すのは Markdown を作り終え、本文を送り終えたあとだけ
 （途中で切れたときは消さない: core.purge.purge_after_send）。
 """
@@ -18,6 +19,7 @@ import json
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 from flask import (Blueprint, abort, current_app, jsonify, redirect, render_template, request, send_file,
@@ -45,6 +47,8 @@ MAX_BATCH_FILES = 50
 DELETE_ON_DOWNLOAD_NOTE = ("ダウンロードすると、この帳票の元のファイルと読み取り結果はサーバーから消えます。"
                            "同じものをもう一度ダウンロードすることはできません。")
 DELETE_ON_DOWNLOAD_CONFIRM = "ダウンロードすると、この帳票のデータはサーバーから消えます。もう一度ダウンロードすることはできません。"
+# 確定したあとに直した（修正中の）帳票は、直した値が .md に入るよう確定し直してから渡す
+MODIFIED_DOWNLOAD_CONFIRM = "確定し直してから、直した値で Markdown を作ります。" + DELETE_ON_DOWNLOAD_CONFIRM
 BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳票のデータはサーバーからすべて消えます。"
                         "もう一度ダウンロードすることはできません。")
 LOST_WORK_MESSAGE = "読み取り直すと、手で修正した値は失われます"
@@ -370,83 +374,215 @@ def discard():
 
 # ---- 2 帳票の種類とシート ---------------------------------------------------------------
 
+def _id_list(raw: str) -> list[int]:
+    return [int(part) for part in raw.split(",") if part.strip().isdigit()]
+
+
+@bp.get("/type", endpoint="type_all")
+def type_all_fragment():
+    """帳票の種類とシートの欄（まとめて置いた分すべてに同じ設定を使う）。?ids=1,2,3"""
+    docs = _docs_of(_id_list(request.args.get("ids", "")))
+    if not docs:
+        return jsonify(error="取り込んだ帳票がありません。ファイルを置き直してください"), 404
+    return _type_response(docs)
+
+
 @bp.get("/<int:doc_id>/type")
 def type_fragment(doc_id: int):
-    """帳票の種類とシートの欄（HTML の断片）。"""
-    doc = _get_document(doc_id)
-    info = _load_info(doc)
-    if info is None:
-        return jsonify(error="元のファイルを読み込めませんでした。ファイルを置き直してください"), 409
-    matches = rank_patterns(info, db.load_active_patterns())
+    """帳票1件の「帳票の種類とシート」（まとまりでも同じ欄を使う）。"""
+    return _type_response([_get_document(doc_id)])
+
+
+def _batch_matches(ranked: list[dict]) -> list[SimpleNamespace]:
+    """置かれたファイル全部をまとめた帳票の種類の候補（見つかった項目が多い順）。
+
+    同じフォームの帳票をまとめて置く前提なので、種類は1つだけ選ぶ。件数で違う分は
+    「3項目中2〜3項目」のように幅で出し、ファイルごとの数は下のファイルの行に出す。
+    """
+    out = []
+    for pattern_id in (ranked[0] if ranked else {}):
+        ms = [r[pattern_id] for r in ranked if pattern_id in r]
+        if not ms:
+            continue
+        sheets: list[str] = []
+        for m in ms:
+            sheets.extend(n for n in m.sheet_names if n not in sheets)
+        lo, hi = min(m.found_fields for m in ms), max(m.found_fields for m in ms)
+        total = ms[0].total_fields
+        out.append(SimpleNamespace(
+            pattern=ms[0].pattern, total_fields=total, found_fields=lo, sheet_names=sheets,
+            confidence=sum(m.confidence for m in ms) / len(ms),
+            found_label=(f"{total}項目中{lo}項目が見つかりました" if lo == hi
+                         else f"{total}項目中{lo}〜{hi}項目が見つかりました")))
+    out.sort(key=lambda m: m.confidence, reverse=True)
+    return out
+
+
+def _type_response(docs: list[dict]):
+    infos = []
+    for doc in docs:
+        info = _load_info(doc)
+        if info is None:
+            return jsonify(error="元のファイルを読み込めませんでした。ファイルを置き直してください"), 409
+        infos.append(info)
+    patterns = db.load_active_patterns()
+    ranked = [{m.pattern.id: m for m in rank_patterns(info, patterns)} for info in infos]
+    matches = _batch_matches(ranked)
     suggested = {str(m.pattern.id): m.sheet_names for m in matches}
-    current = _data(doc)
-    selected_id = doc["pattern_id"] if any(m.pattern.id == doc["pattern_id"] for m in matches) else None
+    first, current = docs[0], _data(docs[0])
+    selected_id = first["pattern_id"] if any(m.pattern.id == first["pattern_id"] for m in matches) else None
     selected_id = selected_id or (matches[0].pattern.id if matches else None)
-    selected_sheets = (current or {}).get("sheets") if current and selected_id == doc["pattern_id"] else None
+    selected_sheets = (current or {}).get("sheets") if current and selected_id == first["pattern_id"] else None
     if not selected_sheets:
         selected_sheets = suggested.get(str(selected_id)) or []
-    sheets = [
-        {"name": name, "cells": len(grid.cells), "images": len(info.images_in([name])), "hidden": grid.hidden}
-        for name, grid in info.grids.items()
-    ]
+
+    sheets: list[dict] = []
+    by_name: dict[str, dict] = {}
+    for info in infos:
+        for name, grid in info.grids.items():
+            sheet = by_name.get(name)
+            if sheet is None:
+                sheet = {"name": name, "cells": len(grid.cells), "images": len(info.images_in([name])),
+                         "hidden": grid.hidden, "files": 0}
+                by_name[name] = sheet
+                sheets.append(sheet)
+            sheet["files"] += 1
+    table_sheets: list[str] = []
+    for info in infos:
+        table_sheets.extend(n for n in table_like_sheets(info) if n not in table_sheets)
+
+    files = [{"id": d["id"], "file_name": d["file_name"],
+              "found": ranked[i].get(selected_id).found_fields if selected_id in ranked[i] else 0}
+             for i, d in enumerate(docs)]
+    # 種類を選び直したときにファイルごとの項目数を出し直すための表（画面の JS が使う）
+    file_counts = {str(pid): {str(d["id"]): ranked[i][pid].found_fields for i, d in enumerate(docs)}
+                   for pid in (ranked[0] if ranked else {})}
     html = render_template(
         "forms/_type.html",
-        doc=doc,
+        doc=first,
+        docs=docs,
+        files=files,
+        file_counts=file_counts,
         matches=matches,
         sheets=sheets,
         suggested=suggested,
         selected_id=selected_id,
         selected_sheets=selected_sheets,
-        table_sheets=table_like_sheets(info),
-        duplicate=db.find_confirmed_by_hash(doc["file_hash"], exclude_id=doc["id"],
-                                            session_id=current_session_id()),
-        lost_work=doc["state"] in CONFIRMED_STATES,
+        table_sheets=table_sheets,
+        duplicate=any(db.find_confirmed_by_hash(d["file_hash"], exclude_id=d["id"],
+                                                session_id=current_session_id()) for d in docs),
+        lost_work=any(d["state"] in CONFIRMED_STATES for d in docs),
         form_types_url=url_for("form_types.index"),
     )
-    return jsonify(html=html, file_name=doc["file_name"], has_types=bool(matches))
+    return jsonify(html=html, file_name=first["file_name"], has_types=bool(matches),
+                   docs=[{"id": d["id"], "file_name": d["file_name"]} for d in docs])
+
+
+@bp.post("/read", endpoint="read_all")
+def read_all():
+    """置かれた帳票を1つの種類・シートでまとめて読み取り、全部の読み取り結果を返す。"""
+    return _read_documents(_docs_of(_id_list(request.form.get("ids", ""))))
 
 
 @bp.post("/<int:doc_id>/read")
 def read(doc_id: int):
-    """選ばれた種類とシートで読み取り、読み取り結果の欄（HTML の断片）を返す。"""
-    doc = _get_document(doc_id)
+    """帳票1件を読み取る（まとまりでも同じ道すじを通る）。"""
+    return _read_documents([_get_document(doc_id)])
+
+
+def _read_documents(docs: list[dict]):
+    if not docs:
+        return jsonify(error="取り込んだ帳票がありません。ファイルを置き直してください"), 404
     pattern = db.load_pattern(request.form.get("pattern_id", type=int))
     sheets = request.form.getlist("sheets")
     if pattern is None or not sheets:
         return jsonify(error="帳票の種類と読み取るシートを選んでください"), 400
-    if doc["state"] in CONFIRMED_STATES and request.form.get("acknowledge") != "on":
+    if any(d["state"] in CONFIRMED_STATES for d in docs) and request.form.get("acknowledge") != "on":
         return jsonify(error=f"{LOST_WORK_MESSAGE}。確認のチェックを入れてから読み取り直してください"), 400
-    info = _load_info(doc)
-    if info is None:
-        return jsonify(error="元のファイルを読み込めませんでした"), 409
-    sheets = [s for s in sheets if s in info.grids]
-    if not sheets:
-        return jsonify(error="選んだシートがファイルにありません"), 400
 
-    extraction = extract_document(info, pattern, sheets)
-    db.reset_document(doc_id, pattern.id, _dumps(extraction))
-    if doc["state"] not in CONFIRMED_STATES:
-        db.update_document(doc_id, title=_search_title(doc, extraction))
-    return _review_response(doc_id)
+    read_ids, errors = [], []
+    for doc in docs:
+        info = _load_info(doc)
+        if info is None:
+            errors.append(f"{doc['file_name']}: 元のファイルを読み込めませんでした")
+            continue
+        use = [s for s in sheets if s in info.grids]
+        if not use:
+            errors.append(f"{doc['file_name']}: 選んだシートがファイルにありません")
+            continue
+        extraction = extract_document(info, pattern, use)
+        db.reset_document(doc["id"], pattern.id, _dumps(extraction))
+        if doc["state"] not in CONFIRMED_STATES:
+            db.update_document(doc["id"], title=_search_title(doc, extraction))
+        read_ids.append(doc["id"])
+    if not read_ids:
+        return jsonify(error=errors[0] if errors else "読み取れる帳票がありませんでした", errors=errors), 400
+    return _review_response(read_ids, errors=errors)
 
 
-def _review_response(doc_id: int):
+def _state_label(doc: dict, summary: dict) -> str:
+    """読み取り結果の見出しに出す、その帳票の今の状態。"""
+    if doc["state"] == "confirmed":
+        return "確定済み"
+    if doc["state"] == "modified":
+        return "修正中"
+    issue = summary["counts"]["issue"]
+    return f"要確認 {issue}件" if issue else "未確定"
+
+
+STATE_COLORS = {"確定済み": "green", "修正中": "violet", "未確定": "gray"}
+
+
+def _review_response(doc_ids, errors=None):
+    """読み取り結果の欄（帳票を縦に並べた HTML の断片）。
+
+    重くならないよう、元のシートの表を作るのは先頭の帳票だけにする。残りは画面に入った時点で
+    GET /forms/<id>/grid を呼んで読み込む（static/review.js）。
+    """
+    ids = [doc_ids] if isinstance(doc_ids, int) else list(doc_ids)
+    items, docs = [], []
+    for no, doc_id in enumerate(ids, start=1):
+        doc = _get_document(doc_id)
+        extraction = _data(doc)
+        if extraction is None:
+            if len(ids) == 1:
+                return jsonify(error="まだ読み取りをしていません"), 409
+            continue
+        summary = _summary(doc, extraction)
+        info = _load_info(doc) if no == 1 else None
+        label = _state_label(doc, summary)
+        items.append({
+            "no": no, "doc": doc, "extraction": extraction, "summary": summary,
+            "grids": _sheet_grids(info, extraction["sheets"]) if no == 1 else None,
+            "info_missing": no == 1 and info is None,
+            "version": _version(doc), "state_label": label,
+            "state_color": STATE_COLORS.get(label, "amber"),
+        })
+        docs.append({"id": doc["id"], "file_name": doc["file_name"], "state": doc["state"],
+                     "version": _version(doc), "summary": summary, "state_label": label})
+    if not items:
+        return jsonify(error="まだ読み取りをしていません"), 409
+    html = render_template(
+        "forms/_review.html",
+        items=items,
+        confirmed=sum(1 for d in docs if d["state"] in CONFIRMED_STATES),
+    )
+    first = items[0]
+    return jsonify(html=html, version=first["version"], summary=first["summary"], doc_id=first["doc"]["id"],
+                   docs=docs, errors=errors or [])
+
+
+@bp.get("/<int:doc_id>/grid")
+def grid_fragment(doc_id: int):
+    """1件の帳票の「元のシート」（読み取り結果の欄が画面に入ったときに読み込む）。"""
     doc = _get_document(doc_id)
     extraction = _data(doc)
     if extraction is None:
         return jsonify(error="まだ読み取りをしていません"), 409
     info = _load_info(doc)
-    summary = _summary(doc, extraction)
-    html = render_template(
-        "forms/_review.html",
-        doc=doc,
-        extraction=extraction,
-        summary=summary,
-        grids=_sheet_grids(info, extraction["sheets"]),
-        info_missing=info is None,
-        version=_version(doc),
-    )
-    return jsonify(html=html, version=_version(doc), summary=summary, doc_id=doc_id)
+    html = render_template("forms/_grid.html", grids=_sheet_grids(info, extraction["sheets"]),
+                           info_missing=info is None)
+    return jsonify(html=html, doc_id=doc_id)
 
 
 # ---- 3 読み取り結果（その場で直す・途中保存） -----------------------------------------------
@@ -540,9 +676,7 @@ def _docs_of(ids: list[int]) -> list[dict]:
 @bp.get("/finish", endpoint="finish")
 def finish_fragment():
     """確定してダウンロードの欄（HTML の断片）。?ids=1,2,3 は同じ画面で扱っている帳票。"""
-    raw = request.args.get("ids", "")
-    ids = [int(part) for part in raw.split(",") if part.strip().isdigit()]
-    docs = _docs_of(ids)
+    docs = _docs_of(_id_list(request.args.get("ids", "")))
     if not docs:
         return jsonify(html="", ready=False, confirmed=0, total=0)
     current_id = request.args.get("current", type=int)
@@ -551,6 +685,7 @@ def finish_fragment():
     pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
     batch_id = current.get("batch_id") or ""
     working = _data(current)
+    read_yet = working is not None or any(_data(d) is not None for d in docs)
     extraction = _data(current, "confirmed_json") or working
     html = render_template(
         "forms/_finish.html",
@@ -559,26 +694,32 @@ def finish_fragment():
         confirmed=confirmed,
         pending=pending,
         batch_id=batch_id if len(docs) > 1 else "",
-        read_yet=working is not None,
+        read_yet=read_yet,
+        to_confirm=_to_confirm(docs),
         confirmed_states=CONFIRMED_STATES,
         file_name=markdown_filename(current, extraction) if extraction else "",
         markdown=build_markdown(current, _data(current, "confirmed_json")) if current["state"] in CONFIRMED_STATES else "",
         delete_note=DELETE_ON_DOWNLOAD_NOTE,
-        delete_confirm=DELETE_ON_DOWNLOAD_CONFIRM,
+        delete_confirm=(MODIFIED_DOWNLOAD_CONFIRM if current["state"] == "modified"
+                        else DELETE_ON_DOWNLOAD_CONFIRM),
         batch_confirm=_batch_zip_confirm(docs),
     )
     return jsonify(html=html, ready=bool(confirmed), confirmed=len(confirmed), total=len(docs),
-                   read_yet=working is not None,
+                   read_yet=read_yet,
                    next_id=(pending[0]["id"] if pending else None))
 
 
+def _to_confirm(docs: list[dict]) -> list[dict]:
+    """まとめてのダウンロードの前に確定し直す帳票（未確定と、直したまま確定していない修正中）。"""
+    return [d for d in docs if d["state"] != "confirmed"]
+
+
 def _batch_zip_confirm(docs: list[dict]) -> str:
-    """まとまりの zip ダウンロードの確認文。"""
-    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
-    confirmed = len(docs) - len(pending)
-    if pending:
-        return (f"確定済みの{confirmed}件だけを zip でダウンロードします。その{confirmed}件のデータはサーバーから消えます"
-                f"（未確定の{len(pending)}件は残ります）。")
+    """まとまりの zip ダウンロードの確認文（確定していない分はこのボタンで確定してから渡す）。"""
+    rest = _to_confirm(docs)
+    if rest:
+        return (f"まだ確定していない{len(rest)}件も確定してから、{len(docs)}件をまとめて zip でダウンロードします。"
+                f"ダウンロードすると、このまとまりの帳票のデータはサーバーからすべて消えます。")
     return BATCH_DELETE_CONFIRM
 
 

@@ -415,7 +415,7 @@
         body("done").replaceChildren(
           el("p", { text: "ダウンロードしました。この取り込みのデータ（元のファイル・読み込んだ内容・作った Markdown）は"
                           + "サーバーから消えています。" }),
-          el("p", { class: "hint", text: "zip の「RAG投入用」フォルダの .md を LightRAG の画面にドラッグしてください。" }),
+          el("p", { class: "hint", text: "zip を開いて、中の .md を LightRAG の画面にドラッグしてください。" }),
           el("div", { class: "form-actions" },
             el("button", { type: "button", class: "btn primary", "data-restart-done": "", text: "別の表を取り込む" })));
         setNote("done", "ダウンロード済み");

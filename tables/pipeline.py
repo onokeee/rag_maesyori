@@ -2,7 +2,7 @@
 
 - run_read: 保存した範囲と設定で全行を読む → 正規化 → チェック → rows.jsonl.gz / issues.json / issues.csv
 - run_render: その取り込みの記録（＋照合に通った AI 整形の結果）から全 md を作り、取り込みのフォルダに保存
-- build_download: md と管理用CSV をまとめた zip
+- build_download: RAG に入れる md だけをまとめた zip
 期間の置き換え・投入済みとの差分・取り消しはしない（取り込みごとに、その取り込みの内容だけで md を作る）。
 置き場所: TABLES_DIR/imports/<import_id>/（rows.jsonl.gz, issues.*, md/, preview_md/, source_cache.json）
 画面とジョブは import_source() の控え（tables.source_cache）を通して表を読み、同じ計算を繰り返さない。
@@ -300,7 +300,7 @@ def usable_ai_results(import_id: int, imp: dict, spec) -> dict:
 def render_files(import_id: int, imp: dict, spec, records: list[dict] | None = None) -> list[MdFile]:
     if records is None:
         records = load_rows(import_id)
-    return render_all(spec, records, usable_ai_results(import_id, imp, spec), {"coverage": {}})
+    return render_all(spec, records, usable_ai_results(import_id, imp, spec))
 
 
 def _preview_signature(import_id: int, imp: dict, spec) -> str:
@@ -468,21 +468,6 @@ def start_render_job(import_id: int) -> int:
 
 # ---- ダウンロード ----------------------------------------------------------------------------
 
-def build_download_files(import_id: int, imp: dict, spec) -> tuple[list[tuple[str, bytes]], dict[str, bytes]]:
-    """渡すファイルの中身: (RAG投入用の md の [(名前, 中身)], 管理用のファイル {名前: 中身})。
-
-    zip（build_download）と保存先フォルダへの保存（views.tables.save_to_folder）で同じ中身にするため、ここで1回だけ作る。
-    """
-    paths = md_paths(import_id)
-    extras = {
-        "正規化データ.csv": outputs.normalized_csv(spec, load_rows(import_id)),
-        "問題一覧.csv": outputs.issues_csv(load_issues(import_id)),
-        "取込レポート.csv": outputs.report_csv(outputs.import_report_items(imp, spec, len(paths))),
-    }
-    return [(p.name, p.read_bytes()) for p in paths], extras
-
-
-def build_download(import_id: int, imp: dict, spec) -> bytes:
-    """RAG投入用/*.md と 管理用_RAGには入れない/（正規化データ・問題一覧・取込レポート）の zip。"""
-    md_files, extras = build_download_files(import_id, imp, spec)
-    return outputs.build_zip(md_files, extras)
+def build_download(import_id: int) -> bytes:
+    """RAG に入れる md だけの zip（フォルダ分けなし。管理用の CSV は作らない）。"""
+    return outputs.build_zip([(p.name, p.read_bytes()) for p in md_paths(import_id)])

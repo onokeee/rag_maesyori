@@ -44,6 +44,7 @@
 - 読み取りの中身（ラベル探し・セクション・チェックボックス・積み上げ明細表・型と単位の推定・レイアウト判定・文字コード判定・正規化・Markdown のルール・保持期間）は**一切変えていない**。これは画面の作り直しであって、読み取りの作り直しではない。
 
 - **範囲の見直し（2026-09-16、利用者の判断）**: 一覧表の更新管理（期間の置き換え・既存済みとの差分・取込済みにする印・出力画面・履歴）、クロス集計、名寄せ辞書は作らない（8章の「作らない」）。一覧表は**取り込みごとに、その取り込みの記録だけから全 md を作り、全ファイルを zip で渡す**。以下の章でここに触れている箇所は8章を優先する。
+- **出すファイルの見直し（2026-09-20、利用者の判断）**: 一覧表で渡すのは**RAG に入れる記録の Markdown だけ**。件数・順位・推移のような**定量的な集計は RAG の仕組みにそもそも向いていない**ので、月次集計・設備別年度集計は作らない。**データセット説明も作らない**。管理用の CSV（正規化データ・問題一覧・取込レポート）も渡さない（問題一覧は確認の段の画面と CSV で見る）。zip は**フォルダ分けをしない**。
 
 ## 1. 用語（画面の文言はこの表に従う）
 
@@ -63,7 +64,7 @@
 | 見本 | 元のファイル（ボタン: 元のファイルをダウンロード） | 見本を開く |
 | AI の列処理 | AI整形 | 前処理 |
 | 1画面の中の区切り | 段（.step） | ステップ、ウィザード、手順 |
-| まとめて選んだ複数の帳票 | まとめ取り込み（例:「まとめ取り込み 3/12件目」）| バッチ、一括処理 |
+| まとめて選んだ複数の帳票 | まとめ取り込み（例:「12件中5件を確定しました」）| バッチ、一括処理 |
 
 ボタンは動詞。1画面に主ボタンは1つ。**「次へ」は無い**（画面は移らない）。
 
@@ -93,6 +94,26 @@
 4. **確定してダウンロード**：`.md`（まとめ取り込みは zip）。**渡し終わるとその帳票のデータは消える**（3.3）。
 
 読み取る前の「確定してダウンロード」は灰色のままで、見出しに「読み取りが終わると確定できます」と出る。
+
+**まとめ取り込み（同じフォームの帳票を一気に）**（利用者の指示 2026-09-20「③の読み取り結果の表示を②タブ選択で
+切り替えるのではなく、全部のシートをまとめて表示する（スクロールして全部確認していく）イメージで」）。
+
+- ②は**置かれた分すべてで1回だけ**決める（`GET /forms/type?ids=…`）。ファイル名を丸いラベルで並べ、その種類で
+  見つかった項目数を1つずつ出す（種類を選び直すと数も出し直す）。合わないファイルは ✕ で外す（その場で消える）。
+  読み取りは `POST /forms/read`（`ids` と種類・シート）。1件だけのときの `GET /forms/<id>/type`・
+  `POST /forms/<id>/read` も同じ道すじを通る。
+- ③は**帳票の数だけ塊（`.review-doc`）を縦に並べる**。塊の見出し（固定表示）にファイル名と状態
+  （要確認 n件 / 未確定 / 確定済み / 修正中）、中は今までどおり左が元のシート・右が読み取った値で、その場で直すと
+  その帳票だけ自動保存される。段の上に進み具合の1行（「12件中5件を確定しました」）と、まだ手の要る帳票へ飛ぶボタン。
+- **重くしない**：読み取りの応答に入れる元のシートの表は**先頭の1件だけ**。残りはその塊が画面に近づいた時点で
+  `GET /forms/<id>/grid` を呼んで読み込む（スクロール・窓の大きさが変わるたびに、塊の位置を自分で測る。
+  画面の上下 600px 手前から読み込み、入力欄を選んだ・シートのタブを押したときもその場で読み込む）。
+  `IntersectionObserver` と `requestAnimationFrame` は使わない。画面に出していない窓では動かないことがあり、
+  それだと元のシートが出ないまま止まってしまうため（2026-09-20 の実測）。
+  12件・1シート211行×30列の実測で、読み取りの応答は 305KB / 1.9秒（全部の表を入れると 3.0MB / 12件ぶん）。
+- ④は**ボタン1つ**（「残りn件も確定して、まとめてダウンロード（zip）」）。押すと未確定の帳票をその場で全部確定してから
+  zip を渡す。要確認が残っていても確定できる（要確認は目印であって止めるものではない）。1件だけのときは今までどおり
+  `.md` のダウンロードで、こちらも直したまま確定していなければ先に確定し直してから渡す（3.3）。
 
 AI による種類の推定・空欄探しは無い（0.1）。
 
@@ -154,7 +175,7 @@ AI による種類の推定・空欄探しは無い（0.1）。
 作った md を利用者が決めたフォルダへ直接保存する機能は削除した。受け取り口はダウンロードだけ（`services/output_folder.py`・`views/folder_save.py`・`/settings/output`・`data/output_settings.yaml` は無い）。
 
 ### 2.9 LightRAGへの取り込み案内ページ（2026-09-20 廃止）
-`/settings/lightrag` と設備保全向けエンティティ種別 YAML の配布は削除した。作る Markdown は**どのサーバー設定でも安全**でなければならず、ファイル名の文字ヒント（`.[legacy-R(...)]`）には頼らない。確認の段では「zip に何が入っているか」と「`管理用_RAGには入れない` は LightRAG に入れないこと」だけを2〜3文で伝える。
+`/settings/lightrag` と設備保全向けエンティティ種別 YAML の配布は削除した。作る Markdown は**どのサーバー設定でも安全**でなければならず、ファイル名の文字ヒント（`.[legacy-R(...)]`）には頼らない。確認の段では「zip に何が入っているか（RAG に入れる .md だけ）」を1〜2文で伝える。
 
 ## 3. データモデル（SQLite `instance/app.db`）
 
@@ -164,7 +185,7 @@ AI による種類の推定・空欄探しは無い（0.1）。
 - `patterns`：既存列＋`title_fields TEXT DEFAULT '[]'`（タイトル・ファイル名に使う field_name の配列）、`md_options TEXT DEFAULT '{}'`（`{"domain_context_fields": [...]}` 等。入力を削る設定は置かない＝人名の項目も必ず出す）、`version_no INTEGER DEFAULT 1`（保存ごとに+1）。`status` の値は draft/active/inactive のまま（表示語だけ変更）。
 - `pattern_fields`：＋`unit TEXT DEFAULT ''`、`rag_output TEXT DEFAULT 'show'`（show/omit）。`data_type` は string/text/date/number/table（明細表）。`extraction_rule` は `{"direction": "auto"}`、明細表は＋`"columns": [見本で見た列見出し]`（見出しの書き方が違う帳票で、列見出しが似た表を探すのに使う）。探す区画がある項目は＋`"section": "回答"`（区切りの見出しの名前。その区画の中だけでラベルを探す。8.0）。
 - 明細表の値（`data_json` の各項目の `value`）：`{"columns": ["品番", "品名", "数量"], "rows": [["PW48-1591", "ベアリング", "2"], ...]}`。行が無ければ null。連番だけの No 列と「なし」だけの行は読まない。
-- `documents`：＋`confirmed_json TEXT`、`confirmed_at TEXT`、`title TEXT DEFAULT ''`（一覧の見出し。タイトル項目の値を連結）、`batch_id TEXT DEFAULT ''`・`batch_order INTEGER DEFAULT 0`（まとめ取り込み。同じ `batch_id` の帳票を順に確認し、zip でまとめて渡して一緒に消す）。`data_json` は作業中の値。状態は導出：`data_json IS NULL`→読み取り前、`confirmed_json IS NULL`→確認中、`confirmed_json != data_json`→修正中、それ以外→確定済み。`markdown`・`registered_at`・`status` 列は使わない（互換のため残す。マイグレーションで `registered_at`→`confirmed_at`、`status='registered'` の `data_json`→`confirmed_json` にコピー）。
+- `documents`：＋`confirmed_json TEXT`、`confirmed_at TEXT`、`title TEXT DEFAULT ''`（一覧の見出し。タイトル項目の値を連結）、`batch_id TEXT DEFAULT ''`・`batch_order INTEGER DEFAULT 0`（まとめ取り込み。同じ `batch_id` の帳票をまとめて読み取り、縦に並べて確認し、zip でまとめて渡して一緒に消す）。`data_json` は作業中の値。状態は導出：`data_json IS NULL`→読み取り前、`confirmed_json IS NULL`→確認中、`confirmed_json != data_json`→修正中、それ以外→確定済み。`markdown`・`registered_at`・`status` 列は使わない（互換のため残す。マイグレーションで `registered_at`→`confirmed_at`、`status='registered'` の `data_json`→`confirmed_json` にコピー）。
 
 ### 3.2 一覧表
 ```
@@ -294,7 +315,9 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
 - **他サイトからのダウンロード（＝削除）を断る**：消すダウンロード（`forms.download_md` / `forms.download_batch` / `tables.download_zip`）は GET でも、`Sec-Fetch-Site` が same-origin / none 以外、他サイトの `Origin`、（`Sec-Fetch-Site` が無いときは）他サイトの `Referer` なら 403（`views.PURGING_ENDPOINTS`）。
 - **読み取れないアップロード**：事前チェックや読み込みで思わぬ例外が出ても、アップロードしたファイルは消してから落とす（帳票・一覧表とも）。
 - **画面の知らせ**：ダウンロードのボタンには確認ダイアログ（`data-confirm`）、完了・確認画面には「ダウンロードするとサーバーからデータが消える／もう一度ダウンロードできない」の一文を出す。
-  修正中（確定済みの版あり）の帳票は、確定し直していない変更が入らずに消えることを確認文の先頭に書く（「確定してダウンロード」の段の .md / zip ボタン。`views.forms.delete_confirm` / `batch_zip_confirm`）。
+  確定していない帳票（未確定・修正中）は、**ダウンロードのボタンを押した時点で確定し直してから**渡す。直した値が
+  ファイルに入らずに消えることが無いようにするため（`static/review.js` の `data-confirm-all`。zip も1件の .md も同じ）。
+  確認文にもそのことを書く（`views.forms._batch_zip_confirm` / `MODIFIED_DOWNLOAD_CONFIRM`）。
   消えないボタン（帳票の `original`）には「（消えません）」と書く。
 - **画面のメッセージにファイル名を出さない**：`flash` は署名付きセッションクッキーとしてブラウザに残るので、
   取引先名や「社外秘」を含みうるファイル名は載せない（サーバー側を消してもブラウザに残るため）。
@@ -313,7 +336,7 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
 |---|---|---|
 | WP-core | `models/database.py`, `core/__init__.py`, `core/jobs.py`, `core/files.py`, `core/naming.py`, `core/mdtext.py`, `tests/test_core_*.py` | DB（全スキーマ・マイグレーション・WAL）、ジョブ実行、アップロード保存と事前チェック、安全なファイル名、Markdown テキスト処理 |
 | WP-read | `tables/__init__.py`, `tables/source.py`, `tables/csv_source.py`, `tables/excel_source.py`, `tables/detect.py`, `tables/dictionary.py`, `tables/mapping.py`, `tests/test_tables_read*.py` | 表ソース（CSV/Excel）、見出し帯・行分類・種類判定、標準キー辞書、列の対応づけ候補 |
-| WP-pipe | `tables/spec.py`, `tables/normalize.py`, `tables/checks.py`, `tables/markdown.py`, `tables/summaries.py`, `tables/outputs.py`, `tables/pipeline.py`, `tables/store.py`, `tests/test_tables_pipe*.py` | 取り込み設定の仕様、正規化、チェック、md生成（記録・集計・データセット説明）、zip、全体の実行関数、DBアクセス（`tables/state.py` は 8.1 で外した） |
+| WP-pipe | `tables/spec.py`, `tables/normalize.py`, `tables/checks.py`, `tables/markdown.py`, `tables/records.py`, `tables/outputs.py`, `tables/pipeline.py`, `tables/store.py`, `tests/test_tables_pipe*.py` | 取り込み設定の仕様、正規化、チェック、md生成（記録ファイルだけ）、zip、全体の実行関数、DBアクセス（`tables/state.py` は 8.1 で外した。`tables/summaries.py` は 6.3 で外した） |
 | WP-log | `logproc/*.py`, `tests/test_logproc*.py` | 追記ログの分割、日時解決、記入者、識別子・数量・予定句、マスク、用語集、時系列の描画 |
 | WP-ai | `aiproc/*.py`, `services/llm.py`（ジョブ用呼び出し口の追加のみ。既存関数の挙動は変えない）, `tests/test_aiproc*.py`, `tests/fake_servers.py`（拡張のみ） | 構造化出力の方式判定、プロンプト生成、照合、キャッシュ、AIジョブ、custom 段 |
 | WP-forms | `excel/*`, `pattern/*`, `export/formats.py`, `tests/test_extraction.py`, `tests/test_forms_md.py` | 帳票の md 改善（タイトル・ファイル名・定型文削減・値の NFKC・単位・出さない項目）、種類定義の拡張、一覧表らしさ判定関数 |
@@ -431,9 +454,6 @@ def suggest_columns(headers, sample_rows) -> list[ColumnSuggestion]
 @dataclass class LogStageSpec: column: str; enabled_ai: bool = False; context_columns: list[str]; people: list[dict]; groups: list[str]; glossary: dict; entry_types: list[str]; instruction: str = ""; incident: bool = True; run_if: dict; limits: dict
 @dataclass class CustomStageSpec: id: str; inputs: list[str]; prompt: str; output_type: str  # text/choice
     choices: list[str] = []; max_chars: int = 80; fallback: str = "不明"; target_key: str = ""; quote_required: bool = True
-@dataclass class SummarySpec: id: str  # entity_fiscal_year / month
-    metrics: list[str] = ["count"]  # count, sum:<key>, avg:<key>, max:<key>
-    top_n: int = 5
 @dataclass class TableSpec:
     name: str; description: str = ""; file_types: list[str]; name_patterns: list[str]
     kind: str = "list"   # list / crosstab
@@ -446,11 +466,11 @@ def suggest_columns(headers, sample_rows) -> list[ColumnSuggestion]
     record: {key: [..], fallback_key: [occurred_at, equipment_id, "symptom:20"]}
     period: {grain: "month", date_column: "occurred_at"}
     log_stage: LogStageSpec | None; custom_stages: list[CustomStageSpec]
-    markdown: {file_prefix, group_by: "month" | "entity_month", dataset_card: True, records: True,
-               summaries: [SummarySpec], title_columns: [...]}
+    markdown: {file_prefix, group_by: "month" | "entity_month", records: True, title_columns: [...]}
     # 2026-09-20 に外した項目（保存済みの JSON にあっても読み飛ばす。RETIRED_KEYS["markdown"]）:
     #   lightrag_hint（ファイル名のヒントは付けない）、dedupe_timeline・omit_person（内容を削らない）、
-    #   max_records_per_file（記録ファイルは月ごと・件数では分けない）
+    #   max_records_per_file（記録ファイルは月ごと・件数では分けない）、
+    #   dataset_card・summaries（出すのは記録ファイルだけ。集計・説明は作らない。6.3）
     checks: {type_error_rate: {warn: 0.02, block: 0.10}}
 def spec_from_dict(d) -> TableSpec; def spec_to_dict(spec) -> dict; def spec_hash(spec) -> str; def validate_spec(spec) -> list[str]
 
@@ -467,18 +487,18 @@ def run_checks(records, spec, stats) -> list[Issue]
 # tables/state.py は作っていない（期間の置き換え・取り消しは 8.1 で外した）
 
 # tables/markdown.py
-@dataclass class MdFile: name: str; text: str; kind: str  # dataset/records/summary
-def render_all(spec, records: list[dict], ai_results: dict[str, dict], meta: dict) -> list[MdFile]   # 決定的（同じ入力→同じバイト列）
+@dataclass class MdFile: name: str; text: str; kind: str = "records"  # 作るのは記録ファイルだけ
+def render_all(spec, records: list[dict], ai_results: dict[str, dict]) -> list[MdFile]   # 決定的（同じ入力→同じバイト列）
 def record_blocks(record, spec, ai_results=None, people=None) -> list[list[str]]   # 1件分。大きければ「（続きn/m）」に分ける（6.2）
-# tables/summaries.py: entity_fiscal_year, month の集計（コードで計算）
+# tables/records.py: 記録の値の見方（設備の列 entity_value/entity_display/split_entity_code、月、数値の書き方 fmt_number）
 # tables/outputs.py（投入済みとの差分は持たない。8.1）
-def normalized_csv(spec, records) -> bytes; def issues_csv(issues) -> bytes; def report_csv(items) -> bytes
-def build_zip(md_files: list[tuple[str, bytes]], extras: dict[str, bytes] | None) -> bytes   # RAG投入用/ と 管理用_RAGには入れない/（正規化データ.csv, 問題一覧.csv, 取込レポート.csv）
+def issues_csv(issues) -> bytes   # 確認の段の画面から見る問題一覧（zip には入れない）
+def build_zip(md_files: list[tuple[str, bytes]]) -> bytes   # RAG に入れる .md だけ（フォルダ分けなし）
 # tables/pipeline.py … ジョブ本体
 def run_read(ctx, import_id) -> dict      # 読込→rows.jsonl.gz, issues.csv, stats
 def run_preview(ctx, import_id) -> dict   # 確認画面用の md の下書き（preview_md/）
 def run_render(ctx, import_id) -> dict    # 確定→その取り込みの全 md を md/ に作る
-def build_download(import_id, imp, spec) -> bytes   # zip 全体をバイト列で返す（遅延生成にしない。3.3）
+def build_download(import_id) -> bytes   # zip 全体をバイト列で返す（遅延生成にしない。3.3）
 ```
 
 ### 5.4 logproc（ルールのみ・純粋関数）
@@ -632,19 +652,20 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - **記録1件の上限は推定トークン 400**（`tables/markdown.RECORD_TOKEN_BUDGET`）。超えたら「（続きn/m）」に分ける（6.5 の実測で決めた値）。
   - 見出しは1つ目が `## …（1/m）`、2つ目以降が `## …（続きn/m）`。2つ目以降には**管理No・設備・日付の行を書き直す**（切られてもその部分だけで身元が分かる）。
   - 分け目は箇条書きの切れ目。1つの箇条書きが上限を超えるときは、複数行の値なら `- 対応の時系列（続き）:` と見出し行を繰り返し、1行の値なら「。」の後ろで切って `- 項目（続き）: …` にする。**文字は1つも消さない**（1行が丸ごと上限を超えるときは、その1行だけで1つの部分にする）。
-- 設備名の列がない code 型の entity 列では、「ETC-302(OXIDEエッチャ 2号機)」「CVD-203 W-CVD 3号機」を設備番号と名前に分けてから、集計・ファイル分け・表示に使う（番号は英字と数字を含むものだけ。名前の側も番号だけなら分けない）。
+- 設備名の列がない code 型の entity 列では、「ETC-302(OXIDEエッチャ 2号機)」「CVD-203 W-CVD 3号機」を設備番号と名前に分けてから、ファイル分け・表示に使う（番号は英字と数字を含むものだけ。名前の側も番号だけなら分けない。`tables/records.split_entity_code`）。
 
-### 6.3 一覧表（集計・説明）
-- `{prefix}_00_データセット説明.md`：取り込み範囲、件数、ファイル構成、列の意味（description）、出していない列の名前、数値の注意（集計ファイルの単位でのみ確定）、答えられる/答えられない質問の例。
-- `{prefix}_集計_月次_{YYYY-MM}.md`：件数、measure 合計、上位5 entity（measure 合計・件数・主な category）、category 内訳。
-- `{prefix}_集計_設備別_{entity}_{FY}年度.md`：件数・measure 合計/平均、月別（0件の月も明記）、category 内訳。entity の記録がある年度のみ。
-- クロス集計の設定は記録ファイルを作らず、設備別年度集計（月別値の列挙）のみ。
-- 冒頭に「集計対象: 期間（取り込み範囲）」を必ず書く。数値はすべてコード計算（AI 不使用）。取り込み範囲・集計対象の期間は、最初と最後の月については記録の実際の最初・最後の日付で書く（「2026-08-03〜2026-08-20」。月の初日・末日に広げない）。記録ファイルの「対象期間」は月のまとまりを表すので月全体のまま。
-- 0件の月は、記録のある月どうしの間が12か月以内のときだけ埋める（`tables/summaries.MAX_EMPTY_GAP_MONTHS`）。それより離れている（「2052年」のような入力ミス）ときは間を埋めず、確認画面で、記録の年の中央値から5年を超えて離れた日付を行番号つきで知らせる（警告 `date_outlier`）。
+### 6.3 一覧表で作るファイル（2026-09-20: 記録ファイルだけにした）
+- 作るのは `{prefix}_{YYYY-MM}.md`（設備×月の設定なら `{prefix}_{entity}_{YYYY-MM}.md`）だけ。**集計ファイル（月次・設備別年度）とデータセット説明は作らない**。
+  - 理由（利用者の判断）: 「件数」「順位」「推移」には答えなくてよい。**定量的な集計や計算は RAG の仕組みにそもそも向いていない**。データセット説明も要らない。
+  - `tables/summaries.py`（month_summaries・entity_fiscal_year_summaries・dataset_counts と、その計算だけに使っていた resolve_metrics・fmt_average・coverage_months・measure_columns・category_column・fmt_measure・fiscal_year_of など）と `tables/markdown.render_dataset_card` は削除した。記録ファイルにも使う処理（設備の値・月・数値の書き方）は `tables/records.py` に残している。
+  - 取り込み設定の `markdown.dataset_card` / `markdown.summaries`（`SummarySpec`）も外した（保存済みの JSON にあっても読み飛ばす）。
+- 渡すのは zip 1つだけで、中身は **RAG に入れる .md だけ**（`RAG投入用/`・`管理用_RAGには入れない/` のフォルダ分けはしない）。**正規化データ.csv・問題一覧.csv・取込レポート.csv は作らない**し、画面にも単独の CSV ダウンロードは置かない（確認の段の「問題一覧（CSV）」だけは、200件を超える問題を確かめるために残す）。
+- 「内容の確認」の段は今までどおり、件数・除外した行・問題一覧・作られるファイルの一覧と中身の下見・データ100行ずつを出す。
+- 遠い年の日付（「2052年」のような入力ミス）は、確認画面で、記録の年の中央値から5年を超えて離れた日付を行番号つきで知らせる（警告 `date_outlier`）。記録ファイルは記録のある月にだけできるので、空の月のファイルは増えない。
 
 ### 6.4 LightRAG への入れ方（2026-09-20: 案内ページは廃止。2.9）
 このアプリは LightRAG に送信しない。利用者は完了画面で md／zip をダウンロードし、LightRAG の WebUI にドラッグして入れる。
-入れるのは zip の `RAG投入用/` の中身（.md）だけで、`管理用_RAGには入れない/` は入れない。
+zip の中身は RAG に入れる .md だけなので、開いてそのままドラッグすればよい。
 利用者はサーバー設定を見ることも変えることもできないので、Markdown は**どのサーバー設定でも安全**に読めるよう本文の作り方（記録の分割）だけで成り立たせ、ファイル名の分割ヒントには頼らない（付けない）。
 
 ### 6.5 記録の上限を決めた実測（2026-09-20、`scripts/eval/lightrag_offline_eval.py`）

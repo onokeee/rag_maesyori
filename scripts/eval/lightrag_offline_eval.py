@@ -116,7 +116,7 @@ def _table_spec(code: str):
 
 
 def _record_meta(rec: dict | None, spec) -> dict:
-    from tables.summaries import entity_columns, entity_display
+    from tables.records import entity_columns, entity_display
 
     if rec is None:
         return {"id": "", "entities": [], "date": ""}
@@ -190,7 +190,7 @@ def generate_tables(out: Path, codes: list[str], variants: list[str] | None = No
             if group_by not in want:
                 continue
             spec.markdown["group_by"] = group_by
-            files = [{"name": f.name, "text": f.text, "kind": f.kind} for f in render_all(spec, recs, {}, {"coverage": {}})]
+            files = [{"name": f.name, "text": f.text, "kind": f.kind} for f in render_all(spec, recs, {})]
             _attach_table_meta(files, recs, spec)
             _write_variant(out, f"{code}_{group_by}", files)
 

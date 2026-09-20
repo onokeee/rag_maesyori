@@ -5,13 +5,12 @@
   <div class="btn-row">
     <a class="btn primary" href="{{ url_for('tables.download_zip', import_id=imp.id) }}"
        data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdownをまとめてダウンロード（zip）</a>
-    <a class="btn" href="{{ url_for('tables.download_csv', import_id=imp.id) }}">正規化CSVをダウンロード</a>
     <button type="button" class="btn danger-outline" data-import-delete
             data-confirm="ダウンロードせずにこの取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
             data-confirm-ok="削除する">ダウンロードせずに削除</button>
   </div>
-  <p class="hint">zip の中身: 「RAG投入用」フォルダに Markdown、「管理用_RAGには入れない」フォルダに 正規化データ.csv・問題一覧.csv・取込レポート.csv が入っています。
-    LightRAG の画面にドラッグするのは「RAG投入用」の中身（.md）だけです。</p>
+  <p class="hint">zip の中身は、RAG に入れる Markdown（.md）だけです。フォルダ分けはしていないので、zip を開いて中身をそのまま
+    LightRAG の画面にドラッグしてください。</p>
 
   <div class="sub-block">
     <h3 class="sub-title">作成したファイル</h3>

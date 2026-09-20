@@ -53,7 +53,9 @@ def test_the_next_form_of_a_batch_is_the_one_that_is_not_confirmed_yet(app, clie
     assert _state(app, second) == "reviewing"
     body = client.get(f"/forms/finish?ids={first},{second}&current={first}").get_json()
     assert body["next_id"] == second and body["confirmed"] == 1
-    assert f'data-open-doc="{second}">次の帳票へ（残り1件）' in body["html"]
+    # 読み取り結果は全部並んでいるので、④からはその帳票の塊へ移動できる
+    assert f'data-goto-doc="{second}"' in body["html"]
+    assert "残り1件も確定して、まとめてダウンロード（zip）" in body["html"]
 
     # まだ確定していない帳票は zip に入らない（確定済みの分だけを渡す）
     res = client.get("/forms/batches/B/download.zip")

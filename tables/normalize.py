@@ -381,7 +381,7 @@ def _upper_code(text: str) -> str:
     """
     if not _NON_ASCII.search(text):
         return text.upper()
-    from tables.summaries import split_entity_code  # 番号と名前の分け方は集計と同じものを使う
+    from tables.records import split_entity_code  # 番号と名前の分け方は md と同じものを使う
 
     code, name = split_entity_code(text)
     if not name or code.upper() == code:
