@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from flask import Blueprint, Flask, abort, jsonify, redirect, render_template, request, url_for
 
 from app import database
-from app.views import form_types_bp, forms_bp, is_cross_site_write, tables_bp
+from app.views import SESSION_LIFETIME, form_types_bp, forms_bp, is_cross_site_write, tables_bp
 
 
 
@@ -270,7 +270,10 @@ def create_app(overrides: dict | None = None) -> Flask:
     _refuse_debugger()
     app = Flask(__name__)
     app.config.from_object(Config)
-    app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
+    # クッキーは約1年もたせる（views.SESSION_LIFETIME。ヘッダーの「AI接続」の設定をブラウザごとに
+    # 「ずっと保持」するため。利用者の指示 2026-09-21）。views.current_session_id が session.permanent を立てる
+    app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
+                      PERMANENT_SESSION_LIFETIME=SESSION_LIFETIME)
     if overrides:
         app.config.update(overrides)
     if not app.config.get("SECRET_KEY"):

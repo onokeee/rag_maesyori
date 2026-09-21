@@ -1423,8 +1423,8 @@ def wait_job(job_id: int, timeout: float = 30.0, statuses=TERMINAL_STATUSES) -> 
 # このアプリはダウンロードが終わった時点で、その取り込みに属するものをすべて消す。
 # 消すもの: アップロードした元のファイル、imports/<id>/（読み込んだ行・控え・作った md）、
 #           DB の行（documents / table_imports / jobs / ai_items / llm_calls とそれらの子）。
-# 残すもの: 帳票の種類（patterns）・一覧表の取り込み設定（table_templates）・AI接続の設定。これらは「設定」で
-#           データではない。
+# 残すもの: 帳票の種類（patterns とその子）・ブラウザごとの AI接続（ai_connections）。これらは「設定」で
+#           データではない（SETTINGS_TABLES。取り込みを指す列が後から足されても、ここからは消さない）。
 #
 # DB の行は表の名前を決め打ちせず、その取り込みを指す列（document_id / import_id）を持つ表を
 # sqlite_master から探して消す（後から表が増えても消し残さないため）。
@@ -1439,12 +1439,16 @@ IMPORT_REF_COLUMNS = ("import_id", "table_import_id")
 # 別の取り込みの ai_items が同じ応答を使っていることがある（消すと再実行で再課金になる）。
 # 持ち主が消えた分は _delete_orphan_llm_calls が「参照されていなければ消す」で扱う。
 SHARED_TABLES = ("llm_calls",)
+# 「設定」の表。取り込みを捨てる片付け（purge_* / sweep_stale / purge_session）では決して消さない。
+# ai_connections はブラウザごとの AI接続（APIキー・接続先。利用者の指示 2026-09-21「ずっと保持」）で、
+# 帳票・一覧表と同じ session_id を持ち主に持つが、その人の取り込みを捨てても残す。
+SETTINGS_TABLES = ("patterns", "pattern_sheets", "pattern_fields", "ai_connections")
 
 
 def _tables_with_column(db, column: str) -> list[str]:
     names = []
     for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
-        if table.startswith("sqlite_") or table in SHARED_TABLES:
+        if table.startswith("sqlite_") or table in SHARED_TABLES or table in SETTINGS_TABLES:
             continue
         if column in {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}:
             names.append(table)
@@ -1786,7 +1790,9 @@ def forget_id_counters(db) -> int:
 #   - 動いている間: IDLE_HOURS さわられていないものを捨てる（sweep_stale）
 #   - 起動時: ダウンロードしていない帳票・一覧表をすべて捨てる（purge_all_pending）
 # あとの2つ（時間切れ・起動時）は、動いているジョブが付いているものには手を出さない（_busy_ids）。
-# 残すのは「設定」（帳票の種類・一覧表の取り込み設定・AI接続）だけで、これは purge の対象ではない。
+# 残すのは「設定」（帳票の種類・ブラウザごとの AI接続 = SETTINGS_TABLES）だけで、これは purge の対象ではない。
+# AI接続だけは、クッキーの寿命（約1年。views.SESSION_LIFETIME）より長くさわられていない行を
+# sweep_stale_ai_connections が消す（もう戻って来ないブラウザの APIキーを DB に残さない）。
 
 # 放っておかれた取り込みを捨てるまでの時間。数人が同時に使う社内LANの置き方（2026-09-20）では、
 # 画面を閉じた合図（sendBeacon）が届かないこと（ブラウザの強制終了・スリープ・LANの切断）があるので、
@@ -1884,7 +1890,27 @@ def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
         if import_id in busy_imports:
             continue
         tables += purge_table_import(import_id)
+    sweep_stale_ai_connections()
     return forms, tables
+
+
+# ブラウザごとの AI接続を消すまでの日数。クッキーの寿命（views.SESSION_LIFETIME = 365日）を過ぎたブラウザは
+# 同じ id で戻って来られないので、その行（APIキー）を持ち続ける理由が無い。保存・接続の確認・AI整形の
+# 開始のたびに updated_at が進むので、使っている人の分は消えない。
+AI_CONNECTION_KEEP_DAYS = 400
+
+
+def sweep_stale_ai_connections(days: float = AI_CONNECTION_KEEP_DAYS) -> int:
+    """クッキーの寿命より長くさわられていないブラウザの AI接続（APIキー）を消す。戻り値: 消した件数。"""
+    db = database.get_db()
+    limit = _stale_before(days * 24)
+    try:
+        removed = db.execute("DELETE FROM ai_connections WHERE updated_at < ?", (limit,)).rowcount
+        db.commit()
+    except sqlite3.Error:
+        db.rollback()
+        return 0
+    return removed
 
 
 # ---- 使っている人ごとに捨てる ---------------------------------------------------------

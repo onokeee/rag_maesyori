@@ -2064,8 +2064,10 @@ def start_ai_job(import_id: int, scope: str = "pending", concurrency: int | None
     params = {"import_id": import_id, "scope": scope, "concurrency": concurrency, "stage_ids": stage_ids,
               "row_keys": row_keys, "model": settings["model"], "fingerprint": settings["fingerprint"],
               "settings": llm.public_settings(settings)}
+    # 設定（APIキーを含む）はここで固めてジョブに渡す。AI接続はブラウザごと（ヘッダーの「AI接続」）で、
+    # ジョブのスレッドには要求（クッキー）が無いので、あとから llm.job_client_settings() では取れない
     return start_job("ai_format", "table_import", import_id,
-                     lambda ctx: run_ai_job(ctx, import_id, scope, concurrency), params)
+                     lambda ctx: run_ai_job(ctx, import_id, scope, concurrency, settings=settings), params)
 
 
 def check_resume(job: dict, settings: dict | None = None) -> tuple[bool, str]:

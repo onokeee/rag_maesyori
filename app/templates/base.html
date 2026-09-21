@@ -9,7 +9,11 @@
 <body>
   <a class="skip-link" href="#main">本文へ移動</a>
   {#- 画面は3つだけ。設定・履歴・作業中の一覧は無い（利用者の指示 2026-09-20）。
-      それぞれの画面は「1画面で全部できる」ので、ヘッダーの行き先は3つで足りる。 -#}
+      それぞれの画面は「1画面で全部できる」ので、ヘッダーの行き先は3つで足りる。
+      右上の「AI接続」は画面ではなく、その場で開くパネル（下の <dialog id="aiDialog">）。
+      利用者の指示（2026-09-21）:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる」
+      「AI接続はヘッダー上で、接続中 か 未接続 一目で分かるように」。状態（ai_header）は views.ai_header_ctx が
+      覚えている結果を出すだけで、画面を開くたびに確かめには行かない。 -#}
   {% set path = request.path %}
   <header class="topbar">
     <a class="brand" href="{{ url_for('forms.new') }}">
@@ -21,6 +25,17 @@
       <a href="{{ url_for('tables.new') }}" {% if path.startswith('/tables') %}class="active" aria-current="page"{% endif %}>表の取り込み</a>
       <a href="{{ url_for('form_types.index') }}" {% if path.startswith('/form-types') %}class="active" aria-current="page"{% endif %}>帳票登録</a>
     </nav>
+    <div class="ai-status" data-ai-header data-state="{{ ai_header.state }}">
+      <button type="button" class="ai-status-btn" data-ai-open aria-haspopup="dialog" aria-controls="aiDialog"
+              title="AI接続の設定を開く">
+        <span class="ai-status-main">
+          <span class="ai-status-label">AI接続</span>
+          <span class="ai-dot" aria-hidden="true">●</span>
+          <span class="ai-status-state" data-ai-state>{{ ai_header.state_label }}</span>
+        </span>
+        <small class="ai-status-time" data-ai-sub>{{ ai_header.sub_text }}</small>
+      </button>
+    </div>
   </header>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
@@ -49,6 +64,78 @@
         <button value="ok" class="btn danger" id="confirmDialogOk">実行する</button>
       </div>
     </form>
+  </dialog>
+
+  {#- AI接続のパネル（ヘッダー右上の「AI接続」で開く。4つ目の画面ではない）。
+      入力欄に入るのは「このブラウザで保存した値」だけ。サーバー共通の値（env・前の版の yaml）は placeholder と
+      下の注意書きで知らせるだけで、欄には入れない（利用者の指示 2026-09-21「全部空欄にしておいて」）。
+      APIキーは決して画面に返さない（保存済みかどうかだけ）。操作は static/app.js の「AI接続（ヘッダー）」。
+      ルートは ai_urls[...] の添字で書く（ai_urls.clear と書くと Jinja が dict.clear メソッドに解決し、［キーを消す］が
+      壊れた URL を叩いて 404 になる。tests/test_ai_header_page.py）。 -#}
+  <dialog id="aiDialog" class="dialog ai-dialog" aria-labelledby="aiDialogTitle" data-ai-dialog
+          data-state="{{ ai_header.state }}"
+          data-save-url="{{ ai_urls['save'] }}" data-test-url="{{ ai_urls['test'] }}"
+          data-models-url="{{ ai_urls['models'] }}" data-clear-url="{{ ai_urls['clear'] }}">
+    <div class="dialog-head">
+      <h2 id="aiDialogTitle">AI接続</h2>
+      <button type="button" class="dialog-close" data-ai-close aria-label="閉じる">&times;</button>
+    </div>
+    <p class="ai-dialog-state">
+      <span class="ai-dot" aria-hidden="true">●</span>
+      <strong data-ai-state>{{ ai_header.state_label }}</strong>
+      <span class="muted" data-ai-panel-sub>{{ ai_header.panel_sub_text }}</span>
+      <span class="ai-dialog-busy muted" data-ai-busy hidden>確かめています…</span>
+    </p>
+    <p class="flash flash-error" role="alert" data-ai-detail {% if not ai_header.check_detail %}hidden{% endif %}><span>{{ ai_header.check_detail }}</span></p>
+    <p class="hint">この設定は、このブラウザだけのものです（ほかの人・ほかのPCには見えません）。
+      AIを使わなくても Markdown は作れます。</p>
+
+    <div class="stack ai-dialog-form">
+      <label>APIキー
+        <input type="password" class="input mono" data-ai-field="api_key" autocomplete="new-password" spellcheck="false"
+               placeholder="{{ '保存済み（変えるときだけ入力）' if ai_header.api_key_saved else 'sk-… を貼り付け' }}">
+        <small class="muted" data-ai-key-note>{% if ai_header.api_key_saved %}このブラウザのキーを保存済みです。{% elif ai_header.api_key_source %}このブラウザのキーは未保存です（サーバー共通のキーを使います）。{% else %}まだ保存していません。{% endif %}</small>
+      </label>
+      <label>チャットのURL（…/chat/completions までのフルパス）
+        <input type="url" class="input mono" data-ai-field="chat_url" value="{{ ai_header.chat_url }}" spellcheck="false"
+               placeholder="{{ ai_header.placeholders.chat_url }}">
+      </label>
+      <label>モデル一覧のURL（…/models までのフルパス）
+        <input type="url" class="input mono" data-ai-field="models_url" value="{{ ai_header.models_url }}" spellcheck="false"
+               placeholder="{{ ai_header.placeholders.models_url }}">
+      </label>
+      <label>使うモデル
+        <input type="text" class="input mono" data-ai-field="model" value="{{ ai_header.model }}" list="aiModelList" spellcheck="false"
+               placeholder="{{ ai_header.placeholders.model }}">
+        <datalist id="aiModelList" data-ai-model-list>{% for m in ai_header.models %}<option value="{{ m }}"></option>{% endfor %}</datalist>
+        <small class="muted">
+          <button type="button" class="btn small" data-ai-models>APIからモデル一覧を取得</button>
+          <span data-ai-models-note>{% if ai_header.models %}候補 {{ ai_header.models | length }}件（入力欄で選べます）{% else %}取得すると入力欄の候補に出ます。{% endif %}</span>
+        </small>
+      </label>
+    </div>
+
+    <p class="hint" data-ai-effective>いま使う接続先: <code data-ai-effective-url>{{ ai_header.effective.chat_url or '（未設定）' }}</code>
+      ／モデル: <code data-ai-effective-model>{{ ai_header.effective.model or '（未設定）' }}</code></p>
+    {% if ai_header.fallback.any_key or ai_header.fallback.yaml %}
+    <p class="notice info small">
+      {%- if ai_header.fallback.yaml %}前の版の設定ファイル（{{ ai_header.fallback.yaml_file }}）がこのサーバーに残っています。{% endif -%}
+      {%- if ai_header.fallback.env_key %}このサーバーの env ファイルに共通のAPIキーがあります。{% endif -%}
+      空欄にした項目は、そのサーバー共通の値を使います（自分の値を入れると、そちらが優先されます）。</p>
+    {% endif %}
+    <p class="notice small">APIキーはこのサーバーに、あなたのブラウザのIDと結びつけて保存します（暗号化はしていません）。
+      共有PCでは使い終わりに［キーを消す］を押してください。</p>
+
+    <ul class="list-plain list-rows ai-dialog-steps" data-ai-test-result aria-live="polite" hidden></ul>
+
+    <div class="btn-row ai-dialog-actions">
+      <button type="button" class="btn danger-outline" data-ai-clear {{ 'disabled' if not ai_header.api_key_saved }}
+              data-confirm="このブラウザに保存したAPIキーを消します（接続先とモデルは残ります）。" data-confirm-ok="キーを消す">キーを消す</button>
+      <span class="spacer"></span>
+      <button type="button" class="btn" data-ai-test>接続を確かめる</button>
+      <button type="button" class="btn primary" data-ai-save>保存する</button>
+      <button type="button" class="btn" data-ai-close>閉じる</button>
+    </div>
   </dialog>
 
   <script src="{{ url_for('static', filename='app.js') }}"></script>

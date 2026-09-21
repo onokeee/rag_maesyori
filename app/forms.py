@@ -3234,15 +3234,76 @@ MIN_CONTINUATION_FIELDS = 2
 @dataclass
 class PatternMatch:
     pattern: PatternDef
-    confidence: int
+    confidence: int          # 0〜100。見つかった項目の割合が主（画面には出さない。評価の JSON に残る）
     sheet_names: list[str]
     found_fields: int
     total_fields: int
+    sheet_score: float = 0.0  # 種類のシート名がブックのシート名と合う度合い（1.0 = 同じ名前があった）
+    score: float = 0.0        # 順位付けの点（match_score）。confidence と違い、項目の少ない種類が有利にならない
+
+
+# 順位付けの点 = (見つかった項目数 + シート名の一致 × SHEET_WORTH) ÷ (項目数 + PHANTOM_FIELDS)。
+# 「見つかった割合」だけで並べると、4項目の種類が 4/4 で 100% になり、33項目中32項目が見つかった本物の
+# 種類（97%）に勝ってしまう。分母に PHANTOM_FIELDS 個の「見つからなかったことにする項目」を足すと、
+# 項目の少ない種類ほど点が伸びず（4/4 → 4/14 = 0.29、20/20 → 20/30 = 0.67、32/33 → 32/43 = 0.74）、
+# 割合が同じなら見つかった数の多い方が上になる。シート名が同じなら、項目が SHEET_WORTH 個見つかったのと
+# 同じだけ足す（名前が違う版もあるので、シート名だけで順位が決まるほどは重くしない）。
+PHANTOM_FIELDS = 10
+SHEET_WORTH = 2
+
+
+def match_score(found: int, total: int, sheet_score: float = 0.0) -> float:
+    """帳票の種類の順位付けの点（0〜1 弱）。found: 見つかった項目数、total: 種類の項目数。"""
+    if total <= 0:
+        return 0.0
+    return (found + SHEET_WORTH * sheet_score) / (total + PHANTOM_FIELDS)
 
 
 def rank_patterns(info: WorkbookInfo, patterns: list[PatternDef]) -> list[PatternMatch]:
+    """1つのブックに合う順に種類を並べる（点が同じなら見つかった割合、それも同じなら登録順）。"""
     matches = [match_pattern(info, p) for p in patterns]
-    return sorted(matches, key=lambda m: m.confidence, reverse=True)
+    return sorted(matches, key=lambda m: (m.score, m.confidence), reverse=True)
+
+
+@dataclass
+class BatchMatch:
+    """まとめて置いたファイル全部に対する、1つの種類の合い具合。"""
+    pattern: PatternDef
+    matches: list[PatternMatch]   # ファイルごと（置いた順）
+    votes: int                    # この種類が最も合ったファイルの数
+    score: float                  # ファイルごとの点の平均
+    found_min: int
+    found_max: int
+    total_fields: int
+    sheet_names: list[str]        # どれかのファイルで選ばれたシート（出てきた順）
+
+
+def rank_batch(ranked: list[dict[int, PatternMatch]]) -> list[BatchMatch]:
+    """置かれたファイル全部をまとめた種類の順位（ranked: ファイルごとの {種類の id: PatternMatch}）。
+
+    まず「何件のファイルでその種類が最も合ったか」（票）、同じなら点の平均で並べる。同じフォームの帳票を
+    まとめて置く前提なので、多数のファイルが合意した種類を先に出し、1件だけ極端に高い点の種類には引きずられない。
+    1つのファイルで点が並んだ種類には、どちらにも票を入れる。
+    """
+    if not ranked:
+        return []
+    best_scores = [max((m.score for m in r.values()), default=0.0) for r in ranked]
+    out = []
+    for pattern_id in ranked[0]:
+        ms = [r[pattern_id] for r in ranked if pattern_id in r]
+        if not ms:
+            continue
+        sheets: list[str] = []
+        for m in ms:
+            sheets.extend(n for n in m.sheet_names if n not in sheets)
+        votes = sum(1 for r, top in zip(ranked, best_scores) if pattern_id in r and r[pattern_id].score >= top)
+        out.append(BatchMatch(
+            pattern=ms[0].pattern, matches=ms, votes=votes, score=sum(m.score for m in ms) / len(ms),
+            found_min=min(m.found_fields for m in ms), found_max=max(m.found_fields for m in ms),
+            total_fields=ms[0].total_fields, sheet_names=sheets,
+        ))
+    out.sort(key=lambda b: (b.votes, b.score), reverse=True)
+    return out
 
 
 def match_pattern(info: WorkbookInfo, pattern: PatternDef) -> PatternMatch:
@@ -3282,7 +3343,8 @@ def match_pattern(info: WorkbookInfo, pattern: PatternDef) -> PatternMatch:
     found = set().union(*(found_by_sheet[n] for n in chosen)) if chosen else set()
     field_score = len(found) / len(pattern.fields) if pattern.fields else 0.0
     confidence = round(100 * (0.25 * sheet_score + 0.75 * field_score))
-    return PatternMatch(pattern, confidence, chosen, len(found), len(pattern.fields))
+    return PatternMatch(pattern, confidence, chosen, len(found), len(pattern.fields),
+                        sheet_score=sheet_score, score=match_score(len(found), len(pattern.fields), sheet_score))
 
 
 def _add_continuation_sheets(info: WorkbookInfo, pattern: PatternDef, chosen: list[str],

@@ -110,6 +110,38 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 .mainnav > a:hover { background: var(--nav-hover); color: #fff; text-decoration: none; }
 .mainnav > a.active { color: #fff; background: var(--nav-active); }
 .mainnav a:focus-visible { outline-color: #8fc1ff; }
+
+/* ヘッダー右上の「AI接続」（一目で 接続中／未接続／つながりません が分かる。押すと #aiDialog が開く） */
+.ai-status { margin-left: auto; }
+.ai-status-btn {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 1px;
+  background: transparent; border: 1px solid rgba(255, 255, 255, .22); border-radius: 8px; color: #fff;
+  padding: .28rem .7rem; cursor: pointer; font: inherit; line-height: 1.3; white-space: nowrap;
+}
+.ai-status-btn:hover { background: var(--nav-hover); }
+.ai-status-btn:focus-visible { outline-color: #8fc1ff; }
+.ai-status-main { display: flex; align-items: center; gap: .4rem; font-weight: 600; }
+.ai-status-label { color: var(--nav-text); }
+.ai-status-time { color: var(--nav-text); font-size: .74rem; }
+.ai-dot { font-size: .95rem; line-height: 1; color: #9aa7b3; }
+.ai-status[data-state="ok"] .ai-dot { color: #4fd18b; }
+.ai-status[data-state="ng"] .ai-dot { color: #ff6b5f; }
+.ai-status[data-state="off"] .ai-status-state, .ai-status[data-state="unchecked"] .ai-status-state { color: var(--nav-text); }
+
+/* AI接続のパネル */
+.ai-dialog { max-width: min(680px, calc(100vw - 2rem)); width: 100%; }
+.dialog-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); margin-bottom: var(--sp-2); }
+.dialog-head h2 { margin: 0; }
+.dialog-close { background: none; border: 0; font-size: 1.4rem; line-height: 1; cursor: pointer; color: var(--muted); padding: 0 .3rem; }
+.dialog-close:hover { color: var(--text); }
+.ai-dialog-state { display: flex; align-items: center; gap: .5rem; margin: 0 0 var(--sp-2); font-size: 1rem; }
+.ai-dialog[data-state="ok"] .ai-dot { color: var(--ok); }
+.ai-dialog[data-state="ng"] .ai-dot { color: var(--danger); }
+.ai-dialog[data-state="off"] .ai-dot, .ai-dialog[data-state="unchecked"] .ai-dot { color: var(--muted); }
+.ai-dialog-form label small { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-weight: normal; }
+.ai-dialog .notice.small { font-size: .84rem; }
+.ai-dialog-steps { margin: var(--sp-3) 0 0; }
+.ai-dialog-actions { margin-top: var(--sp-4); }
 /* ===== レイアウト ===== */
 .container { max-width: 1200px; margin: var(--sp-5) auto; padding: 0 var(--sp-4) 4rem; }
 .container.wide { max-width: 1600px; }
@@ -538,6 +570,33 @@ details summary { cursor: pointer; color: var(--primary); }
 .seg-list li { border: 1px solid var(--border); border-radius: 6px; padding: .45rem .6rem; background: var(--surface); }
 .seg-meta { font-size: .82rem; color: var(--text-2); display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .2rem; }
 .est { color: var(--warn); font-weight: 600; }
+
+/* 分割プレビュー: 左＝原文（セルのまま）、右＝順番1、順番2…のかたまり。同じ色が対応する。
+   900px より狭いときは縦に積む。オレンジ（.est）は「推定」の印なので、対応の色には使わない */
+.split-compare { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: var(--sp-4); align-items: start; margin: var(--sp-2) 0 var(--sp-3); }
+@media (max-width: 900px) { .split-compare { grid-template-columns: 1fr; } }
+.split-compare h4 { margin: 0 0 var(--sp-2); font-size: .88rem; color: var(--text-2); }
+.split-col { min-width: 0; }
+.split-source {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: .6rem .75rem; margin: 0;
+  white-space: pre-wrap; word-break: break-word; font: inherit; font-size: .88rem; line-height: 1.75;
+  max-height: 34rem; overflow: auto;
+}
+.split-source mark { color: inherit; background: var(--seg-bg, #eef0f3); border-radius: 3px; padding: .05em .1em; cursor: pointer;
+  box-shadow: inset 0 -2px 0 var(--seg-line, var(--border-strong)); }
+.split-source mark:hover { filter: brightness(.96); }
+.split-source mark.is-active, .seg-card.is-active { outline: 2px solid var(--primary); outline-offset: 1px; }
+.seg-card { cursor: pointer; border-left: 5px solid var(--seg-line, var(--border-strong)) !important; }
+.seg-card:hover { background: var(--surface-2); }
+.seg-no { display: inline-block; padding: 0 .5rem; border-radius: 999px; background: var(--seg-bg, var(--surface-3)); color: var(--text); }
+.seg-c0 { --seg-bg: #dbe8fb; --seg-line: #4a7fcf; }
+.seg-c1 { --seg-bg: #dff1df; --seg-line: #4f9a5b; }
+.seg-c2 { --seg-bg: #eee9fb; --seg-line: #7c6bd1; }
+.seg-c3 { --seg-bg: #dcf1f7; --seg-line: #2d8fa3; }
+.seg-c4 { --seg-bg: #fbe3ee; --seg-line: #c95b8c; }
+.seg-c5 { --seg-bg: #f3f0cf; --seg-line: #9c8f2c; }
+.seg-c6 { --seg-bg: #e6e8f0; --seg-line: #6f7a99; }
+.seg-c7 { --seg-bg: #e0f5ec; --seg-line: #2f9c74; }
 .md-view { background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: .6rem .75rem;
            font-family: ui-monospace, Consolas, monospace; font-size: .82rem; white-space: pre-wrap; word-break: break-word;
            max-height: 32rem; overflow: auto; margin: 0; }

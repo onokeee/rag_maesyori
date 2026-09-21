@@ -406,12 +406,38 @@ def _m12_drop_pattern_samples(conn: sqlite3.Connection) -> None:
     conn.execute("DROP TABLE IF EXISTS pattern_samples")
 
 
+def _m13_ai_connections(conn: sqlite3.Connection) -> None:
+    """AI接続（APIキー・接続先・モデル）を「ブラウザごと」に持つ（利用者の指示 2026-09-21）。
+
+    利用者の指示:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる。全部空欄にしておいて
+    cookieでユーザー毎に登録内容をずっと保持させるようにしてほしい」。
+    これまでは data/model_settings.yaml 1つを全員で使っていたので、社内LANで数人が使うと互いのキーを
+    上書きし合い、1つのキーを共有していた。持ち主は帳票・取り込みと同じ session_id（views.current_session_id）。
+    この表は「設定」なので、取り込みを捨てる片付け（core.purge_session / sweep_stale / purge_all_pending）の
+    対象にしない（core.SETTINGS_TABLES）。最後の接続確認の結果もここに持ち、ヘッダーはそれを表示するだけ
+    （画面を開くたびに確認しに行かない）。
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS ai_connections (
+        session_id TEXT PRIMARY KEY,                   -- ブラウザの作業場所（views.current_session_id）
+        api_key TEXT NOT NULL DEFAULT '',              -- 平文（暗号化はしていない。画面にそう書く）
+        chat_url TEXT NOT NULL DEFAULT '',             -- …/chat/completions までのフルパス（空欄＝サーバー共通の値）
+        models_url TEXT NOT NULL DEFAULT '',           -- …/models までのフルパス（空欄＝サーバー共通の値）
+        model TEXT NOT NULL DEFAULT '',                -- 使うモデル（空欄＝サーバー共通の既定）
+        models_json TEXT NOT NULL DEFAULT '[]',        -- APIから取得した候補（datalist に出すだけ）
+        last_check_ok INTEGER,                         -- NULL=未確認 / 1=つながった / 0=つながらなかった
+        last_check_at TEXT,
+        last_check_detail TEXT NOT NULL DEFAULT '',    -- 最後の確認の結果（つながらなかった理由）
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
                                                           _m5_purge_scope, _m6_ai_items_per_import,
                                                           _m7_llm_calls_owner, _m8_session_scope, _m9_import_spec,
                                                           _m10_drop_unused, _m11_document_touch,
-                                                          _m12_drop_pattern_samples]
+                                                          _m12_drop_pattern_samples, _m13_ai_connections]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -756,3 +782,76 @@ def update_document(doc_id: int, **columns) -> None:
 
 
 # 帳票を消すのは core/purge.py（元のファイルと DB の行をまとめて消す）
+
+
+# ---- ai_connections（ブラウザごとの AI接続） ---------------------------------------------------
+# 持ち主は session_id（views.current_session_id）。行は「保存」か「接続の確認」で初めてできる（読むだけでは作らない）。
+# 取り込みの片付け（core.purge_*）では消えない「設定」。長く使われていない行だけ core.sweep_stale_ai_connections が消す。
+
+AI_CONNECTION_FIELDS = ("api_key", "chat_url", "models_url", "model")
+
+
+def get_ai_connection(session_id: str | None) -> dict | None:
+    """そのブラウザの AI接続の行（無ければ None）。models は list にして返す。"""
+    if not session_id:
+        return None
+    row = _one("SELECT * FROM ai_connections WHERE session_id = ?", (session_id,))
+    if row is None:
+        return None
+    try:
+        row["models"] = [str(m) for m in json.loads(row.get("models_json") or "[]") if str(m).strip()]
+    except ValueError:
+        row["models"] = []
+    return row
+
+
+def save_ai_connection(session_id: str, *, api_key: str | None = None, chat_url: str | None = None,
+                       models_url: str | None = None, model: str | None = None,
+                       models: list[str] | None = None) -> dict:
+    """そのブラウザの AI接続を保存する（None の項目は変えない）。接続先・キーを変えたら確認の結果は「未確認」に戻す。"""
+    ts = now()
+    db = get_db()
+    with db:
+        row = db.execute("SELECT * FROM ai_connections WHERE session_id = ?", (session_id,)).fetchone()
+        if row is None:
+            db.execute("INSERT INTO ai_connections (session_id, created_at, updated_at) VALUES (?, ?, ?)",
+                       (session_id, ts, ts))
+        sets, args = ["updated_at = ?"], [ts]
+        for name, value in (("api_key", api_key), ("chat_url", chat_url), ("models_url", models_url), ("model", model)):
+            if value is not None:
+                sets.append(f"{name} = ?")
+                args.append(str(value))
+        if models is not None:
+            sets.append("models_json = ?")
+            args.append(json.dumps([str(m) for m in models], ensure_ascii=False))
+        # つながるかどうかは接続先・キー・モデルで決まる。どれかが変わったら前の結果は当てにならない
+        changed = row is None or any(value is not None and str(value) != (row[name] or "")
+                                     for name, value in (("api_key", api_key), ("chat_url", chat_url),
+                                                         ("models_url", models_url), ("model", model)))
+        if changed:
+            sets.append("last_check_ok = NULL")
+            sets.append("last_check_at = NULL")
+            sets.append("last_check_detail = ''")
+        db.execute(f"UPDATE ai_connections SET {', '.join(sets)} WHERE session_id = ?", (*args, session_id))
+    return get_ai_connection(session_id) or {}
+
+
+def set_ai_connection_check(session_id: str, ok: bool, detail: str = "") -> None:
+    """接続の確認の結果（ヘッダーの「接続中／つながりません」と「最終確認」）を覚える。行が無ければ作る。"""
+    ts = now()
+    db = get_db()
+    with db:
+        db.execute("INSERT OR IGNORE INTO ai_connections (session_id, created_at, updated_at) VALUES (?, ?, ?)",
+                   (session_id, ts, ts))
+        db.execute("UPDATE ai_connections SET last_check_ok = ?, last_check_at = ?, last_check_detail = ?, "
+                   "updated_at = ? WHERE session_id = ?",
+                   (1 if ok else 0, ts, str(detail or "")[:500], ts, session_id))
+
+
+def clear_ai_connection_key(session_id: str) -> bool:
+    """［キーを消す］（共有PC）。接続先・モデルは残し、キーと確認の結果だけ消す。戻り値: 行があったか。"""
+    db = get_db()
+    with db:
+        cur = db.execute("UPDATE ai_connections SET api_key = '', last_check_ok = NULL, last_check_at = NULL, "
+                         "last_check_detail = '', updated_at = ? WHERE session_id = ?", (now(), session_id))
+    return cur.rowcount > 0

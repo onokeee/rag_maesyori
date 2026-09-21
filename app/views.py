@@ -7,12 +7,12 @@ import hashlib
 import io
 import json
 import re
+import sqlite3
 import threading
-import time
 import unicodedata
 import zipfile
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote, urlsplit
@@ -76,6 +76,7 @@ from app.forms import (
     build_markdown,
     markdown_filename,
     rank_patterns,
+    rank_batch,
     table_like_sheets,
     suggest_title_fields,
     click_field,
@@ -133,17 +134,23 @@ from app.tables import (
 # ログインは無いので「誰か」は分からないが、「どのブラウザか」はセッションのクッキーで分かる。
 # 取り込んだ帳票・一覧表はそのブラウザのものとして持ち主を記録し、ほかのブラウザからは
 # 見えない・触れないようにする（views/forms.py・views/tables.py の 404）。
-# 「設定」（帳票の種類・取り込み設定・AI接続）はみんなで使うものなので分けない。
+# 「設定」のうち帳票の種類はみんなで使うので分けない。AI接続（APIキー・接続先）だけは、同じ id で
+# ブラウザごとに持つ（利用者の指示 2026-09-21「cookieでユーザー毎に登録内容をずっと保持」。llm.py・database.ai_connections）。
+# そのためクッキーは約1年もたせる（SESSION_LIFETIME。create_app が PERMANENT_SESSION_LIFETIME に入れる）。
+# 長くしても分かれ方は変わらない: id は uuid4 で、署名鍵（SECRET_KEY）付きの HttpOnly・SameSite=Lax のクッキー
+# にしか無く、ほかのブラウザからは推測も持ち出しもできない。
 
 SESSION_ID_KEY = "sid"
+SESSION_LIFETIME = timedelta(days=365)
 
 
 def current_session_id() -> str:
-    """このブラウザの作業場所の id（クッキーに無ければ作る）。"""
+    """このブラウザの作業場所の id（クッキーに無ければ作る）。クッキーは約1年もたせる。"""
     sid = session.get(SESSION_ID_KEY)
     if not isinstance(sid, str) or len(sid) != 32:
         sid = uuid4().hex
         session[SESSION_ID_KEY] = sid
+    session.permanent = True   # 有効期限（PERMANENT_SESSION_LIFETIME）付きのクッキーにする。要求のたびに延びる
     return sid
 
 
@@ -608,27 +615,22 @@ def type_fragment(doc_id: int):
 
 
 def _batch_matches(ranked: list[dict]) -> list[SimpleNamespace]:
-    """置かれたファイル全部をまとめた帳票の種類の候補（見つかった項目が多い順）。
+    """置かれたファイル全部をまとめた帳票の種類の候補（合う順。並べ方は forms.rank_batch）。
 
     同じフォームの帳票をまとめて置く前提なので、種類は1つだけ選ぶ。件数で違う分は
     「3項目中2〜3項目」のように幅で出し、ファイルごとの数は下のファイルの行に出す。
+    先頭（先に選んでおく種類）は、最も多くのファイルで最も合った種類。「見つかった割合」だけで
+    並べると 4項目中4項目の小さな種類が 33項目中32項目の本物に勝つので、割合ではなく
+    forms.match_score（見つかった数・割合・シート名の一致）の点で並べる。
     """
     out = []
-    for pattern_id in (ranked[0] if ranked else {}):
-        ms = [r[pattern_id] for r in ranked if pattern_id in r]
-        if not ms:
-            continue
-        sheets: list[str] = []
-        for m in ms:
-            sheets.extend(n for n in m.sheet_names if n not in sheets)
-        lo, hi = min(m.found_fields for m in ms), max(m.found_fields for m in ms)
-        total = ms[0].total_fields
+    for b in rank_batch(ranked):
+        lo, hi, total = b.found_min, b.found_max, b.total_fields
         out.append(SimpleNamespace(
-            pattern=ms[0].pattern, total_fields=total, found_fields=lo, sheet_names=sheets,
-            confidence=sum(m.confidence for m in ms) / len(ms),
+            pattern=b.pattern, total_fields=total, found_fields=lo, sheet_names=b.sheet_names,
+            votes=b.votes, score=b.score, files=len(b.matches),
             found_label=(f"{total}項目中{lo}項目が見つかりました" if lo == hi
                          else f"{total}項目中{lo}〜{hi}項目が見つかりました")))
-    out.sort(key=lambda m: m.confidence, reverse=True)
     return out
 
 
@@ -2243,10 +2245,9 @@ def _ai_job(import_id: int) -> dict | None:
 
 
 def _ai_connection_ctx() -> dict:
-    """AI接続の状態（段の中の「AI接続」パネル）。"""
+    """AI整形の段に要る AI接続の状態（設定そのものはヘッダーの「AI接続」。ai_header_ctx）。"""
     from app import llm
 
-    status = llm.admin_status()
     ready = llm.is_configured()
     external, model = False, ""
     if ready:
@@ -2256,9 +2257,7 @@ def _ai_connection_ctx() -> dict:
             model = settings.get("model") or ""
         except Exception:
             ready = False
-    return {"ai_status": status, "ai_ready": ready, "external": external, "model": model,
-            "save_url": url_for("tables.save_ai_connection"), "test_url": url_for("tables.test_ai_connection"),
-            "models_url": url_for("tables.refresh_ai_models")}
+    return {"ai_ready": ready, "external": external, "model": model, "ai_state": llm.connection_status()}
 
 
 def _panel_ai(imp: dict):
@@ -2312,12 +2311,15 @@ def ai_split_preview(import_id: int):
         return _json_error("行が見つかりません")
     w = works[0]
     parse = w.parse
+    # id（s1, s2…）は AI との受け渡し用で画面には出さない。画面は no（順番1、順番2…）と、原文（text）の中の
+    # 位置 start/end で「原文と並べて」見せる（利用者の指示 2026-09-21）
     segments = [{
-        "id": s.id, "body": s.body, "when": format_when(s.when), "when_estimated": bool(s.when and s.when.estimated),
+        "id": s.id, "no": n, "body": s.body, "start": int(s.start), "end": int(s.end),
+        "when": format_when(s.when), "when_estimated": bool(s.when and s.when.estimated),
         "author": format_author(s.author), "author_estimated": bool(s.author and s.author.estimated),
         "marks": list(s.marks or []), "identifiers": list(s.identifiers or []), "quantities": list(s.quantities or []),
         "plans": list(s.plans or []),
-    } for s in parse.segments]
+    } for n, s in enumerate(parse.segments, start=1)]
     return jsonify({
         "row_key": row_key, "kind": parse.kind, "order": parse.order, "text": parse.text, "segments": segments,
         "route": w.route, "reason": w.reason, "ai_ready": llm.is_configured(), "notes": review_notes(parse),
@@ -2356,8 +2358,11 @@ def ai_trial(import_id: int):
                 if _TRIALS[import_id] <= 0:
                     del _TRIALS[import_id]
     except llm.LLMNotConfigured:
-        return _json_error("AI接続が設定されていません。この段の「AI接続」で設定してください")
+        return _json_error("AI接続が設定されていません。画面右上の「AI接続」で設定してください")
     except llm.LLMCallError as exc:
+        if exc.kind == "fatal":
+            # 接続先に届かない・キーが拒否された。ヘッダーの表示もそれに合わせる（確認しに行く手間はかけない）
+            llm.record_check(current_session_id(), False, [{"name": "試し実行", "ok": False, "detail": str(exc)}])
         return _json_error(str(exc))
     except aiproc.AIJobError as exc:
         return _json_error(str(exc))
@@ -2417,10 +2422,19 @@ def ai_run(import_id: int):
         settings = llm.job_client_settings()
         if not llm.is_local_endpoint(settings.get("chat_url") or "") and not data.get("confirm_external"):
             return _json_error("対応内容が外部のAIサービスに送信されます。確認のチェックを入れてください")
+        # 始める前に接続を確かめる（利用者の指示: AI整形を始めるときに確認）。ヘッダーの表示もここで更新される。
+        # つながらなければジョブを作らずに理由を返す（何百行も失敗させてから気づかせない）
+        ok, steps = llm.check_connection()
+        llm.record_check(current_session_id(), ok, steps)
+        if not ok:
+            failed = next((s for s in steps if not s.get("ok")), steps[-1])
+            return _json_error(f"AIにつながりません（{failed['name']}: {failed['detail']}）。"
+                               "画面右上の「AI接続」を確認してください", ai_status=llm.connection_status())
         job_id = aiproc.start_ai_job(import_id, scope=scope, concurrency=concurrency, stage_ids=["log"])
     except llm.LLMNotConfigured:
-        return _json_error("AI接続が設定されていません")
-    return jsonify({"ok": True, "job_id": job_id, "job_url": url_for("tables.api_job", job_id=job_id)})
+        return _json_error("AI接続が設定されていません。画面右上の「AI接続」で設定してください")
+    return jsonify({"ok": True, "job_id": job_id, "job_url": url_for("tables.api_job", job_id=job_id),
+                    "ai_status": llm.connection_status()})
 
 
 @tables_bp.post("/imports/<int:import_id>/ai/<action>")
@@ -2436,77 +2450,88 @@ def ai_control(import_id: int, action: str):
     return jsonify({"ok": True})
 
 
-# ---- AI接続（AI整形の段の中。設定画面は無い） ---------------------------------------------------
+# ---- AI接続（ヘッダーの右上。どの画面でも同じパネルが開く。設定画面は無い） -----------------------------
+# 利用者の指示（2026-09-21）:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる。
+# 全部空欄にしておいてcookieでユーザー毎に登録内容をずっと保持させるようにしてほしい」
+# 「AI接続はヘッダー上で、接続中 か 未接続 一目で分かるように」
+# 設定はブラウザごと（current_session_id ごと。llm.py・database.ai_connections）。URL は昔のまま /tables/ の下に
+# 置いてある（画面には出ない。base.html の data-* 属性で渡す）。
+
+@tables_bp.app_context_processor
+def ai_header_ctx() -> dict:
+    """どの画面のヘッダーにも「AI接続」の状態を出す。確認しには行かず、覚えている結果を出すだけ。"""
+    from app import llm
+
+    try:
+        status = llm.connection_status()
+    except Exception as exc:   # DB が読めないときでも画面は出す
+        status = {"state": "off", "state_label": "未接続", "ready": False, "checked_text": "", "check_detail": str(exc),
+                  "sub_text": "クリックして設定", "panel_sub_text": "",
+                  "chat_url": "", "models_url": "", "model": "", "models": [], "api_key_saved": False,
+                  "api_key_source": "", "effective": {}, "fallback": {},
+                  "placeholders": {"chat_url": "https://api.openai.com/v1/chat/completions",
+                                   "models_url": "https://api.openai.com/v1/models", "model": ""}}
+    return {"ai_header": status,
+            "ai_urls": {"save": url_for("tables.save_ai_connection"), "test": url_for("tables.test_ai_connection"),
+                        "models": url_for("tables.refresh_ai_models"), "clear": url_for("tables.clear_ai_key")}}
+
 
 @tables_bp.post("/ai-connection")
 def save_ai_connection():
+    """ヘッダーの「AI接続」の［保存する］。保存したあと、その設定でつながるかを確かめる（結果はヘッダーに出る）。"""
     from app import llm
 
     data = _tables_payload()
-    models = [str(m).strip() for m in (data.get("models") or []) if str(m).strip()]
-    models += [m.strip() for m in str(data.get("add_models") or "").splitlines() if m.strip()]
+    sid = current_session_id()
     try:
-        llm.save_admin({
-            "models": list(dict.fromkeys(models)),
-            "default": str(data.get("default") or ""),
-            "chat_url": str(data.get("chat_url") or ""),
-            "models_url": str(data.get("models_url") or ""),
-            "api_key": str(data.get("api_key") or ""),
-            "api_key_clear": bool(data.get("api_key_clear")),
-        })
+        llm.save_browser(sid, data)
     except ValueError as exc:
         return _json_error(str(exc))
-    except OSError as exc:
-        return _json_error(f"設定ファイルに書き込めませんでした（{exc.strerror or exc.__class__.__name__}）。"
-                           "少し待ってから、もう一度保存してください")
-    return jsonify({"ok": True, "message": "AI接続の設定を保存しました"})
+    except sqlite3.Error as exc:
+        return _json_error(f"保存できませんでした（{exc.__class__.__name__}）。少し待ってから、もう一度保存してください")
+    ok, steps = llm.check_connection()
+    llm.record_check(sid, ok, steps)
+    status = llm.connection_status()
+    if not status["ready"]:
+        message = "保存しました（APIキーと接続先がそろうと接続を確かめます）"
+    else:
+        message = "保存しました。" + ("AIにつながりました" if ok else "AIにつながりません（下の結果を確認してください）")
+    return jsonify({"ok": True, "message": message, "connected": ok, "steps": steps, "status": status})
+
+
+@tables_bp.post("/ai-connection/clear")
+def clear_ai_key():
+    """［キーを消す］（共有PCで使い終わったとき）。このブラウザの APIキーだけ消す。接続先・モデルは残す。"""
+    from app import llm
+
+    status = llm.clear_browser_key(current_session_id())
+    return jsonify({"ok": True, "message": "このブラウザのAPIキーを消しました", "status": status})
 
 
 @tables_bp.post("/ai-connection/models")
 def refresh_ai_models():
-    """APIからモデル一覧を取得する。"""
+    """APIからモデル一覧を取得し、このブラウザの候補（入力欄の候補）として覚える。"""
     from app import llm
 
     try:
         catalog = llm.model_catalog(refresh=True)
     except Exception as exc:
         return _json_error(f"モデル一覧を取得できませんでした: {llm.friendly_error(exc)}")
-    return jsonify({"ok": True, "models": catalog, "message": f"APIからモデル一覧を取得しました（{len(catalog)}件）"})
+    if catalog:
+        db.save_ai_connection(current_session_id(), models=catalog)   # 入力欄の候補（datalist）として覚える
+        llm.forget_browser()
+    return jsonify({"ok": True, "models": catalog, "message": f"APIからモデル一覧を取得しました（{len(catalog)}件）",
+                    "status": llm.connection_status()})
 
 
 @tables_bp.post("/ai-connection/test")
 def test_ai_connection():
-    """接続テスト: モデル一覧の取得と、1回の短いチャット。"""
+    """接続の確認: モデル一覧の取得と、1回の短いチャット。パネルを開いたとき・［接続を確かめる］で呼ぶ。"""
     from app import llm
 
-    if not llm.is_configured():
-        return jsonify({"ok": False, "steps": [{"name": "設定", "ok": False,
-                                                "detail": "APIキーまたは接続先が未設定です。"}]})
-    steps = []
-    started = time.monotonic()
-    try:
-        names = llm.fetch_api_models(refresh=True)
-        steps.append({"name": "モデル一覧の取得", "ok": True,
-                      "detail": f"{len(names)}件のモデルが見つかりました（{_ms(started)}ミリ秒）"})
-    except Exception as exc:
-        steps.append({"name": "モデル一覧の取得", "ok": False, "detail": llm.friendly_error(exc)})
-    model = llm.current_model()
-    started = time.monotonic()
-    try:
-        # AI整形のジョブと同じ呼び出し口（再試行なし・明示のタイムアウト）で確かめる
-        result = llm.chat_raw(llm.job_client_settings(),
-                              [{"role": "user", "content": "接続テストです。「OK」とだけ返してください。"}], max_tokens=20)
-        reply = (result.text or "").strip()
-        steps.append({"name": f"チャット（{model}）", "ok": True,
-                      "detail": f"応答あり: {reply[:40] or '（本文なし）'}（{_ms(started)}ミリ秒）"})
-    except Exception as exc:
-        steps.append({"name": f"チャット（{model}）", "ok": False, "detail": llm.friendly_error(exc)})
-    # チャットが通れば AI 整形は使える（モデル一覧APIが無い互換サーバもある）
-    return jsonify({"ok": steps[-1]["ok"], "steps": steps})
-
-
-def _ms(started: float) -> int:
-    return int((time.monotonic() - started) * 1000)
+    ok, steps = llm.check_connection()
+    llm.record_check(current_session_id(), ok, steps)
+    return jsonify({"ok": ok, "steps": steps, "status": llm.connection_status()})
 
 
 # ---- 内容の確認 ---------------------------------------------------------------------------

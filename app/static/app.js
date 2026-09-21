@@ -443,6 +443,175 @@ window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgres
                ragDiscard };
 
 
+// ---- AI接続（ヘッダー右上。どの画面にもある） ----------------------------------------------------
+// 利用者の指示（2026-09-21）:「AI接続の設定は…ヘッダーの画面右上『AI接続』に移動」「接続中 か 未接続 一目で分かるように」。
+// 状態はサーバーが覚えている結果（templates/base.html の ai_header）を出すだけ。確かめに行くのは
+// 「パネルを開いたとき」「保存したとき」だけ（AI整形を始めるときはサーバー側で確かめ、答えに status が付く）。
+// 画面を開くたびには確かめない（お金がかかり、画面が待たされる）。
+window.ragAiHeader = (() => {
+  const header = document.querySelector("[data-ai-header]");
+  const dialog = document.getElementById("aiDialog");
+  if (!header || !dialog) return { render() {} };
+  const q = (selector) => dialog.querySelector(selector);
+  const make = (tag, attrs = {}, ...children) => {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") node.className = v;
+      else if (k === "text") node.textContent = v;
+      else if (v !== null && v !== undefined) node.setAttribute(k, v);
+    }
+    node.append(...children.filter((c) => c != null));
+    return node;
+  };
+
+  /** サーバーが返す status（llm.connection_status）でヘッダーとパネルを描き直す。 */
+  function render(status) {
+    if (!status) return;
+    header.dataset.state = status.state;
+    dialog.dataset.state = status.state;
+    document.querySelectorAll("[data-ai-state]").forEach((n) => (n.textContent = status.state_label || ""));
+    document.querySelectorAll("[data-ai-sub]").forEach((n) => (n.textContent = status.sub_text || ""));
+    document.querySelectorAll("[data-ai-panel-sub]").forEach((n) => (n.textContent = status.panel_sub_text || ""));
+    const detail = q("[data-ai-detail]");
+    if (detail) {
+      detail.hidden = !status.check_detail;
+      detail.firstElementChild.textContent = status.check_detail || "";
+    }
+    const key = q("[data-ai-field=api_key]");
+    if (key) key.placeholder = status.api_key_saved ? "保存済み（変えるときだけ入力）" : "sk-… を貼り付け";
+    const keyNote = q("[data-ai-key-note]");
+    if (keyNote) {
+      keyNote.textContent = status.api_key_saved ? "このブラウザのキーを保存済みです。"
+        : (status.api_key_source ? "このブラウザのキーは未保存です（サーバー共通のキーを使います）。" : "まだ保存していません。");
+    }
+    const clear = q("[data-ai-clear]");
+    if (clear) clear.disabled = !status.api_key_saved;
+    const list = q("[data-ai-model-list]");
+    if (list && Array.isArray(status.models)) {
+      list.replaceChildren(...status.models.map((m) => make("option", { value: m })));
+      const note = q("[data-ai-models-note]");
+      if (note) note.textContent = status.models.length ? `候補 ${status.models.length}件（入力欄で選べます）` : "取得すると入力欄の候補に出ます。";
+    }
+    const eff = status.effective || {};
+    const effUrl = q("[data-ai-effective-url]");
+    if (effUrl) effUrl.textContent = eff.chat_url || "（未設定）";
+    const effModel = q("[data-ai-effective-model]");
+    if (effModel) effModel.textContent = eff.model || "（未設定）";
+  }
+
+  function showSteps(steps) {
+    const list = q("[data-ai-test-result]");
+    if (!list) return;
+    list.replaceChildren(...(steps || []).map((step) => make("li", {},
+      make("div", { class: "item-main" },
+        make("span", { class: "item-title", text: `${step.ok ? "OK" : "NG"}　${step.name}` }),
+        make("span", { class: step.ok ? "muted" : "warn", text: step.detail || "" })))));
+    list.hidden = !steps || !steps.length;
+  }
+
+  let checking = false;
+  async function check() {
+    if (checking) return;
+    checking = true;
+    const busy = q("[data-ai-busy]");
+    const button = q("[data-ai-test]");
+    if (busy) busy.hidden = false;
+    if (button) button.disabled = true;
+    try {
+      const res = await ragFetch(dialog.dataset.testUrl, { json: {}, quiet: true });
+      render(res.status);
+      showSteps(res.steps);
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      checking = false;
+      if (busy) busy.hidden = true;
+      if (button) button.disabled = false;
+    }
+  }
+
+  function open() {
+    if (typeof dialog.showModal !== "function") return;
+    if (!dialog.open) dialog.showModal();
+    // 何も入っていなければ確かめに行っても「未設定」と返るだけなので、行かない
+    if (header.dataset.state !== "off") check();
+  }
+
+  async function save(button) {
+    const data = {};
+    dialog.querySelectorAll("[data-ai-field]").forEach((input) => { data[input.dataset.aiField] = input.value; });
+    button.disabled = true;
+    try {
+      const res = await ragFetch(dialog.dataset.saveUrl, { json: data, quiet: true });
+      const key = q("[data-ai-field=api_key]");
+      if (key) key.value = "";   // キーは画面に置いたままにしない
+      render(res.status);
+      showSteps(res.steps);
+      toast(res.message || "保存しました", res.connected === false && res.status && res.status.ready ? "err" : "ok");
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function clearKey(button) {
+    button.disabled = true;
+    try {
+      const res = await ragFetch(dialog.dataset.clearUrl, { json: {}, quiet: true });
+      const key = q("[data-ai-field=api_key]");
+      if (key) key.value = "";
+      render(res.status);
+      showSteps([]);
+      toast(res.message || "キーを消しました");
+    } catch (e) {
+      toast(e.message, "err");
+      button.disabled = false;
+    }
+  }
+
+  async function fetchModels(button) {
+    button.disabled = true;
+    try {
+      const res = await ragFetch(dialog.dataset.modelsUrl, { json: {}, quiet: true });
+      render(res.status);
+      toast(res.message || "取得しました");
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  document.addEventListener("click", (event) => {
+    if (event.target.closest("[data-ai-open]")) {
+      open();
+      return;
+    }
+    if (!dialog.contains(event.target)) return;
+    const hit = (selector) => event.target.closest(selector);
+    if (hit("[data-ai-close]")) dialog.close();
+    else if (hit("[data-ai-test]")) check();
+    else if (hit("[data-ai-save]")) save(hit("[data-ai-save]"));
+    else if (hit("[data-ai-models]")) fetchModels(hit("[data-ai-models]"));
+    else if (hit("[data-ai-clear]")) {
+      const button = hit("[data-ai-clear]");
+      // data-confirm の付いたボタンは、上の確認ダイアログの処理が先に走り、確認後にもう一度クリックが来る
+      if (!button.dataset.confirm || button.dataset.confirmed === "1") clearKey(button);
+    }
+  });
+  // Enter で保存（パネルは <form> ではないので自分で拾う）
+  dialog.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.target.matches("input[data-ai-field]")) {
+      event.preventDefault();
+      const button = q("[data-ai-save]");
+      if (button && !button.disabled) save(button);
+    }
+  });
+
+  return { render, open };
+})();
+
 // ==== forms: 帳票取り込み（/forms。旧 review.js） ====
 // 帳票取り込み（/forms）: 1枚の画面で ファイルを置く → 種類とシート → 読み取り結果 → 確定してダウンロード。
 // 画面は移動しない。どの操作も fetch でルートを呼び、返ってきた HTML の断片をその場に入れ替える。
@@ -2137,19 +2306,73 @@ window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgres
   // ---- 5 AI整形 -----------------------------------------------------------------------
   const trials = [];
 
-  const segmentList = (data) => {
+  // 分割プレビュー: 左に原文（セルのまま）、右に「順番1、順番2…」のかたまり。同じ色が対応する
+  // （利用者の指示 2026-09-21「順番1、順番2の表示にしてほしい。また、原文と並べて見れるようにしたい」）。
+  // s.id（s1, s2…）は AI との受け渡し用で画面には出さない。位置は s.start / s.end（data.text の中）。
+  const SEG_COLORS = 8;
+
+  const segmentCards = (data) => {
     const list = el("ol", { class: "seg-list" });
-    data.segments.forEach((s) => {
+    data.segments.forEach((s, i) => {
       const meta = el("div", { class: "seg-meta" },
-        el("strong", { text: s.id }),
+        el("strong", { class: "seg-no", text: `順番${s.no || i + 1}` }),
         el("span", { class: s.when_estimated ? "est" : "", text: `日付: ${s.when}` }),
         el("span", { class: s.author_estimated ? "est" : "", text: `記入者: ${s.author || "なし"}` }),
         s.marks.length ? el("span", { class: "muted", text: `印: ${s.marks.join("・")}` }) : null,
         s.identifiers.length ? el("span", { class: "muted", text: `識別子: ${s.identifiers.join("、")}` }) : null);
-      list.append(el("li", {}, meta, el("div", { class: "pre", text: s.body })));
+      list.append(el("li", { class: `seg-card seg-c${i % SEG_COLORS}`, "data-seg": s.id, tabindex: "0",
+                             title: "クリックすると原文のその部分を示します" },
+        meta, el("div", { class: "pre", text: s.body })));
     });
     return list;
   };
+
+  // 原文（改行もそのまま）。分けた部分ごとに順番の色で塗る。位置が無い・重なる部分は塗らずに残す
+  const sourceText = (data) => {
+    const pre = el("pre", { class: "split-source", "data-split-source": "" });
+    const text = data.text || "";
+    const spans = data.segments
+      .map((s, i) => ({ id: s.id, no: s.no || i + 1, start: Number(s.start), end: Number(s.end), i }))
+      .filter((s) => Number.isFinite(s.start) && Number.isFinite(s.end) && s.end > s.start)
+      .sort((a, b) => a.start - b.start);
+    let pos = 0;
+    for (const s of spans) {
+      const start = Math.max(s.start, pos);
+      if (start >= s.end) continue;
+      if (start > pos) pre.append(text.slice(pos, start));
+      pre.append(el("mark", { class: `seg-c${s.i % SEG_COLORS}`, "data-seg": s.id, title: `順番${s.no}`, tabindex: "0" },
+        text.slice(start, s.end)));
+      pos = s.end;
+    }
+    if (pos < text.length) pre.append(text.slice(pos));
+    return pre;
+  };
+
+  const splitCompare = (data) => el("div", { class: "split-compare", "data-split-compare": "" },
+    el("div", { class: "split-col" }, el("h4", { text: "原文（セルのまま）" }), sourceText(data)),
+    el("div", { class: "split-col" }, el("h4", { text: "分けた結果" }), segmentCards(data)));
+
+  // 順番のカード ⇄ 原文の色の部分を行き来する（クリック・Enter）
+  const jumpSegment = (node) => {
+    const box = node.closest("[data-split-compare]");
+    if (!box) return;
+    const id = node.dataset.seg;
+    const inSource = node.matches("mark");
+    box.querySelectorAll("[data-seg].is-active").forEach((n) => n.classList.remove("is-active"));
+    const other = box.querySelector(inSource ? `li[data-seg="${id}"]` : `mark[data-seg="${id}"]`);
+    node.classList.add("is-active");
+    if (other) {
+      other.classList.add("is-active");
+      other.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  };
+  page.addEventListener("keydown", (event) => {
+    const node = event.target.closest("[data-split-compare] [data-seg]");
+    if (node && (event.key === "Enter" || event.key === " ")) {
+      event.preventDefault();
+      jumpSegment(node);
+    }
+  });
 
   const trialCard = (res) => {
     const labels = { ok: "OK", flagged: "要確認", error: "エラー", rule_only: "ルールのみ", skipped: "対象外" };
@@ -2175,6 +2398,12 @@ window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgres
     if (!root) return;
     const hit = (selector) => event.target.closest(selector);
 
+    const segNode = hit("[data-split-compare] [data-seg]");
+    if (segNode) {
+      jumpSegment(segNode);
+      return;
+    }
+
     if (hit("[data-split-run]")) {
       const box = root.querySelector("[data-split-result]");
       const rowKey = root.querySelector("[data-split-row]").value;
@@ -2183,11 +2412,15 @@ window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgres
         const data = await rf(root.dataset.splitUrl, { json: { row_key: rowKey }, quiet: true });
         // AI接続が未設定のときは「送る」だけだと今この操作で送ったように読めるので、送られないことを書く
         const routeText = data.route === "ai"
-          ? (data.ai_ready === false ? "送る（AI接続の設定後。今は送っていません）" : "送る")
+          ? (data.ai_ready === false ? "送る（画面右上の「AI接続」の設定後。今は送っていません）" : "送る")
           : `送らない（${data.reason}）`;
+        const count = data.segments.length;
+        const lead = count
+          ? `${count}つに分かれました（日付や記入者がオレンジのものは、書き方から推定したものです）。`
+          : "分けられませんでした（日付などの区切りが見つかりません）。";
         const parts = [
-          el("p", { class: "hint", text: `区切り ${data.segments.length}件（オレンジは推定）。AIに送るか: ${routeText}` }),
-          segmentList(data),
+          el("p", { class: "hint", text: `${lead}AIに送るか: ${routeText}` }),
+          splitCompare(data),
         ];
         if (data.notes.length) parts.push(el("ul", { class: "list-plain warn" }, ...data.notes.map((n) => el("li", { text: n }))));
         parts.push(el("h4", { text: "Markdown での時系列" }), el("pre", { class: "md-view", text: data.timeline.join("\n") }));
@@ -2262,9 +2495,11 @@ window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgres
       }
       aiRun.disabled = true;
       try {
-        await rf(root.dataset.runUrl, { json: { ...runOptions(root), confirm_external: Boolean(external?.checked) }, quiet: true });
+        const res = await rf(root.dataset.runUrl, { json: { ...runOptions(root), confirm_external: Boolean(external?.checked) }, quiet: true });
+        window.ragAiHeader?.render(res.ai_status);   // 始める前に接続を確かめた結果をヘッダーにも映す
         await loadPanel("ai", { open: true, scroll: false });
       } catch (e) {
+        window.ragAiHeader?.render(e.data?.ai_status);
         toast(e.message, "err");
         aiRun.disabled = false;
       }
@@ -2282,71 +2517,8 @@ window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgres
         toast(e.message, "err");
       }
       await loadPanel("ai", { open: true, scroll: false });
-      return;
     }
-
-    // AI接続（この段の中）
-    const panel = hit("[data-ai-connection]");
-    if (!panel) return;
-    if (hit("[data-ai-test]")) {
-      const button = hit("[data-ai-test]");
-      const list = panel.querySelector("[data-ai-test-result]");
-      button.disabled = true;
-      button.textContent = "テスト中…";
-      list.hidden = true;
-      try {
-        const result = await rf(panel.dataset.testUrl, { json: {}, quiet: true });
-        list.replaceChildren(...result.steps.map((step) => el("li", {},
-          el("div", { class: "item-main" },
-            el("span", { class: "item-title", text: `${step.ok ? "OK" : "NG"}　${step.name}` }),
-            el("span", { class: step.ok ? "muted" : "warn", text: step.detail })))));
-        list.hidden = false;
-        toast(result.ok ? "接続できました。" : "接続できませんでした。", result.ok ? "ok" : "err");
-      } catch (e) {
-        toast(e.message, "err");
-      } finally {
-        button.disabled = false;
-        button.textContent = "接続をテストする";
-      }
-      return;
-    }
-    if (hit("[data-ai-models]")) {
-      const button = hit("[data-ai-models]");
-      button.disabled = true;
-      try {
-        const res = await rf(panel.dataset.modelsUrl, { json: {}, quiet: true });
-        const list = panel.querySelector("[data-ai-model-list]");
-        const known = new Set([...list.querySelectorAll("[data-ai-model]")].map((i) => i.value));
-        res.models.filter((m) => !known.has(m)).forEach((m) => {
-          list.append(el("label", { class: "check" },
-            el("input", { type: "checkbox", "data-ai-model": "", value: m }),
-            el("span", { class: "mono", text: m })));
-        });
-        toast(res.message || "取得しました");
-      } catch (e) {
-        toast(e.message, "err");
-      } finally {
-        button.disabled = false;
-      }
-      return;
-    }
-    if (hit("[data-ai-save]")) {
-      const button = hit("[data-ai-save]");
-      const data = { models: [...panel.querySelectorAll("[data-ai-model]:checked")].map((i) => i.value) };
-      panel.querySelectorAll("[data-ai-field]").forEach((input) => {
-        data[input.dataset.aiField] = input.type === "checkbox" ? input.checked : input.value;
-      });
-      button.disabled = true;
-      try {
-        const res = await rf(panel.dataset.saveUrl, { json: data, quiet: true });
-        toast(res.message || "保存しました");
-        await loadPanel("ai", { open: true, scroll: false });
-      } catch (e) {
-        toast(e.message, "err");
-      } finally {
-        button.disabled = false;
-      }
-    }
+    // AI接続の設定はこの段には無い（ヘッダー右上の「AI接続」。上の window.ragAiHeader）
   });
 
   // ---- 6 内容の確認: md の中身 ------------------------------------------------------------

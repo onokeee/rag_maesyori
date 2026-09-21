@@ -1,20 +1,26 @@
-"""OpenAI 互換 API の接続と、画面から保存する AI接続の設定（data/model_settings.yaml）。
+"""OpenAI 互換 API の接続と、ヘッダーの「AI接続」からブラウザごとに保存する接続の設定。
+
+設定の出どころは3つで、この順に見る（項目ごと）:
+  1. そのブラウザが「AI接続」で保存したもの（database.ai_connections。持ち主は views.current_session_id）
+  2. 前の版の画面が書いた data/model_settings.yaml（サーバー共通。もう書かない。あれば読むだけ）
+  3. env ファイル（OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL / OPENAI_MODELS。手で組んだサーバー向け）
+画面の入力欄には 1 の値しか入れない（2・3 は「サーバー共通の設定」として、あることだけ知らせる）。
 """
 from __future__ import annotations
 
 import hashlib
 import ipaddress
 import json
-import os
 import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml
-from flask import current_app
+from flask import current_app, g, has_request_context, session
 from openai import OpenAI
 
 from app.core import REMOVE_RETRIES, REMOVE_RETRY_WAIT
@@ -23,11 +29,10 @@ from app.core import REMOVE_RETRIES, REMOVE_RETRY_WAIT
 
 # ====================================================================================================
 # 元 services/settings_store.py
-# data/ 以下の設定ファイルの読み書き（スレッドセーフ・一時ファイル経由で置き換え）。
+# data/ 以下の設定ファイルの読み込み（スレッドセーフ）。
 #
-# 読むときも書くときも同じロックを取る。Windows では、別のスレッドが開いているファイルを os.replace で
-# 置き換えられない（Python の open は FILE_SHARE_DELETE を付けないので WinError 5 になる）。画面を出すたびに
-# 設定を読む（app.py の context_processor）ので、読み書きが重ならないようにする。
+# 前の版は AI接続をここに書いていた（data/model_settings.yaml。全員で1つ）。今は書かない。
+# 残っているファイルは「サーバー共通の設定」として読むだけ（llm._read_admin）。
 # ウイルス対策・同期ソフトが少しの間ファイルを掴んでいることもあるので、core.files.remove_upload と同じく
 # 少し待って何度か試す。
 # ====================================================================================================
@@ -79,43 +84,16 @@ def read_yaml(name: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def write_yaml(name: str, data: dict) -> None:
-    """書けなかったとき（ほかのプログラムが掴んだまま・権限が無い）は OSError。"""
-    _write(data_path(name), yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
-
-
-def _write(path: Path, text: str) -> None:
-    with _settings_lock:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        try:
-            tmp.write_text(text, encoding="utf-8")
-            _retry(lambda: os.replace(tmp, path))
-        except OSError:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
-        try:
-            os.chmod(path, 0o600)  # APIキーを含むことがあるので所有者だけに絞る
-        except OSError:
-            pass
-
-
-def lock() -> threading.RLock:
-    return _settings_lock
-
-
 # ====================================================================================================
 # 元 services/llm.py
 # OpenAI互換APIへの接続とモデル選択。
 #
 # aiagent_minimal_rag_tougou の llm.py / models.py と同じ仕様:
 #   - 接続先とAPIキーは env（OPENAI_BASE_URL / OPENAI_API_KEY）が既定。
-#     画面（AI接続）で保存した data/model_settings.yaml の値があればそちらを優先する。
+#     ヘッダーの「AI接続」でそのブラウザが保存した値（database.ai_connections）があればそちらを優先する。
+#     前の版の画面が書いた data/model_settings.yaml（サーバー共通）は、その間（ブラウザ → yaml → env）。
 #   - URL はフルパス2本（…/chat/completions と …/models）で持つ。
-#   - 選べるモデルは「画面で登録した候補 → env の OPENAI_MODELS」の順。既定モデルは必ず候補に入る。
+#   - 選べるモデルは「ブラウザが取得した候補 → yaml の候補 → env の OPENAI_MODELS」の順。使うモデルは必ず候補に入る。
 #   - モデルが受け付けない引数（temperature / max_tokens / reasoning_effort）はエラー文を見て直して投げ直す。
 #   - 429 はサーバの指示した時間だけ待って投げ直す。
 # ====================================================================================================
@@ -124,6 +102,8 @@ SETTINGS_FILE = "model_settings.yaml"
 ADMIN_KEYS =("models", "default", "api_key", "chat_url", "models_url")
 CATALOG_TTL = 300
 _MAX_FIX = 4
+# ブラウザの作業場所の id のクッキーの鍵（views.SESSION_ID_KEY と同じ。views は画面の層なので、ここからは読まない）
+SESSION_ID_KEY = "sid"
 
 _clients: dict[tuple[str, str, float], OpenAI] = {}
 _catalog_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
@@ -142,10 +122,49 @@ def _cfg(name: str):
 
 
 # ---- 設定の解決 ----------------------------------------------------------------
+# 項目ごとに「このブラウザが保存した値 → 前の版の yaml（サーバー共通） → env」の順に見る。
+# ブラウザの値は要求（request）の中でしか分からない。ジョブのスレッドには無いので、AI整形は開始時に
+# job_client_settings() で設定を固めて渡す（aiproc.start_ai_job）。
 
 def _read_admin() -> dict:
+    """前の版が書いた data/model_settings.yaml（サーバー共通・読むだけ）。無ければ空。要求の中では1回だけ読む。"""
+    if has_request_context():
+        cached = getattr(g, "_ai_admin", None)
+        if cached is not None:
+            return cached
     data = read_yaml(SETTINGS_FILE)
-    return {k: v for k, v in data.items() if k in ADMIN_KEYS}
+    admin = {k: v for k, v in data.items() if k in ADMIN_KEYS}
+    if has_request_context():
+        g._ai_admin = admin
+    return admin
+
+
+def _session_id() -> str:
+    """いまの要求のブラウザの作業場所の id。要求の外（ジョブのスレッド）や、まだ配っていないときは空。"""
+    if not has_request_context():
+        return ""
+    sid = session.get(SESSION_ID_KEY)
+    return sid if isinstance(sid, str) and len(sid) == 32 else ""
+
+
+def _browser() -> dict:
+    """このブラウザが「AI接続」で保存したもの（要求ごとに1回だけ DB を読む）。無ければ空。"""
+    sid = _session_id()
+    if not sid:
+        return {}
+    cached = getattr(g, "_ai_connection", None)
+    if cached is None or cached[0] != sid:
+        from app import database
+
+        cached = (sid, database.get_ai_connection(sid) or {})
+        g._ai_connection = cached
+    return cached[1]
+
+
+def forget_browser() -> None:
+    """保存・確認のあと、同じ要求の中で読み直せるようにする。"""
+    if has_request_context():
+        g.pop("_ai_connection", None)
 
 
 def _env_chat_url() -> str:
@@ -156,23 +175,33 @@ def _env_models_url() -> str:
     return f"{_cfg('OPENAI_BASE_URL')}/models" if _cfg("OPENAI_BASE_URL") else ""
 
 
+def _pick(browser_key: str, yaml_key: str, env_value: str) -> tuple[str, str]:
+    """設定1項目の値と出どころ（"browser" / "server" / "env" / ""）。"""
+    value = str(_browser().get(browser_key) or "").strip()
+    if value:
+        return value, "browser"
+    value = str(_read_admin().get(yaml_key) or "").strip()
+    if value:
+        return value, "server"
+    value = str(env_value or "").strip()
+    return (value, "env") if value else ("", "")
+
+
 def llm_api_key() -> str:
-    return str(_read_admin().get("api_key") or "").strip() or _cfg("OPENAI_API_KEY")
+    return _pick("api_key", "api_key", _cfg("OPENAI_API_KEY"))[0]
 
 
 def llm_api_key_source() -> str:
-    """"screen"（画面で保存）/ "env" / ""（未設定）"""
-    if str(_read_admin().get("api_key") or "").strip():
-        return "screen"
-    return "env" if _cfg("OPENAI_API_KEY") else ""
+    """"browser"（このブラウザで保存）/ "server"（前の版の yaml）/ "env" / ""（未設定）"""
+    return _pick("api_key", "api_key", _cfg("OPENAI_API_KEY"))[1]
 
 
 def llm_chat_url() -> str:
-    return str(_read_admin().get("chat_url") or "").strip() or _env_chat_url()
+    return _pick("chat_url", "chat_url", _env_chat_url())[0]
 
 
 def llm_models_url() -> str:
-    return str(_read_admin().get("models_url") or "").strip() or _env_models_url()
+    return _pick("models_url", "models_url", _env_models_url())[0]
 
 
 def is_configured() -> bool:
@@ -180,12 +209,13 @@ def is_configured() -> bool:
 
 
 def default_model() -> str:
-    return str(_read_admin().get("default") or "").strip() or _cfg("OPENAI_MODEL")
+    return _pick("model", "default", _cfg("OPENAI_MODEL"))[0]
 
 
 def available() -> list[str]:
+    browser = [str(m).strip() for m in (_browser().get("models") or []) if str(m).strip()]
     admin = [str(m).strip() for m in (_read_admin().get("models") or []) if str(m).strip()]
-    names = admin or list(_cfg("OPENAI_MODELS"))
+    names = browser or admin or list(_cfg("OPENAI_MODELS"))
     d = default_model()
     if d and d not in names:
         names.insert(0, d)
@@ -195,6 +225,21 @@ def available() -> list[str]:
 def current_model() -> str:
     """いま使うモデル（画面のモデル選択は無くなったので既定モデル）。"""
     return default_model()
+
+
+def server_fallback() -> dict:
+    """ブラウザが空欄にした項目を埋める「サーバー共通の設定」があるか（前の版の yaml と env）。画面に知らせる。"""
+    admin = _read_admin()
+    yaml_key = bool(str(admin.get("api_key") or "").strip())
+    yaml_url = bool(str(admin.get("chat_url") or "").strip())
+    env_key = bool(_cfg("OPENAI_API_KEY"))
+    return {
+        "yaml": yaml_key or yaml_url or bool(admin.get("models")) or bool(admin.get("default")),
+        "yaml_file": str(data_path(SETTINGS_FILE)),
+        "env_key": env_key,
+        "env_url": _env_chat_url(),
+        "any_key": yaml_key or env_key,
+    }
 
 
 # ---- クライアント ---------------------------------------------------------------
@@ -246,97 +291,194 @@ def fetch_api_models(refresh: bool = False) -> list[str]:
     return got
 
 
-# ---- 画面からの保存 --------------------------------------------------------------
+# ---- ヘッダーの「AI接続」（ブラウザごとの保存・状態・確認） ------------------------------------
+# 利用者の指示（2026-09-21）:「AI接続はヘッダー上で、接続中 か 未接続 一目で分かるように」。
+# ヘッダーに出す状態は4つ:
+#   ok        ● 接続中        最後の確認がつながった
+#   ng        ● つながりません 設定はあるが最後の確認がつながらなかった（パネルを開くと理由が出る）
+#   off       ● 未接続        まだ何も無い（キーか接続先が無い）
+#   unchecked ● 未確認        サーバー共通の設定（yaml / env）だけがあり、このブラウザではまだ確かめていない
+# 確認しに行くのは「保存したとき」「パネルを開いたとき」「AI整形を始めるとき」だけ（check_connection）。
+# 画面を開くだけでは行かない（お金がかかり、画面が待たされる）。結果は database.ai_connections に覚えて表示する。
 
-def admin_status() -> dict:
-    admin = _read_admin()
+STATE_LABELS = {"ok": "接続中", "ng": "つながりません", "off": "未接続", "unchecked": "未確認"}
+_CHECK_PROMPT = "接続テストです。「OK」とだけ返してください。"
+
+
+def _check_time_text(iso: str | None) -> str:
+    """「9/21 10:12」の形（ヘッダーの「最終確認」）。"""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(iso))
+    except ValueError:
+        return str(iso)
+    return f"{dt.month}/{dt.day} {dt.hour:02d}:{dt.minute:02d}"
+
+
+def connection_status() -> dict:
+    """ヘッダーとパネルに出す、このブラウザの AI接続の状態。APIキーの値は返さない（有無と出どころだけ）。"""
+    row = _browser()
+    ready = is_configured()
+    check = row.get("last_check_ok")
+    if check == 1 and ready:
+        state = "ok"
+    elif check == 0 and ready:
+        state = "ng"
+    elif ready:
+        state = "unchecked"
+    else:
+        state = "off"
+    chat_url = llm_chat_url()
+    checked_text = _check_time_text(row.get("last_check_at"))
     return {
-        "models": available(),
-        "default": default_model(),
-        "current": current_model(),
-        "from_env": not admin.get("models"),
-        "env_models": list(_cfg("OPENAI_MODELS")),
-        "env_default": _cfg("OPENAI_MODEL"),
-        "settings_file": str(data_path(SETTINGS_FILE)),
-        "llm_ready": is_configured(),
-        # APIキーの値は返さない。設定済みかどうかと出所だけ
-        "api_key_set": bool(llm_api_key()),
+        "state": state,
+        "state_label": STATE_LABELS[state],
+        "ready": ready,
+        "checked_at": row.get("last_check_at") or "",
+        "checked_text": checked_text,
+        # ヘッダーの2行目（「最終確認 9/21 10:12」）。未設定なら開き方、未確認ならそのことを書く
+        "sub_text": (f"最終確認 {checked_text}" if checked_text
+                     else ("クリックして設定" if state == "off" else "まだ確かめていません")),
+        # パネルの中の同じ行（開き方はもう要らない）
+        "panel_sub_text": (f"最終確認 {checked_text}" if checked_text
+                           else ("" if state == "off" else "まだ確かめていません")),
+        "check_detail": row.get("last_check_detail") or "",
+        # 入力欄に入れる値は、このブラウザが保存したものだけ（サーバー共通の値で埋めない）
+        "chat_url": str(row.get("chat_url") or ""),
+        "models_url": str(row.get("models_url") or ""),
+        "model": str(row.get("model") or ""),
+        "models": list(row.get("models") or []),
+        "api_key_saved": bool(str(row.get("api_key") or "").strip()),
         "api_key_source": llm_api_key_source(),
-        "chat_url": llm_chat_url(),
-        "models_url": llm_models_url(),
-        "chat_url_source": "screen" if str(admin.get("chat_url") or "").strip() else "env",
-        "models_url_source": "screen" if str(admin.get("models_url") or "").strip() else "env",
-        "env_chat_url": _env_chat_url(),
-        "env_models_url": _env_models_url(),
+        # いま実際に使われる値（出どころ込み。パネルの「いまの設定」に出す）
+        "effective": {
+            "chat_url": chat_url, "chat_url_source": _pick("chat_url", "chat_url", _env_chat_url())[1],
+            "models_url": llm_models_url(), "model": default_model(),
+            "model_source": _pick("model", "default", _cfg("OPENAI_MODEL"))[1],
+            "external": bool(chat_url) and not is_local_endpoint(chat_url),
+        },
+        "fallback": server_fallback(),
+        "placeholders": {"chat_url": "https://api.openai.com/v1/chat/completions",
+                         "models_url": "https://api.openai.com/v1/models", "model": _cfg("OPENAI_MODEL") or "gpt-5.6-sol"},
     }
 
 
-def save_admin(data: dict) -> dict:
-    """「AI接続」画面からの保存。"""
-    models = [str(m).strip() for m in (data.get("models") or []) if str(m).strip()]
-    if not models:
-        raise ValueError("選択できるモデルを1つ以上残してください。")
-    if len(models) != len(set(models)):
-        raise ValueError("同じモデルが重複しています。")
-    for m in models:
-        if len(m) > 120:
-            raise ValueError(f"モデル名が長すぎます: {m[:40]}…")
+def _clean_url(value, suffix: str, label: str) -> str:
+    u = str(value or "").strip().rstrip("/")
+    if not u:
+        return ""
+    if any(c.isspace() for c in u):
+        raise ValueError(f"{label}のURLに空白が入っています。")
+    if not u.startswith(("http://", "https://")):
+        raise ValueError(f"{label}のURLは http:// か https:// で始めてください。")
+    if not u.endswith(suffix):
+        raise ValueError(f"{label}のURLは {suffix} で終わるフルパスで入力してください"
+                         f"（例: https://api.openai.com/v1{suffix}）。")
+    if len(u) > 500:
+        raise ValueError(f"{label}のURLが長すぎます。")
+    return u
 
-    default = str(data.get("default") or "").strip() or models[0]
-    if default not in models:
-        raise ValueError(f"既定のモデル {default} が候補に入っていません。")
 
-    # APIキー。値が来たときだけ更新する。応答にもログにもキーの値は出さない
+def save_browser(session_id: str, data: dict) -> dict:
+    """ヘッダーの「AI接続」からの保存（そのブラウザの分だけ）。値の問題は ValueError。
+
+    空欄は「サーバー共通の値（yaml / env）に任せる」の意味で、そのまま空で保存する。
+    APIキーは値が来たときだけ置き換える（入力欄には出さないので、空のまま保存しても消えない）。
+    """
+    if not session_id:
+        raise ValueError("ブラウザの作業場所が分かりません。画面を開き直してください。")
+    chat_url = _clean_url(data.get("chat_url"), "/chat/completions", "チャット")
+    models_url = _clean_url(data.get("models_url"), "/models", "モデル一覧")
+    model = str(data.get("model") or "").strip()
+    if len(model) > 120:
+        raise ValueError(f"モデル名が長すぎます: {model[:40]}…")
+    if any(c.isspace() for c in model):
+        raise ValueError("モデル名に空白が入っています。")
+    models = None
+    if isinstance(data.get("models"), list):
+        models = list(dict.fromkeys(str(m).strip() for m in data["models"] if str(m).strip()))[:200]
+        for m in models:
+            if len(m) > 120:
+                raise ValueError(f"モデル名が長すぎます: {m[:40]}…")
+
     key_in = data.get("api_key")
     key_new = str(key_in).strip() if isinstance(key_in, str) else ""
-    key_clear = bool(data.get("api_key_clear"))
     if key_new:
         if any(c.isspace() for c in key_new):
             raise ValueError("APIキーに空白や改行が入っています。コピーし直してください。")
         if not (8 <= len(key_new) <= 500):
             raise ValueError("APIキーの長さが不自然です。値を確かめてください。")
 
-    with lock():
-        keep = read_yaml(SETTINGS_FILE)  # 保存済みのAPIキーを巻き添えで消さないため上書きで重ねる
-        keep.update({"models": models, "default": default})
+    from app import database
 
-        # 接続先URL（フルパス2本）。空欄で保存すると env の値に戻る。env と同じ値なら上書きとして持たない
-        url_changed = False
-        for field, suffix, envval, label in (
-                ("chat_url", "/chat/completions", _env_chat_url(), "チャット"),
-                ("models_url", "/models", _env_models_url(), "モデル一覧")):
-            if field not in data:
-                continue
-            u = str(data.get(field) or "").strip().rstrip("/")
-            if u:
-                if any(c.isspace() for c in u):
-                    raise ValueError(f"{label}のURLに空白が入っています。")
-                if not u.startswith(("http://", "https://")):
-                    raise ValueError(f"{label}のURLは http:// か https:// で始めてください。")
-                if not u.endswith(suffix):
-                    raise ValueError(f"{label}のURLは {suffix} で終わるフルパスで入力してください"
-                                     f"（例: https://api.openai.com/v1{suffix}）。")
-            old = str(keep.get(field) or "").strip()
-            new = "" if u == envval else u
-            if new:
-                keep[field] = new
-            else:
-                keep.pop(field, None)
-            url_changed = url_changed or old != new
+    database.save_ai_connection(session_id, api_key=key_new or None, chat_url=chat_url, models_url=models_url,
+                                model=model, models=models)
+    forget_browser()
+    reset_llm_client()   # 次のAI呼び出しから新しい接続先・キーを使う（再起動不要）
+    print("[models] AI接続を保存しました（ブラウザごと）" + (" / APIキーを更新" if key_new else ""))
+    return connection_status()
 
-        if key_clear:
-            keep.pop("api_key", None)
-        elif key_new:
-            keep["api_key"] = key_new
-        write_yaml(SETTINGS_FILE, keep)
 
-    if key_clear or key_new or url_changed:
-        reset_llm_client()  # 次のAI呼び出しから新しい接続先・キーを使う（再起動不要）
-    print(f"[models] モデル設定を更新しました: 候補{len(models)}件 / 既定={default}"
-          + (" / APIキーを更新" if key_new else "")
-          + (" / APIキーをenvに戻した" if key_clear else "")
-          + (" / 接続先URLを変更" if url_changed else ""))
-    return admin_status()
+def clear_browser_key(session_id: str) -> dict:
+    """［キーを消す］（共有PC）。そのブラウザの APIキーと確認の結果だけ消す。"""
+    from app import database
+
+    if session_id:
+        database.clear_ai_connection_key(session_id)
+        forget_browser()
+        reset_llm_client()
+    return connection_status()
+
+
+def check_connection() -> tuple[bool, list[dict]]:
+    """接続の確認: モデル一覧の取得と、短いチャットを1回。戻り値 (つながったか, 手順ごとの結果)。
+
+    チャットが通れば AI整形は使える（モデル一覧の API が無い互換サーバーもある）ので、
+    つながったかどうかはチャットで決める。
+    """
+    if not is_configured():
+        return False, [{"name": "設定", "ok": False, "detail": "APIキーまたは接続先が未設定です。"}]
+    steps = []
+    started = time.monotonic()
+    try:
+        names = fetch_api_models(refresh=True)
+        steps.append({"name": "モデル一覧の取得", "ok": True,
+                      "detail": f"{len(names)}件のモデルが見つかりました（{_ms(started)}ミリ秒）"})
+    except Exception as exc:
+        steps.append({"name": "モデル一覧の取得", "ok": False, "detail": friendly_error(exc)})
+    model = current_model()
+    started = time.monotonic()
+    try:
+        # AI整形のジョブと同じ呼び出し口（再試行なし・明示のタイムアウト）で確かめる
+        result = chat_raw(job_client_settings(), [{"role": "user", "content": _CHECK_PROMPT}], max_tokens=20)
+        reply = (result.text or "").strip()
+        steps.append({"name": f"チャット（{model}）", "ok": True,
+                      "detail": f"応答あり: {reply[:40] or '（本文なし）'}（{_ms(started)}ミリ秒）"})
+    except Exception as exc:
+        steps.append({"name": f"チャット（{model}）", "ok": False, "detail": friendly_error(exc)})
+    return steps[-1]["ok"], steps
+
+
+def record_check(session_id: str, ok: bool, steps: list[dict]) -> None:
+    """確認の結果をそのブラウザの行に覚える（ヘッダーの表示のもと）。設定が無いときは覚えない。"""
+    if not session_id or not is_configured():
+        return
+    from app import database
+
+    failed = [s for s in steps if not s.get("ok")]
+    if ok and not failed:
+        detail = ""
+    elif len({s["detail"] for s in failed}) == 1:
+        detail = failed[0]["detail"]   # 2つの手順が同じ理由で失敗（接続先に届かない等）なら1回だけ書く
+    else:
+        detail = "／".join(f"{s['name']}: {s['detail']}" for s in failed)
+    database.set_ai_connection_check(session_id, ok, detail)
+    forget_browser()
+
+
+def _ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
 
 
 # ---- 呼び出し ------------------------------------------------------------------
@@ -507,7 +649,7 @@ def job_client_settings(model: str | None = None, params: dict | None = None) ->
     fingerprint にキーは含めない。ジョブの params に保存するときは public_settings() でキーを外す。
     """
     if not is_configured():
-        raise LLMNotConfigured("AIの接続先が未設定です。「AI接続」でAPIキーと接続先を設定してください。")
+        raise LLMNotConfigured("AIの接続先が未設定です。画面右上の「AI接続」でAPIキーと接続先を設定してください。")
     chat_url = llm_chat_url()
     local = is_local_endpoint(chat_url)
     if params is None:

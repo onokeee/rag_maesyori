@@ -16,7 +16,6 @@ from pathlib import Path
 
 import openpyxl
 import pytest
-import yaml
 from flask import Flask, current_app, send_file, render_template_string
 from openpyxl import Workbook
 from openpyxl.comments import Comment
@@ -2581,8 +2580,8 @@ def test_two_jobs_never_touch_the_same_import(app):
 # 画面の骨組み: 3つの画面へのナビ、エラー画面、Host の確認、キャッシュ、他サイトからの書き込み。
 #
 # 画面は「帳票取り込み・表の取り込み・帳票登録」の3つだけになった（2026-09-20 の作り直し）。
-# ホーム画面・設定の画面・取り込み履歴・作業中の一覧は無い。AI接続は「表の取り込み」画面の
-# AI整形の段の中（/tables/ai-connection）へ移した。
+# ホーム画面・設定の画面・取り込み履歴・作業中の一覧は無い。AI接続はヘッダー右上の「AI接続」のパネル
+# （URL は昔のまま /tables/ai-connection）で、ブラウザごとに保存する（2026-09-21）。
 # ====================================================================================================
 
 # ---- 共通 -------------------------------------------------------------------------
@@ -2605,9 +2604,8 @@ def ai_client(ai_app_shell):
 
 
 def _save_ai_settings(client, **overrides):
-    """AI接続の保存（「表の取り込み」画面の AI整形の段が送る fetch と同じ）。"""
-    body = {"models": ["gpt-test", "picky-model"], "default": "gpt-test", "api_key": OPENAI_KEY,
-            "chat_url": "", "models_url": "", "add_models": ""}
+    """AI接続の保存（ヘッダー右上の「AI接続」のパネルが送る fetch と同じ。ブラウザごとに保存される）。"""
+    body = {"api_key": OPENAI_KEY, "chat_url": "", "models_url": "", "model": "gpt-test"}
     body.update(overrides)
     return client.post("/tables/ai-connection", json=body)
 
@@ -2627,9 +2625,14 @@ def test_nav_has_only_the_three_screens(client):
         assert href in page and label in page, href
     for url in ("/forms/new", "/tables/new", "/form-types/"):
         assert client.get(url).status_code == 200, url
-    # 無くした画面の言葉はヘッダーに出さない
+    # 無くした画面の言葉はヘッダーの行き先（nav）に出さない。右上の「AI接続」は行き先ではなく、その場で開くパネル
+    # （2026-09-21。パネルの文には「設定」の語が入る）
+    nav = page[page.index('<nav id="mainNav"'):page.index("</nav>")]
     for word in ("設定", "取り込み履歴", "LightRAGへの入れ方", "保存先フォルダ", "名寄せ辞書"):
+        assert word not in nav, word
+    for word in ("取り込み履歴", "LightRAGへの入れ方", "保存先フォルダ", "名寄せ辞書", "/settings"):
         assert word not in page, word
+    assert 'data-ai-header' in page and "AI接続" in page   # 右上の AI接続
 
 
 def test_the_removed_screens_are_gone(client):
@@ -2678,18 +2681,22 @@ def test_ui_macros_render(app):
     assert 'accept=".xlsx,.xlsm"' in html
 
 
-# ---- AI接続（設定画面は無い。「表の取り込み」画面の AI整形の段の中） -----------------------------------
+# ---- AI接続（設定画面は無い。ヘッダー右上の「AI接続」のパネル。ブラウザごとに DB に保存。tests/test_ai_connection.py も） ----
 
-def test_ai_connection_is_saved_from_the_table_screen(ai_client, ai_app_shell):
+def test_ai_connection_is_saved_per_browser_from_the_header(ai_client, ai_app_shell):
     res = _save_ai_settings(ai_client)
     assert res.status_code == 200
     body = res.get_json()
-    assert body["ok"] is True and "AI接続の設定を保存しました" in body["message"]
+    assert body["ok"] is True and "保存しました" in body["message"]
     assert OPENAI_KEY not in res.get_data(as_text=True)   # キーの値は返さない
 
-    saved = yaml.safe_load((ai_app_shell.config["DATA_DIR"] / "model_settings.yaml").read_text(encoding="utf-8"))
-    assert saved["models"] == ["gpt-test", "picky-model"] and saved["api_key"] == OPENAI_KEY
-    assert "chat_url" not in saved   # env と同じURLは上書きとして持たない
+    # 前の版の data/model_settings.yaml はもう書かない（全員で1つのキーを共有していた）。DB にブラウザごとに入る
+    assert not (ai_app_shell.config["DATA_DIR"] / "model_settings.yaml").exists()
+    with ai_client.session_transaction() as sess:
+        sid = sess["sid"]
+    with ai_app_shell.app_context():
+        saved = db.get_ai_connection(sid)
+    assert saved["api_key"] == OPENAI_KEY and saved["model"] == "gpt-test" and saved["chat_url"] == ""
 
     catalog = ai_client.post("/tables/ai-connection/models").get_json()
     assert catalog["ok"] is True and "catalog-only" in catalog["models"]   # APIの models.list() から取得
@@ -2699,12 +2706,13 @@ def test_ai_connection_validation(ai_client):
     assert "APIキーの長さが不自然です" in _save_ai_settings(ai_client, api_key="short").get_json()["error"]
     assert "/chat/completions で終わるフルパス" in \
         _save_ai_settings(ai_client, chat_url="https://example.com/v1").get_json()["error"]
-    assert "候補に入っていません" in _save_ai_settings(ai_client, default="not-in-list").get_json()["error"]
+    assert "モデル名に空白" in _save_ai_settings(ai_client, model="gpt test").get_json()["error"]
 
 
 def test_ai_connection_test(ai_client, fake_shell):
     result = ai_client.post("/tables/ai-connection/test").get_json()
     assert result["ok"] is False and "未設定" in result["steps"][0]["detail"]
+    assert result["status"]["state"] == "off"
 
     _save_ai_settings(ai_client)
     fake_shell.chat_replies = ["OK"]
@@ -2713,6 +2721,7 @@ def test_ai_connection_test(ai_client, fake_shell):
     assert [s["ok"] for s in result["steps"]] == [True, True]
     assert "3件のモデル" in result["steps"][0]["detail"] and "OK" in result["steps"][1]["detail"]
     assert fake_shell.requests[-1]["path"] == "/v1/chat/completions"
+    assert result["status"]["state"] == "ok" and result["status"]["state_label"] == "接続中"
 
 
 # ---- エラー画面・Host の確認 ----------------------------------------------------------

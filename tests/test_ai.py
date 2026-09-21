@@ -1718,7 +1718,7 @@ def test_paused_ai_job_can_still_be_cancelled_without_ai_settings(plain_app):
     from tests.conftest import panel_html
 
     html = panel_html(client, import_id, "ai")
-    assert "APIキーが設定されていません" in html            # AI接続のパネルは「未設定」と出る
+    assert "AI接続は未設定です" in html and "画面右上の［AI接続］" in html   # 設定はヘッダー右上（この段には無い）
     assert 'data-ai-control="cancel"' in html and "中止" in html
     # 接続が無いので実行・再開はできない（中止だけ残る）
     assert 'data-ai-control="resume"' not in html and 'data-ai-control="pause"' not in html

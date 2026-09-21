@@ -17,7 +17,6 @@ from openpyxl.drawing.image import Image as XLImage
 
 from app import core
 from app import database as db
-from app import llm
 from app import tables
 from app.aiproc import _ensure_trial_import
 from app.core import JobError
@@ -173,17 +172,19 @@ def test_user_anchor_still_matches_at_the_line_start():
     assert len(parsed.segments) == 2
 
 
-# ---- R5C-2（AI接続の保存。設定画面は無くなり、表の取り込み画面の AI整形の段から送る） ------------------
+# ---- R5C-2（AI接続の保存。設定画面は無くなり、ヘッダー右上の「AI接続」のパネルから送る。保存先は DB） ------------------
 
 def test_ai_settings_that_cannot_be_saved_return_a_japanese_json_error(client, monkeypatch):
-    def locked(*a, **k):
-        raise OSError("locked")
+    import sqlite3
 
-    monkeypatch.setattr(llm, "write_yaml", locked)
-    res = client.post("/tables/ai-connection", json={"models": ["m1"], "default": "m1", "api_key": ""})
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "save_ai_connection", locked)
+    res = client.post("/tables/ai-connection", json={"model": "m1", "api_key": ""})
     assert res.status_code == 400
     error = res.get_json()["error"]
-    assert "設定ファイルに書き込めませんでした" in error and "もう一度保存してください" in error
+    assert "保存できませんでした" in error and "もう一度保存してください" in error
     assert "Traceback" not in res.get_data(as_text=True)
 
 
