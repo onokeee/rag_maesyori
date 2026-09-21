@@ -48,12 +48,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from excel.extractor import extract_document  # noqa: E402
-from excel.text import normalize_label, to_date, to_number  # noqa: E402
-from excel.workbook import load_workbook_info  # noqa: E402
-from pattern.builder import suggest_rows  # noqa: E402
-from pattern.forms import rows_to_pattern  # noqa: E402
-from pattern.matcher import match_pattern  # noqa: E402
+from forms import (  # noqa: E402
+    extract_document, load_workbook_info, match_pattern, normalize_label, rows_to_pattern, suggest_rows,
+    to_date, to_number,
+)
 
 FORMS_ROOT = PROJECT_ROOT / "samples" / "forms"
 
@@ -388,9 +386,8 @@ def click_rows(sample_infos: list, name: str) -> tuple[list[dict], list[dict]]:
     クリックしたことにする。見本ごとに見出しの書き方が違う欄は、見本の数だけクリックする（画面と同じで、
     辞書で同じ項目と分かる欄はその項目の見出しに足され、分からない欄は別の項目になる）。
     """
-    from excel.extractor import locate_table, locate_value
-    from pattern.clicks import click_field, merge_labels, merge_target, same_sheet_field, separate_names, split_rows
-    from pattern.dictionary import DICTIONARY_NORMS
+    from forms import (DICTIONARY_NORMS, click_field, locate_table, locate_value, merge_labels, merge_target,
+                       same_sheet_field, separate_names, split_rows)
 
     meta = {"name": name, "version": "eval"}
     base_sheets, base_fields = suggest_rows(sample_infos)

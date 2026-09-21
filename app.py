@@ -1,3 +1,4 @@
+"""Flask アプリ（create_app）・設定（env ファイルを読み込む。旧 config.py）・起動。"""
 import os
 import secrets
 import socket
@@ -7,11 +8,76 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from dotenv import load_dotenv
 from flask import Blueprint, Flask, abort, jsonify, redirect, render_template, request, url_for
 
-from config import BASE_DIR, Config
-from models import database
-from views import form_types, forms, is_cross_site_write, tables
+import database
+from views import form_types_bp, forms_bp, is_cross_site_write, tables_bp
+
+
+
+# ====================================================================================================
+# 設定（元 config.py）
+# ====================================================================================================
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# 接続設定は aiagent_minimal_rag_tougou と同じく、ドット無しの "env" ファイル（export KEY="..." 形式も可）から読む
+load_dotenv(BASE_DIR / "env")
+
+
+def _split(value: str) -> list[str]:
+    return [v.strip() for v in value.replace(",", ";").split(";") if v.strip()]
+
+
+def _optional_float(name: str) -> float | None:
+    raw = os.environ.get(name, "").strip()
+    return float(raw) if raw else None
+
+
+def _optional_int(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    return int(raw) if raw else None
+
+
+class Config:
+    # セッション署名鍵は app.py が FLASK_SECRET_KEY または .flask_secret ファイルから設定する
+    SECRET_KEY = None
+    DATABASE = Path(os.environ.get("DATABASE", BASE_DIR / "instance" / "app.db"))
+    UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", BASE_DIR / "uploads"))
+    # 画面から保存する設定（model_settings.yaml）の置き場所
+    DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
+    # 一覧表の行データ・状態ファイルの置き場所（DATA_DIR/tables。create_app で DATA_DIR に合わせて決め直す）
+    TABLES_DIR = Path(os.environ.get("TABLES_DIR", DATA_DIR / "tables"))
+    # 1回のリクエストの上限（一覧表の大きいCSV/Excelを想定）
+    MAX_CONTENT_LENGTH = 200 * 1024 * 1024
+    # 帳票（1ファイル＝1件）
+    ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
+    # 一覧表（Excel/CSV・1行＝1件）
+    TABLE_ALLOWED_EXTENSIONS = {".xlsx", ".xlsm", ".csv", ".tsv", ".txt"}
+    TABLE_MAX_UPLOAD_BYTES = int(os.environ.get("TABLE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
+    # Excel のセル数の上限（これを超えるシートは読み込まない）
+    EXCEL_MAX_CELLS = int(os.environ.get("EXCEL_MAX_CELLS", "500000"))
+    # 読み込み・下書き・AI整形を同時に動かす本数（列ごと。core/jobs.py）。
+    # 社内LANのサーバーで数人が同時に使うので、1本だと誰かの長い読み込みでほかの人が待たされる。
+    # 1〜8 に丸められる。列ごとの本数はプロセス内でその列を最初に使ったときに決まり、あとから減らない
+    JOB_WORKERS = int(os.environ.get("JOB_WORKERS", "3"))
+
+    # ---- LLM（OpenAI互換API） ----
+    OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").strip().rstrip("/")
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+    OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5.6-sol").strip()
+    OPENAI_MODELS = _split(os.environ.get("OPENAI_MODELS", ""))
+    OPENAI_TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "0"))
+    OPENAI_TOP_P = _optional_float("OPENAI_TOP_P")
+    OPENAI_MAX_TOKENS = _optional_int("OPENAI_MAX_TOKENS")
+    LLM_RATE_LIMIT_RETRIES = int(os.environ.get("LLM_RATE_LIMIT_RETRIES", "3"))
+    LLM_RATE_LIMIT_MAX_WAIT = float(os.environ.get("LLM_RATE_LIMIT_MAX_WAIT", "20"))
+
+
+# ====================================================================================================
+# アプリ（元 app.py）
+# ====================================================================================================
 
 _SECRET_FILE = BASE_DIR / ".flask_secret"
 
@@ -221,8 +287,8 @@ def create_app(overrides: dict | None = None) -> Flask:
         app.config["ALLOWED_HOSTS"] = {"*"} if "*" in given else given | {"127.0.0.1", "localhost", "::1"}
 
     app.register_blueprint(home_bp)
-    for module in (forms, form_types, tables):
-        app.register_blueprint(module.bp)
+    for bp in (forms_bp, form_types_bp, tables_bp):
+        app.register_blueprint(bp)
 
     @app.before_request
     def _refuse_other_host():
@@ -326,12 +392,12 @@ def _purge_pending(app: Flask) -> None:
     """起動時：ダウンロードしていない帳票・一覧表をすべて捨てる（作業中の一覧を持たないため）。"""
     if app.config.get("TESTING"):
         return
-    from core import purge
+    import core
 
     try:
         with app.app_context():
-            forms_removed, tables_removed = purge.purge_all_pending()
-            samples_removed = purge.purge_old_sample_files()
+            forms_removed, tables_removed = core.purge_all_pending()
+            samples_removed = core.purge_old_sample_files()
         if forms_removed or tables_removed:
             print(f"[app] 途中だった取り込みを捨てました（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
         if samples_removed:
@@ -344,18 +410,18 @@ def _start_sweeper(app: Flask) -> None:
     """動いている間：しばらくさわられていない帳票・一覧表を捨て続ける（daemon スレッド）。"""
     if app.config.get("TESTING"):
         return
-    from core import purge
+    import core
 
-    interval = _sweep_interval(getattr(purge, "STALE_HOURS", 24))
+    interval = _sweep_interval(getattr(core, "STALE_HOURS", 24))
 
     def loop() -> None:
         while True:
             _stop.wait(interval)
             try:
                 with app.app_context():
-                    forms_removed, tables_removed = purge.sweep_stale(purge.STALE_HOURS)
+                    forms_removed, tables_removed = core.sweep_stale(core.STALE_HOURS)
                 if forms_removed or tables_removed:
-                    print(f"[app] {purge.STALE_HOURS}時間さわられていない取り込みを捨てました"
+                    print(f"[app] {core.STALE_HOURS}時間さわられていない取り込みを捨てました"
                           f"（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
             except Exception as exc:   # 次の回でやり直す
                 print(f"[app] 古い取り込みの片付けに失敗しました（{exc.__class__.__name__}: {exc}）")
@@ -370,9 +436,9 @@ def _cleanup_leftovers(app: Flask) -> None:
     データを残さない方針（design.md 3.3）でも、削除の途中で落ちたときやファイルを掴まれていたときに
     残ることがあるので、ここで片付ける。作業中のものは DB に行があるので消さない。
     """
-    from core import purge
-    from core.files import remove_orphan_import_dirs, remove_orphan_uploads
-    from models.database import get_db
+    import core
+    from core import remove_orphan_import_dirs, remove_orphan_uploads
+    from database import get_db
 
     try:
         with app.app_context():
@@ -387,9 +453,9 @@ def _cleanup_leftovers(app: Flask) -> None:
             removed_dirs = remove_orphan_import_dirs(app.config["TABLES_DIR"], import_ids)
             # もう無い取り込みの AI整形の結果と、どこからも使われない AI の応答も消す（データを残さない）。
             # ai_items が先に消えていて（取り込み設定の削除など）応答だけ残っていることもあるので、毎回見る。
-            purge.sweep_orphan_ai(db)
+            core.sweep_orphan_ai(db)
             # 前の版で空になった表に残っている番号の続き（何件取り込んだか）も忘れる（design.md 3.3「履歴は持たない」）
-            if purge.forget_id_counters(db):
+            if core.forget_id_counters(db):
                 db.execute("PRAGMA wal_checkpoint(TRUNCATE)")   # 置き換える前の値を app.db-wal に残さない
         if removed:
             print(f"[app] 参照されていないアップロードファイルを {removed} 件片付けました")
@@ -401,7 +467,7 @@ def _cleanup_leftovers(app: Flask) -> None:
 
 def _recover_jobs(app: Flask) -> None:
     """前回の終了時に動いていたジョブを「中断」にする。"""
-    from core.jobs import recover_interrupted
+    from core import recover_interrupted
 
     try:
         with app.app_context():
