@@ -258,13 +258,20 @@ def test_a_downloaded_document_is_already_gone(sessions, client):
 
 # ---- 5 画面に1行で書いてある ----------------------------------------------------------------
 
-@pytest.mark.parametrize("path", ["/forms", "/tables", "/form-types"])
+@pytest.mark.parametrize("path", ["/forms", "/tables"])
 def test_every_page_says_what_happens_when_you_leave(client, path):
     res = client.get(path, follow_redirects=True)
     assert res.status_code == 200
     html = res.get_data(as_text=True)
     assert "画面を閉じると" in html
     assert "捨てられます" in html
+
+
+def test_the_form_type_page_says_the_excel_is_never_kept(client):
+    """帳票登録は預からない: 置いた Excel はその場で読むだけ（2026-09-21 の利用者の指示）。"""
+    html = client.get("/form-types", follow_redirects=True).get_data(as_text=True)
+    assert "サーバーに残しません" in html
+    assert "残るのは登録した帳票の種類（読み取りの設定）だけです" in html
 
 
 @pytest.mark.parametrize("path,url", [("/forms", "/forms/discard"), ("/tables", "/tables/discard")])

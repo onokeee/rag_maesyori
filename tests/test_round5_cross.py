@@ -37,18 +37,18 @@ def test_form_upload_refuses_many_whole_row_merges_quickly(app, client, tmp_path
     assert res.status_code == 400 and "結合セルの範囲が大きすぎます" in res.get_json()["error"]
 
 
-def test_form_type_sample_upload_refuses_many_whole_row_merges(app, client, sample_dir, tmp_path):
-    """帳票登録の見本ファイルも、帳票と同じ上限で断る（読み書きできるように開くため）。"""
+def test_form_type_book_refuses_many_whole_row_merges(app, client, sample_dir, tmp_path):
+    """帳票登録で置いた Excel も、帳票と同じ上限で断る（読み書きできるように開くため）。"""
     res = client.post("/form-types/new",
                       data={"name": "設備修理報告書",
-                            "samples": ((sample_dir / "standard.xlsx").open("rb"), "standard.xlsx")},
+                            "book": ((sample_dir / "standard.xlsx").open("rb"), "standard.xlsx")},
                       content_type="multipart/form-data")
     assert res.status_code == 200, res.get_json()
     pattern_id = res.get_json()["pattern_id"]
 
     path = _row_merged_book(tmp_path, 120)
-    res = client.post(f"/form-types/{pattern_id}/samples",
-                      data={"samples": (io.BytesIO(path.read_bytes()), "rows.xlsx")},
+    res = client.post(f"/form-types/{pattern_id}/panel",
+                      data={"book": (io.BytesIO(path.read_bytes()), "rows.xlsx")},
                       content_type="multipart/form-data")
     assert res.status_code == 400
     assert "結合セルの範囲が大きすぎます" in res.get_json()["error"]

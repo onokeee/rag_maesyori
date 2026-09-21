@@ -1,8 +1,11 @@
-{#- 読み取る欄をクリックする欄（HTML の断片） -#}
+{#- 読み取る欄をクリックする欄（HTML の断片）。置いた Excel はサーバーに残さないので、
+    シートが出るのは「いまブラウザが持っているファイルを送ってきたとき」だけ。 -#}
 {% import "components/_ui.html" as ui %}
 <div id="cellBuilder" data-pattern="{{ pattern.id }}"
      data-add-url="{{ url_for('form_types.add_field', pattern_id=pattern.id) }}"
-     data-sample="{{ sample.id if sample }}">
+     {#- いま画面に出ているブックの合図（sha256）。ブラウザがファイルを持っていないとき、
+         これを送れば「さっき読んだブック」を指せる（サーバーは読み取った結果だけを覚えている） -#}
+     data-book="{{ book.file_hash if book }}">
 
   {% for note in notes %}<p class="warn">{{ note }}</p>{% endfor %}
 
@@ -26,9 +29,9 @@
     表（1行＝1明細）は、列見出しのセルを1回クリックすると表ごと項目になります。</p>
 
   <div class="split">
-    <section class="split-pane sticky" aria-label="見本のシート">
+    <section class="split-pane sticky" aria-label="置いた帳票のシート">
       <div class="split-pane-head">
-        <h3>見本のシート{% if sample %} <small class="muted">{{ sample.file_name }}</small>{% endif %}</h3>
+        <h3>置いた帳票のシート{% if book %} <small class="muted">{{ book.file_name }}</small>{% endif %}</h3>
         {% if grids | length > 1 %}
         <div class="tabs" role="tablist">
           {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
@@ -37,20 +40,15 @@
       </div>
       <div class="split-pane-body">
         {% if not grids %}
-          <p class="muted">見本のExcelはサーバーに残していません。同じ帳票のExcelを下の「見本のExcelを置く」で置くと、シートを見ながら項目を直せます。</p>
-        {% endif %}
+          <p class="muted">置いた Excel はサーバーに残していません。シートを見ながら項目を作る・直すときは、
+            同じ帳票の Excel を下の「この帳票のExcelを置く」でもう一度置いてください。</p>
+        {% else %}
         <p class="hint" data-click-hint aria-live="polite">見出しのセルをクリックしてください。</p>
         <div class="btn-row" data-click-actions hidden>
           <button type="button" class="btn small" data-click-empty>値が空のまま項目にする</button>
           <button type="button" class="btn small ghost" data-click-cancel>選び直す</button>
         </div>
         {{ ui.sheet_grid(grids, click_cells=True) }}
-        {% if samples | length > 1 %}
-        <p class="hint">見本ファイル:
-          {% for s in samples %}
-            {% if sample and s.id == sample.id %}<strong>{{ s.file_name }}</strong>{% else %}<button type="button" class="link-like" data-open-sample="{{ s.id }}">{{ s.file_name }}</button>{% endif %}{{ '、' if not loop.last }}
-          {% endfor %}
-        </p>
         {% endif %}
       </div>
     </section>
@@ -64,7 +62,7 @@
         <p class="hint">見出しはクリックすると手で直せます。直るのはMarkdownに書く名前だけで、シートの読み取る場所は変わりません。</p>
         <div class="table-wrap">
         <table class="table compact">
-          <thead><tr><th>見出し</th><th>見本での値</th><th></th></tr></thead>
+          <thead><tr><th>見出し</th><th>置いた帳票での値</th><th></th></tr></thead>
           <tbody>
           {% for r in rows %}
             <tr data-field="{{ r.field.field_name }}" data-sheet="{{ r.sheet or '' }}"
@@ -76,7 +74,7 @@
                 {% if r.label != r.field.display_name %}<small class="muted">探す見出し: {{ r.label }}</small>{% endif %}
                 {% if r.field.data_type == 'table' %}<small class="muted">表（1行＝1明細）</small>{% endif %}</th>
               <td>
-                {% if not samples %}<span class="muted">—（見本のExcelを消したので値は出せません）</span>
+                {% if not book %}<span class="muted">—（Excelを置くと、この設定で読んだ値が出ます）</span>
                 {% elif r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
                 {% else %}<span class="pre">{{ r.value | field_text | truncate(120) }}</span>{% if r.field.unit %} {{ r.field.unit }}{% endif %}{% endif %}
                 {% if r.warning %}<div class="warn">{{ r.warning }}</div>{% endif %}
@@ -96,12 +94,12 @@
   </div>
 
   {# ---- 読み取りテスト ---- #}
-  {% call ui.card("読み取りテスト", "いまの設定で、この見本を実際に読み取った結果です。" if samples else none, level=3) %}
+  {% call ui.card("読み取りテスト", "いまの設定で、置いた帳票を実際に読み取った結果です。" if book else none, level=3) %}
     {% if not rows %}
       <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
     {% elif not test %}
-      <p class="muted">見本のExcelがサーバーに無いので、読み取りテストはできません。設定は残っています。
-        確かめたいときは、下の「見本のExcelを置く」で同じ帳票のExcelを置いてください。</p>
+      <p class="muted">いま Excel を置いていないので、読み取りテストはできません。設定は残っています。
+        確かめたいときは、下の「この帳票のExcelを置く」で同じ帳票の Excel を置いてください。</p>
     {% else %}
       <p>{{ test.total }}項目中 <strong>{{ test.found }}</strong>項目が見つかりました（シート: {{ test.sheets | join('、') }}）。</p>
       <details class="fold" {% if test.found < test.total %}open{% endif %}>
@@ -112,24 +110,15 @@
     {% endif %}
   {% endcall %}
 
-  {# ---- 見本ファイル ---- #}
-  {% call ui.card("見本のExcel", level=3) %}
-    {% if samples %}
-    <ul class="sample-list">
-      {% for s in samples %}
-        <li>{{ s.file_name }}
-          <button type="button" class="btn danger-outline small"
-                  data-delete-sample="{{ url_for('form_types.delete_sample', pattern_id=pattern.id, sample_id=s.id) }}"
-                  data-confirm="見本のExcel「{{ s.file_name }}」をサーバーから削除します。設定は残ります。"
-                  data-confirm-ok="削除">いま消す</button></li>
-      {% endfor %}
-    </ul>
-    {% endif %}
-    <form class="upload-form" data-add-samples="{{ url_for('form_types.add_samples', pattern_id=pattern.id) }}"
+  {# ---- この帳票の Excel を置く（サーバーには残さない） ---- #}
+  {% call ui.card("この帳票のExcelを置く", level=3) %}
+    <form class="upload-form" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}"
           enctype="multipart/form-data">
-      <input type="file" name="samples" accept=".xlsx,.xlsm" multiple required aria-label="見本ファイル">
-      <button type="submit" class="btn">見本のExcelを置く</button>
+      <input type="file" name="book" accept=".xlsx,.xlsm" required aria-label="この帳票のExcel">
+      <button type="submit" class="btn">{{ "別のExcelに替える" if book else "Excelを置く" }}</button>
     </form>
-    <p class="hint">書き方の違う同じ帳票（「設備No」と「設備番号」など）を足して同じ欄をクリックすると、どちらの書き方でも読めるようになります。</p>
+    <p class="hint">置いた Excel は<strong>サーバーに残しません</strong>。項目を作る間だけ読み取って、すぐ捨てます。
+      残るのは読み取りの設定（シート名・セルの場所・項目名）だけです。</p>
+    <p class="hint">書き方の違う同じ帳票（「設備No」と「設備番号」など）に替えて同じ欄をクリックすると、どちらの書き方でも読めるようになります。</p>
   {% endcall %}
 </div>

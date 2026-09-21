@@ -21,9 +21,9 @@ import io
 import json
 import math
 import re
+import shutil
 import unicodedata
 import zipfile
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from functools import lru_cache
@@ -1500,15 +1500,17 @@ class Style:
 
 _FONTS = [("ＭＳ Ｐゴシック", 10), ("游ゴシック", 10), ("Meiryo UI", 9.5), ("ＭＳ ゴシック", 10), ("BIZ UDPゴシック", 10)]
 
-# 様式の版ごとの出力先サブフォルダ。「版の呼び名（Windowsで使えない "." は外す）＋その版が使われ始めた年」。
+# 様式の版ごとの出力先サブフォルダ。名前の付け方は F1〜F5 で共通で、「版の名前＋いつから」。
+# 版の名前だけでは区別が付かないものには、区別に要るもの（ここでは様式番号とシート枚数）だけを足す。
+# ローマ字は使わず、Windows のフォルダ名に使えない文字（. : / \ * ? " < > |）も使わない（`Rev.3` → `Rev3`）。
 # 年は改訂履歴シート（_history_sheet）の改訂日に合わせている。
 # 1つのフォルダの中は同じ様式・同じシート構成のファイルだけなので、フォルダごと帳票取り込みに入れて一括で読み取れる。
 VERSION_DIRS = {
-    "QA-F-021_Rev.3_2sheet_hougan": "QA-F-021_Rev3_2sheet_hougan_2023改訂",
-    "QA-F-021_Rev.3_1sheet_hougan": "QA-F-021_Rev3_1sheet_hougan_2023改訂",
-    "QA-F-021_Rev.2_1sheet_cols": "QA-F-021_Rev2_1sheet_cols_2021改訂",
-    "QA-F-022_Rev.1_2sheet_hougan": "QA-F-022_Rev1_2sheet_hougan_2020制定",
-    "QA-F-022_Rev.2_1sheet_cols": "QA-F-022_Rev2_1sheet_cols_2024改訂",
+    "QA-F-021_Rev.3_2sheet_hougan": "QA-F-021_Rev3_2シート_2023改訂",
+    "QA-F-021_Rev.3_1sheet_hougan": "QA-F-021_Rev3_1シート_2023改訂",
+    "QA-F-021_Rev.2_1sheet_cols": "QA-F-021_Rev2_1シート_2021改訂",
+    "QA-F-022_Rev.1_2sheet_hougan": "QA-F-022_Rev1_2シート_2020制定",
+    "QA-F-022_Rev.2_1sheet_cols": "QA-F-022_Rev2_1シート_2024改訂",
 }
 
 
@@ -2289,6 +2291,7 @@ def _readme(entries: list[dict], styles: list[Style]) -> str:
         "様式の版ごとにサブフォルダを分けてある（サブフォルダの中は .xlsx だけ）。",
         "1つのフォルダの中は同じ様式・同じシート構成のファイルなので、フォルダごと `帳票取り込み` に入れれば、",
         "帳票の種類と読み取るシートを1回選ぶだけで、そのフォルダのファイルをまとめて読み取れる。",
+        "フォルダ名は「版の名前＋いつから」。同じ版でもシート構成が違うものは別フォルダにしてある（様式番号とシート枚数を名前に入れている）。",
         "",
         "| フォルダ | layout_version | 件数 | 特徴 |",
         "|---|---|---|---|",
@@ -2368,16 +2371,16 @@ def generate(output_root: Path | None = None) -> list[Path]:
     out_dir = root / "forms" / FOLDER
     out_dir.mkdir(parents=True, exist_ok=True)
     # 古いファイルの掃除（ファイル名や版フォルダを変えても前回の出力が残らないように）。
-    # 版フォルダの中まで消し、いまは作らない版のフォルダは空にしたうえで削除する。_README.md と _expected.jsonl は残す。
+    # 版フォルダの中の .xlsx を消し、いまは作らない版のフォルダはフォルダごと削除する。_README.md と _expected.jsonl は残す。
     keep_dirs = set(VERSION_DIRS.values())
     for old in out_dir.glob("*.xlsx"):
         old.unlink()
     for sub in sorted(p for p in out_dir.iterdir() if p.is_dir()):
-        for old in sub.glob("*.xlsx"):
-            old.unlink()
-        if sub.name not in keep_dirs:
-            with suppress(OSError):     # 中身が空になったときだけ消える
-                sub.rmdir()
+        if sub.name in keep_dirs:
+            for old in sub.glob("*.xlsx"):
+                old.unlink()
+        else:
+            shutil.rmtree(sub)
     plans = _plans()
     docs = _DocRegistry()
     entries, styles, paths = [], [], []

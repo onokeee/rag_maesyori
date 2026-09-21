@@ -1,4 +1,8 @@
-"""追記ログ列のルール処理（分割・日時・記入者・識別子・マスク・用語集・時系列の描画）。純粋関数のみ。"""
+"""「経過の記録」の列（画面の役割名。コードでは log）のルール処理。
+
+分割・日時・記入者・識別子・マスク・用語集・時系列の描画。純粋関数のみ。
+この層の名前（logproc / log / date_log）は変えていない（画面の言葉だけ 2026-09-21 に変えた）。
+"""
 from logproc.glossary import apply_glossary, glossary_hits
 from logproc.mask import mask_text
 from logproc.models import LogParse, Segment, SplitOptions

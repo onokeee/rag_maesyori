@@ -207,7 +207,7 @@
     (res.reset || []).forEach(clearStep);
     const next = res.next;
     if (!next) return;
-    // 飛ばした段（例: 追記ログの列が無いときの AI整形）は開かずに取りに行く。
+    // 飛ばした段（例: 経過の記録の列が無いときの AI整形）は開かずに取りに行く。
     // 取りに行かないと灰色のまま何も書かれず、なぜ使えないのかが分からない
     const skipped = (res.reset || [])
       .filter((name) => name !== next && STEP_ORDER.indexOf(name) < STEP_ORDER.indexOf(next));
@@ -587,7 +587,7 @@
     const editor = tr.closest("[data-columns-editor]");
     const field = input.dataset.field;
     if (field === "use") tr.classList.toggle("is-unused", !input.checked);
-    // AI整形の対象（追記ログ）は1列だけ。ほかの行が選んでいたら「その他」に戻し、この行は「使う」にする
+    // 経過の記録（log）は1列だけ。ほかの行が選んでいたら「その他」に戻し、この行は「使う」にする
     if (field === "role" && input.value === "log") {
       editor.querySelectorAll("tr[data-col]").forEach((other) => {
         if (other === tr) return;

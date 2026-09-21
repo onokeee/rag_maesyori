@@ -388,11 +388,23 @@ def _m11_document_touch(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE documents SET updated_at = COALESCE(confirmed_at, created_at) WHERE updated_at IS NULL")
 
 
+def _m12_drop_pattern_samples(conn: sqlite3.Connection) -> None:
+    """見本の Excel の控え（pattern_samples）を落とす。
+
+    利用者の指示（2026-09-21）:「帳票登録で、見本のExcelは置かずに、設定だけ保持するように
+    してほしい」。置いた Excel はその場で読み取るだけで、保存も控えもしない（views/form_types.py）。
+    控えが残っていると、もう無いファイルを指し続ける行になるので表ごと落とす。
+    uploads/samples に残ったファイルは、起動時に core.files.remove_sample_dir がフォルダごと片付ける。
+    """
+    conn.execute("DROP TABLE IF EXISTS pattern_samples")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
                                                           _m5_purge_scope, _m6_ai_items_per_import,
                                                           _m7_llm_calls_owner, _m8_session_scope, _m9_import_spec,
-                                                          _m10_drop_unused, _m11_document_touch]
+                                                          _m10_drop_unused, _m11_document_touch,
+                                                          _m12_drop_pattern_samples]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -483,7 +495,6 @@ def list_patterns() -> list[dict]:
     return _all("""
         SELECT p.*,
                (SELECT COUNT(*) FROM pattern_fields f WHERE f.pattern_id = p.id) AS field_count,
-               (SELECT COUNT(*) FROM pattern_samples s WHERE s.pattern_id = p.id) AS sample_count,
                (SELECT COUNT(*) FROM documents d WHERE d.pattern_id = p.id AND d.confirmed_json IS NOT NULL) AS document_count,
                (SELECT COUNT(*) FROM documents d WHERE d.pattern_id = p.id AND d.confirmed_json IS NULL) AS working_count
         FROM patterns p ORDER BY p.name, p.version
@@ -616,23 +627,8 @@ def delete_pattern(pattern_id: int) -> None:
     _exec("DELETE FROM patterns WHERE id = ?", (pattern_id,))
 
 
-def add_sample(pattern_id: int, file_name: str, file_hash: str, stored_path: str) -> int:
-    return _exec(
-        "INSERT INTO pattern_samples (pattern_id, file_name, file_hash, stored_path, created_at) VALUES (?, ?, ?, ?, ?)",
-        (pattern_id, file_name, file_hash, stored_path, now()),
-    )
-
-
-def list_samples(pattern_id: int) -> list[dict]:
-    return _all("SELECT * FROM pattern_samples WHERE pattern_id = ? ORDER BY id", (pattern_id,))
-
-
-def get_sample(sample_id: int) -> dict | None:
-    return _one("SELECT * FROM pattern_samples WHERE id = ?", (sample_id,))
-
-
-def delete_sample(sample_id: int) -> None:
-    _exec("DELETE FROM pattern_samples WHERE id = ?", (sample_id,))
+# 見本の Excel は保存しないので、その控え（add_sample / list_samples …）は持たない。
+# 帳票の種類が持つのは設定だけ（シート名・見出しのセル・値のセル・読み取る向き・項目名）。
 
 
 # ---- documents --------------------------------------------------------------

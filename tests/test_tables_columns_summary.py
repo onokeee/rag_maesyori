@@ -1,7 +1,7 @@
 """「列の対応づけ」の段は、決めることが無ければ要約1行だけにする。
 
 利用者の問い（2026-09-20）「列の対応付けを行う意味は？」への答え。この段で決められるのは
-「出す／出さない」と四つの役割（識別番号・日付・設備・AI整形の対象）だけで、ふつうの一覧表なら
+「出す／出さない」と四つの役割（識別番号・日付・対象・経過の記録）だけで、ふつうの一覧表なら
 どちらも見出しと値から決まっている。決まっているときは22行の表を出さず、要約1行と［変更する］にする。
 決まっていないとき（識別番号が無い・読み取れない値がある など）は、今までどおり表を開く。
 """
@@ -53,7 +53,7 @@ def test_the_summary_replaces_the_table_when_nothing_needs_deciding(app, client)
     html = panel_html(client, import_id, "columns")
 
     # 四つの役割を名指しし、出す列と出さない列の数も書く
-    assert _summary(html) == ("管理No＝識別番号、発生日＝日付、設備番号＝設備、対応内容＝AI整形の対象として読み取ります。"
+    assert _summary(html) == ("管理No＝識別番号、発生日＝日付、設備番号＝対象、対応内容＝経過の記録として読み取ります。"
                               "8列のうち8列を Markdown に出します（出さない列はありません）。")
     assert _todo(html) == []
     # 表は隠すだけで DOM に残す（［変更する］で開ける・保存で送る中身は変わらない）
@@ -62,11 +62,11 @@ def test_the_summary_replaces_the_table_when_nothing_needs_deciding(app, client)
 
 
 def test_the_summary_says_so_when_there_is_no_equipment_column(app, client):
-    """設備の列が無い表では、あるふりをせず「ありません」と書く（SPEC_CSV の設備名は設備番号ではない）。"""
+    """対象の列が無い表では、あるふりをせず「ありません」と書く（SPEC_CSV の設備名は設備番号ではない）。"""
     import_id = spec_import(app, client)
     summary = _summary(panel_html(client, import_id, "columns"))
-    assert summary.startswith("管理No＝識別番号、発生日＝日付、対応内容＝AI整形の対象として読み取ります。")
-    assert "設備の列はありません。" in summary
+    assert summary.startswith("管理No＝識別番号、発生日＝日付、対応内容＝経過の記録として読み取ります。")
+    assert "対象の列はありません。" in summary
     assert "8列のうち8列を Markdown に出します（出さない列はありません）。" in summary
 
 

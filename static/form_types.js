@@ -1,5 +1,9 @@
 // 帳票登録（/form-types）: 1枚の画面で 登録済みの一覧 → Excel を置く → セルをクリックして項目を作る → 使用開始。
 // 画面は移動しない。どの操作も fetch でルートを呼び、返ってきた HTML の断片をその場に入れ替える。
+//
+// 置いた Excel はサーバーに残らない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ保持する」）。
+// ブラウザ側で選んだファイル（bookFile）を持ち続け、セルのクリック・項目の削除・見出しの手直し・
+// 使用開始のたびに一緒に送る。サーバーは受け取った Excel を読み取るだけで保存しない。
 (function () {
   "use strict";
 
@@ -35,6 +39,21 @@
   const buildBody = page.querySelector("[data-build-body]");
   const buildName = page.querySelector('#step-build [data-step-summary]');
   let patternId = null;
+  let bookFile = null;     // いま画面で見ている帳票の Excel（ブラウザの中だけ。サーバーには残らない）
+
+  // ---- サーバーへ送るとき、いまの Excel を一緒に持たせる ----
+  // 送るものが無いときは、さっき読んでもらったブックの合図（sha256）だけを送る
+  function withBook(data) {
+    const form = data || new FormData();
+    if (bookFile) {
+      form.append("book", bookFile, bookFile.name);
+      return form;
+    }
+    const root = buildBody.querySelector("#cellBuilder");
+    const hash = root ? root.dataset.book : "";
+    if (hash) form.append("book_hash", hash);
+    return form;
+  }
 
   // ---- 返ってきた断片を画面に入れる ----
   function apply(res, opts) {
@@ -78,6 +97,8 @@
       const button = newForm.querySelector("button[type=submit]");
       if (button) button.disabled = true;
       work("create", "Excel を読み込んでいます…");
+      // 置かれたファイルはブラウザ側で持ち続ける（サーバーには残らないので、次の操作でまた送る）
+      bookFile = file.files[0];
       try {
         const res = await postForm(page.dataset.createUrl, new FormData(newForm));
         apply(res, { scroll: true });
@@ -100,19 +121,18 @@
       await openType(Number(open.dataset.openType));
       return;
     }
-    const sample = event.target.closest("[data-open-sample]");
-    if (sample) {
-      event.preventDefault();
-      await openType(patternId, Number(sample.dataset.openSample));
-      return;
-    }
     const status = event.target.closest("[data-set-status]");
     if (status) {
       event.preventDefault();
       status.disabled = true;
       try {
         const id = Number(status.dataset.pattern);
-        const res = await postJson("/form-types/" + id + "/status", { status: status.dataset.setStatus });
+        const same = id === patternId;
+        const data = new FormData();
+        data.append("status", status.dataset.setStatus);
+        // 開いている種類なら、いまの Excel も送ってシートを出したままにする
+        const res = await postForm("/form-types/" + id + "/status", same ? withBook(data) : data);
+        if (!same) bookFile = null;   // 別の種類に切り替わるので、前の種類の Excel は持ち越さない
         patternId = id;
         apply(res);
       } catch (e) { toast(e.message, "err"); }
@@ -127,6 +147,7 @@
         if (Number(del.dataset.deleteType) === patternId) {
           buildBody.textContent = "";
           patternId = null;
+          bookFile = null;
           if (buildName) buildName.textContent = "";
           sections.close("build");
           sections.close("new");
@@ -139,42 +160,44 @@
     const field = event.target.closest("[data-delete-field]");
     if (field) {
       event.preventDefault();
-      const root = field.closest("#cellBuilder");
-      const data = new FormData();
-      // いま見ている見本を送る（送らないと1つ目の見本の表示に戻ってしまう）
-      data.append("sample", (root && root.dataset.sample) || "");
-      try { apply(await postForm(field.dataset.deleteField, data)); }
-      catch (e) { toast(e.message, "err"); }
-      return;
-    }
-    const sampleDel = event.target.closest("[data-delete-sample][data-confirmed='1']");
-    if (sampleDel) {
-      try { apply(await postForm(sampleDel.dataset.deleteSample, new FormData())); }
+      // いま見ている Excel を送る（送らないとシートが消えてしまう）
+      try { apply(await postForm(field.dataset.deleteField, withBook())); }
       catch (e) { toast(e.message, "err"); }
     }
   });
 
-  async function openType(id, sampleId) {
+  async function openType(id) {
     if (!id) return;
+    if (id !== patternId) bookFile = null;   // 別の種類を開いたら、前の種類の Excel は持ち越さない
     patternId = id;
     sections.open("build");
     buildBody.innerHTML = '<p class="muted">読み込んでいます…</p>';
     try {
-      const url = "/form-types/" + id + "/panel" + (sampleId ? "?sample=" + sampleId : "");
-      apply(await get(url), { scroll: true });
+      apply(await get("/form-types/" + id + "/panel"), { scroll: true });
     } catch (e) {
       buildBody.textContent = "";
       toast(e.message, "err");
     }
   }
 
-  // ---- 見本を足す ----
+  // ---- この帳票の Excel を置く（登録済みの種類を開き直したとき・別の書き方の帳票に替えるとき） ----
   page.addEventListener("submit", async (event) => {
-    const form = event.target.closest("[data-add-samples]");
+    const form = event.target.closest("[data-book-form]");
     if (!form) return;
     event.preventDefault();
-    try { apply(await postForm(form.dataset.addSamples, new FormData(form))); }
-    catch (e) { toast(e.message, "err"); }
+    const input = form.querySelector("input[type=file]");
+    if (!input || !input.files || !input.files.length) { toast("この帳票のExcelを置いてください", "err"); return; }
+    bookFile = input.files[0];
+    const data = new FormData();
+    data.append("book", bookFile, bookFile.name);
+    try { apply(await postForm(form.dataset.bookForm, data), { scroll: true }); }
+    catch (e) { bookFile = null; toast(e.message, "err"); }
+  });
+
+  // 選んだらそのまま読み込む（ボタンを押さなくてよい）
+  page.addEventListener("change", (event) => {
+    const input = event.target.closest("[data-book-form] input[type=file]");
+    if (input && input.files && input.files.length && input.form) input.form.requestSubmit();
   });
 
   // ---- 読み取る項目の見出しを直す（入力欄から離れる／Enter で保存、Escape で戻す） ----
@@ -195,11 +218,9 @@
     const was = input.dataset.saved || "";
     const value = input.value.trim();
     if (!value || value === was) { input.value = was; return; }
-    const root = input.closest("#cellBuilder");
     const data = new FormData();
     data.append("name", value);
-    data.append("sample", (root && root.dataset.sample) || "");
-    try { apply(await postForm(input.dataset.fieldLabel, data)); }
+    try { apply(await postForm(input.dataset.fieldLabel, withBook(data))); }
     catch (e) { input.value = was; toast(e.message, "err"); }
   });
 
@@ -241,12 +262,11 @@
 
     async function addField(sheet, labelCell, valueCell) {
       const data = new FormData();
-      data.append("sample", root.dataset.sample || "");
       data.append("sheet", sheet);
       data.append("label_cell", labelCell);
       data.append("value_cell", valueCell || "");
       if (hint) hint.textContent = "項目を作っています…";
-      try { apply(await postForm(root.dataset.addUrl, data)); }
+      try { apply(await postForm(root.dataset.addUrl, withBook(data))); }
       catch (e) { toast(e.message, "err"); reset(); }
     }
 

@@ -331,11 +331,11 @@ def _purge_pending(app: Flask) -> None:
     try:
         with app.app_context():
             forms_removed, tables_removed = purge.purge_all_pending()
-            samples_removed = purge.purge_all_samples()
+            samples_removed = purge.purge_old_sample_files()
         if forms_removed or tables_removed:
             print(f"[app] 途中だった取り込みを捨てました（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
         if samples_removed:
-            print(f"[app] 帳票登録の見本ファイルを捨てました（{samples_removed} 件・設定は残ります）")
+            print(f"[app] 前の版が置いた見本のExcelを捨てました（{samples_removed} 件・見本はもう置きません）")
     except Exception as exc:  # 起動は止めない
         print(f"[app] 途中だった取り込みの片付けに失敗しました（{exc.__class__.__name__}: {exc}）")
 

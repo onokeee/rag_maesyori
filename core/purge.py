@@ -418,24 +418,18 @@ def purge_all_pending() -> tuple[int, int]:
     return forms, tables
 
 
-def purge_all_samples() -> int:
-    """帳票登録の見本 Excel をすべて捨てる（残すのは設定だけ。design.md 3.3）。
+def purge_old_sample_files() -> int:
+    """前の版が置いた見本の Excel（uploads/samples）を片付ける。戻り値: 消した件数。
 
-    使用開始の時点で消しているが、登録の途中でブラウザを閉じたときに残るので起動時にも捨てる。
+    帳票登録は見本の Excel を置かなくなった（利用者の指示 2026-09-21「見本のExcelは置かずに、
+    設定だけ保持するようにしてほしい」）。置いた Excel はその場で読み取るだけで保存しないので、
+    ふつうは1件も無い。前の版で置いたままのファイルだけを、起動時にフォルダごと捨てる。
     """
-    from core.files import UploadError, remove_upload
+    from flask import current_app
 
-    db = database.get_db()
-    rows = db.execute("SELECT id, stored_path FROM pattern_samples").fetchall()
-    for row in rows:
-        try:
-            remove_upload(row[1])
-        except UploadError:
-            pass
-        db.execute("DELETE FROM pattern_samples WHERE id = ?", (row[0],))
-    if rows:
-        db.commit()
-    return len(rows)
+    from core.files import remove_sample_dir
+
+    return remove_sample_dir(current_app.config["UPLOAD_DIR"])
 
 
 def _stale_before(hours: float) -> str:

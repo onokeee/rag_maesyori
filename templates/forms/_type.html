@@ -14,7 +14,7 @@
 {% endif %}
 
 {% if not matches %}
-  <p class="muted">使用中の帳票の種類がありません。<a href="{{ form_types_url }}">帳票登録</a>で見本の Excel から読み取る欄を決め、
+  <p class="muted">使用中の帳票の種類がありません。<a href="{{ form_types_url }}">帳票登録</a>でこの帳票の Excel を置いて読み取る欄を決め、
     ［使用開始］を押すと、ここに出ます。</p>
 {% else %}
 <form data-type-form data-doc="{{ doc.id }}" data-read-url="{{ url_for('forms.read_all') }}"

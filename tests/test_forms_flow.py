@@ -5,30 +5,60 @@
 """
 import io
 import json
+from pathlib import Path
 
 from models import database as db
 
 
 # ---- 画面を1つ進める（ほかの帳票テストからも使う） -------------------------------------------------
+# 置いた Excel はサーバーに残らない（2026-09-21 の利用者の指示）。ブラウザが選んだファイルを
+# 持ち続けて毎回送るのと同じように、テストでも「その種類で置いたファイル」を覚えて送り直す。
+
+def book_part(path):
+    """multipart で送る Excel（画面が毎回送っているものと同じ）。"""
+    path = Path(path)
+    return (io.BytesIO(path.read_bytes()), path.name)
+
+
+def _books(client) -> dict:
+    books = getattr(client, "form_books", None)
+    if books is None:
+        books = {}
+        client.form_books = books
+    return books
+
 
 def create_type(client, path, name=None) -> int:
-    """見本の Excel を1つ置いて帳票の種類を作る（名前を省くとファイル名になる）。"""
-    data = {"samples": (io.BytesIO(path.read_bytes()), path.name)}
+    """帳票の Excel を1つ置いて帳票の種類を作る（名前を省くとファイル名になる）。"""
+    data = {"book": book_part(path)}
     if name is not None:
         data["name"] = name
     res = client.post("/form-types/new", data=data, content_type="multipart/form-data")
     assert res.status_code == 200, res.get_data(as_text=True)
-    return res.get_json()["pattern_id"]
+    pattern_id = res.get_json()["pattern_id"]
+    _books(client)[pattern_id] = Path(path)
+    return pattern_id
 
 
-def add_field(client, pattern_id: int, sheet: str, label_cell: str, value_cell: str = "", sample=None) -> dict:
-    """見出しのセル（と値のセル）をクリックして項目を1つ作る。"""
+def add_field(client, pattern_id: int, sheet: str, label_cell: str, value_cell: str = "", book=None) -> dict:
+    """見出しのセル（と値のセル）をクリックして項目を1つ作る（画面と同じく Excel も一緒に送る）。"""
     data = {"sheet": sheet, "label_cell": label_cell, "value_cell": value_cell}
-    if sample is not None:
-        data["sample"] = sample
-    res = client.post(f"/form-types/{pattern_id}/fields", data=data)
+    path = book if book is not None else _books(client).get(pattern_id)
+    if path is not None:
+        data["book"] = book_part(path)
+    res = client.post(f"/form-types/{pattern_id}/fields", data=data, content_type="multipart/form-data")
     assert res.status_code == 200, res.get_data(as_text=True)
     return res.get_json()
+
+
+def panel_html(client, pattern_id: int, book=None) -> str:
+    """登録中の欄（HTML の断片）。Excel を渡すとシートも出る（渡さなければ設定だけの画面）。"""
+    if book is None:
+        return client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
+    res = client.post(f"/form-types/{pattern_id}/panel", data={"book": book_part(book)},
+                      content_type="multipart/form-data")
+    assert res.status_code == 200, res.get_data(as_text=True)
+    return res.get_json()["html"]
 
 
 def activate(client, pattern_id: int) -> None:
@@ -57,13 +87,13 @@ def finish(client, ids, current=None):
 # ---- 通し -------------------------------------------------------------------------------
 
 def test_form_flow_happy_path(app, client, sample_dir):
-    # 1. 帳票登録: 見本の Excel を置き、見出しと値のセルをクリックして項目を作る
+    # 1. 帳票登録: 帳票の Excel を置き、見出しと値のセルをクリックして項目を作る（Excel は残らない）
     path = sample_dir / "standard.xlsx"
     pattern_id = create_type(client, path, "設備修理報告書")
     page = client.get("/form-types/").get_data(as_text=True)
     assert "設備修理報告書" in page and "作成中" in page
-    panel = client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
-    # クリックで作る画面: 見本のシートが出て、型やキー名の入力欄は無い
+    panel = panel_html(client, pattern_id, book=path)
+    # クリックで作る画面: 置いた帳票のシートが出て、型やキー名の入力欄は無い
     assert 'data-cell="B3"' in panel and "まだ項目がありません" in panel
     assert "RAGに出す" not in panel and "キー名" not in panel
 
@@ -75,8 +105,8 @@ def test_form_flow_happy_path(app, client, sample_dir):
         assert [f.field_name for f in pattern.fields] == ["report_id", "equipment_name", "symptom"]
         assert pattern.status == "draft"          # 保存しても使用中にはならない
 
-    # 読み取りテスト: いまの設定で見本を読んだ結果が同じ欄に出る
-    panel = client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
+    # 読み取りテスト: いまの設定で、置いた帳票を読んだ結果が同じ欄に出る
+    panel = panel_html(client, pattern_id, book=path)
     assert "R2026-00123" in panel and "CMP装置" in panel and "3項目中 <strong>3</strong>項目" in panel
 
     # 使用開始を押すまでは帳票取り込みの候補に出ない
@@ -199,7 +229,7 @@ def test_form_flow_with_table_field(app, client, tmp_path):
     with app.app_context():
         parts = next(f for f in db.load_pattern(pattern_id).fields if f.data_type == "table")
     assert parts.table_columns == ["No.", "品番", "品名", "数量"]
-    panel = client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
+    panel = panel_html(client, pattern_id, book=path)
     assert "品番: PW35-1577／品名: スピンモータ" in panel
     activate(client, pattern_id)
 

@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shutil
 import unicodedata
 import zipfile
 from dataclasses import dataclass, field
@@ -86,7 +87,8 @@ UNIT_KEYS = ("car", "pn", "fan", "lp", "shelf")
 def _rev_dir(version: str) -> str:
     """版ごとの出力フォルダ名（例: v1 → `Rev1_2018制定`）。
 
-    様式の版の呼び名＋運用開始年。Windows のフォルダ名に使えない文字は落とす（`Rev.1` → `Rev1`）。
+    名前の付け方は F1〜F5 で共通で、「版の名前＋いつから」。ローマ字は使わず、
+    Windows のフォルダ名に使えない文字（. : / \\ * ? " < > |）も使わない（`Rev.1` → `Rev1`）。
     """
     label, when = REV_INFO[version]
     when = re.sub(r"^(\d{4})[.\d]*", r"\1", when)        # 2018.10制定 → 2018制定
@@ -2319,7 +2321,7 @@ def _readme(specs: list[FileSpec], recs: list[Record]) -> str:
         "",
         "## 様式の版",
         "",
-        "版ごとにフォルダを分けてある。同じフォルダのファイルは様式も項目の並びも同じなので、"
+        "版ごとにフォルダを分けてある（フォルダ名は「版の名前＋いつから」）。同じフォルダのファイルは様式も項目の並びも同じなので、"
         "フォルダごと「帳票取り込み」に入れれば、帳票の種類と読み取るシートを1回選ぶだけでまとめて読み取れる。"
         "版フォルダの中は .xlsx だけ。この `_README.md` と `_expected.jsonl` は帳票フォルダ直下（版フォルダの外）に置いてある。",
         "",
@@ -2441,12 +2443,16 @@ def generate(output_root: Path | None = None) -> list[Path]:
     rev_dirs = {v: _rev_dir(v) for v in sorted({s.version for s in specs})}
     # このフォルダは本スクリプト専用。名前の変わった古い生成物・使わなくなった版フォルダを残さない
     # （_README.md と _expected.jsonl は版フォルダの外にあるので消えない）
-    for old in out_dir.rglob("*.xlsx"):
+    keep_dirs = set(rev_dirs.values())
+    for old in out_dir.glob("*.xlsx"):          # 版フォルダに分ける前の出力の残り
         old.unlink()
-    for sub in sorted(out_dir.iterdir()):
-        if sub.is_dir() and not any(sub.iterdir()):
-            sub.rmdir()
-    for name in rev_dirs.values():
+    for sub in sorted(p for p in out_dir.iterdir() if p.is_dir()):
+        if sub.name in keep_dirs:
+            for old in sub.glob("*.xlsx"):
+                old.unlink()
+        else:
+            shutil.rmtree(sub)
+    for name in keep_dirs:
         (out_dir / name).mkdir(exist_ok=True)
 
     # 先に全ファイルの中身を決め、総合判定の記入誤り（1件）を選んでから描画する

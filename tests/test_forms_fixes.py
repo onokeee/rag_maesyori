@@ -490,7 +490,7 @@ def test_workbook_without_a_sheet_list_is_refused(app, client, sample_dir):
 
 
 def test_workbook_with_too_many_cells_is_refused_before_reading(app, client, tmp_path):
-    """展開すると大量のセルがある小さなブックは、帳票でも見本でも読み込む前に断り、何も残さない。"""
+    """展開すると大量のセルがある小さなブックは、帳票でも帳票登録でも読み込む前に断り、何も残さない。"""
     from tests.test_core_files import _xlsx_with_cells
 
     app.config["EXCEL_MAX_CELLS"] = 1000
@@ -498,9 +498,10 @@ def test_workbook_with_too_many_cells_is_refused_before_reading(app, client, tmp
     res = client.post("/forms/upload", data={"file": (io.BytesIO(data), "many.xlsx")},
                       content_type="multipart/form-data")
     assert res.status_code == 400 and "セル数が上限（1,000 セル）を超えています" in res.get_json()["error"]
-    res = client.post("/form-types/new", data={"name": "多すぎ", "samples": (io.BytesIO(data), "many.xlsx")},
+    res = client.post("/form-types/new", data={"name": "多すぎ", "book": (io.BytesIO(data), "many.xlsx")},
                       content_type="multipart/form-data")
     assert res.status_code == 400 and "セル数が上限（1,000 セル）を超えています" in res.get_json()["error"]
     with app.app_context():
         assert db.get_db().execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+        assert db.list_patterns() == []      # 読めなかったブックでは帳票の種類も作らない
     assert [p for p in Path(app.config["UPLOAD_DIR"]).rglob("*") if p.is_file()] == []

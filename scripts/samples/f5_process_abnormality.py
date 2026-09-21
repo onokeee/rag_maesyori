@@ -3,7 +3,7 @@
     python -m scripts.samples.f5_process_abnormality
 
 samples/forms/F5_工程異常連絡票/ に以下を書き出す。
-- 版ごとのフォルダ（A3横_Rev1_2023以前 / A3横_Rev2_2024改訂 / A4縦_Rev3_2024改訂）に Excel帳票 30 ファイル。
+- 版ごとのフォルダ（A3横_Rev1_2023まで / A3横_Rev2_2024改訂 / A4縦_Rev3_2024改訂）に Excel帳票 30 ファイル。
   1つのフォルダの中は様式・シート構成がそろっているので、そのまま「帳票取り込み」へまとめて投入できる。
 - _expected.jsonl : ファイルごとの正解値（人が読んだ値）と、そのファイルで使われているラベル文字列。
   `file` は本フォルダからの相対パス（`A4縦_Rev3_2024改訂/....xlsx`、区切りは `/`）。
@@ -20,6 +20,7 @@ import io
 import json
 import math
 import re
+import shutil
 import unicodedata
 import zipfile
 from dataclasses import dataclass, field
@@ -44,9 +45,12 @@ from . import domain as D
 # ---------------------------------------------------------------------------
 FORM_FOLDER = "F5_工程異常連絡票"
 # 様式の版ごとのフォルダ。同じフォルダの中は様式・シート構成がそろっており、まとめて取り込める。
-# 名前は README の版（layout_version）そのままに使用開始時期を足したもの（Windows で使えない文字「. : / \ * ? " < > |」は使わない）
+# 名前の付け方は F1〜F5 で共通で、「版の名前＋いつから」。版の名前だけでは区別が付かないものには、
+# 区別に要るもの（ここでは用紙サイズ）だけを足す。ローマ字は使わず、
+# Windows のフォルダ名に使えない文字（. : / \ * ? " < > |）も使わない（`Rev.3` → `Rev3`）。
+# いちばん古い Rev.1 は制定の時期が帳票に載っていないので、代わりに使われていた時期（いつまで）を書く。
 VERSION_FOLDERS = {
-    "A3横_Rev.1": "A3横_Rev1_2023以前",
+    "A3横_Rev.1": "A3横_Rev1_2023まで",
     "A3横_Rev.2": "A3横_Rev2_2024改訂",
     "A4縦_Rev.3": "A4縦_Rev3_2024改訂",
 }
@@ -1655,13 +1659,15 @@ def _readme(rows: list[dict]) -> str:
         "- 回答後、品質保証課が効果確認・クローズ判定を行う。押印欄は赤字の「姓＋日付(M/D)」。",
         "",
         "## レイアウト（版）",
-        "版ごとに下の「フォルダ」へ入れてある。フォルダ名は版の名前＋使用開始時期。",
+        "版ごとに下の「フォルダ」へ入れてある。フォルダ名は「版の名前＋いつから」"
+        "（いちばん古い Rev.1 は制定の時期が帳票に載っていないため、使われていた時期を書いている）。"
+        "同じフォルダのファイルはまとめて「帳票取り込み」へ投入できる。",
         "",
         "| layout_version | フォルダ | 用紙 | 使用期間 | 構成 |",
         "|---|---|---|---|---|",
-        "| A3横_Rev.1 | `A3横_Rev1_2023以前/` | A3横 | 〜2023/12 | 左：発行部署欄、右：【回答欄】。ラベルが旧名称（No.／発行元／発行先／不具合内容／推定原因／処置／処置方法／流出／回答期日／真因／応急処置／再発防止策） |",
-        "| A3横_Rev.2 | `A3横_Rev2_2024改訂/` | A3横 | 2024/01〜2024/09 | Rev.1 と同配置でラベルを改称（管理番号／発信部署／受信部署／異常の内容／発生原因（推定）／処置区分／処置の内容／流出有無／回答希望日／発生原因（確定）／暫定対策／恒久対策）。なぜなぜ分析5段・品証コメント・設備トラブル報告No.欄は Rev.1 から共通。Rev.3 改訂後も一部の班が使い続けている |",
-        "| A4縦_Rev.3 | `A4縦_Rev3_2024改訂/` | A4縦 | 2024/10〜 | 方眼紙（36列）のコンパクト版。回答欄は下段。連絡No.は `PA-YYYY-NNNN`（旧版は `工異YY-NNN`）。ロット表は4行、なぜなぜは1セル |",
+        f"| A3横_Rev.1 | `{VERSION_FOLDERS['A3横_Rev.1']}/` | A3横 | 〜2023/12 | 左：発行部署欄、右：【回答欄】。ラベルが旧名称（No.／発行元／発行先／不具合内容／推定原因／処置／処置方法／流出／回答期日／真因／応急処置／再発防止策） |",
+        f"| A3横_Rev.2 | `{VERSION_FOLDERS['A3横_Rev.2']}/` | A3横 | 2024/01〜2024/09 | Rev.1 と同配置でラベルを改称（管理番号／発信部署／受信部署／異常の内容／発生原因（推定）／処置区分／処置の内容／流出有無／回答希望日／発生原因（確定）／暫定対策／恒久対策）。なぜなぜ分析5段・品証コメント・設備トラブル報告No.欄は Rev.1 から共通。Rev.3 改訂後も一部の班が使い続けている |",
+        f"| A4縦_Rev.3 | `{VERSION_FOLDERS['A4縦_Rev.3']}/` | A4縦 | 2024/10〜 | 方眼紙（36列）のコンパクト版。回答欄は下段。連絡No.は `PA-YYYY-NNNN`（旧版は `工異YY-NNN`）。ロット表は4行、なぜなぜは1セル |",
         "",
         f"件数（＝各フォルダのファイル数）: " + "、".join(f"{k} {v}件" for k, v in sorted(ver.items())) + "（Rev.3 改訂後も旧様式で起票された例を含む）",
         "",
@@ -1729,14 +1735,17 @@ def generate(output_root: Path | None = None) -> list[Path]:
     root = Path(output_root) if output_root is not None else D.OUTPUT_ROOT
     out_dir = root / "forms" / FORM_FOLDER
     out_dir.mkdir(parents=True, exist_ok=True)
-    # 前回の生成物を消す。版フォルダの中の .xlsx も消し、空になった版フォルダ自体も消す
+    # 前回の生成物を消す。版フォルダの中の .xlsx を消し、いまは作らない版のフォルダはフォルダごと消す
     # （版の名前を変えたときに古いフォルダが残らないようにする）。_README.md と _expected.jsonl は下で作り直す。
-    for old in list(out_dir.rglob("*.xlsx")) + [out_dir / "_expected.jsonl", out_dir / "_README.md"]:
-        if old.exists():
-            old.unlink()
-    for sub in sorted((p for p in out_dir.rglob("*") if p.is_dir()), key=lambda p: -len(p.parts)):
-        if not any(sub.iterdir()):
-            sub.rmdir()
+    keep_dirs = set(VERSION_FOLDERS.values())
+    for old in out_dir.glob("*.xlsx"):          # 版フォルダに分ける前の出力の残り
+        old.unlink()
+    for sub in sorted(p for p in out_dir.iterdir() if p.is_dir()):
+        if sub.name in keep_dirs:
+            for old in sub.glob("*.xlsx"):
+                old.unlink()
+        else:
+            shutil.rmtree(sub)
 
     incs = select_incidents()
     # 連絡No.の連番: 影響ロットのあるトラブルのうち約半数が連絡票になった想定で、年内の通し番号を振る

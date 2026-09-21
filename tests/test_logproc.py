@@ -1,4 +1,4 @@
-"""logproc（追記ログのルール処理）の単体テスト。
+"""logproc（「経過の記録」の列のルール処理）の単体テスト。
 
 実例セルは docs/research/対応内容セル分析.json の realistic_examples を使う。
 """

@@ -2,10 +2,13 @@
 
 保存は分割して読みながら sha256 を計算する（ブック全体を解析してからハッシュを取らない）。
 Excel の事前チェックは openpyxl で開く前に、先頭バイトと zip の目次だけで行う。
+帳票登録の見本の Excel は保存しない（read_upload でメモリに読むだけ）ので、事前チェックは
+パスのほかに「中身そのもの（bytes）」も受け取れる。
 """
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import posixpath
 import re
@@ -76,9 +79,12 @@ _WORKBOOK_HEAD_BYTES = 64 * 1024
 # 掴まれているファイルを消すときの再試行（ウイルス対策のスキャンなどは短時間で終わる）
 REMOVE_RETRIES = 3
 REMOVE_RETRY_WAIT = 0.05
-# アップロードの保存先（UPLOAD_DIR 直下）と save_upload が付けるファイル名の形
-UPLOAD_SUBDIRS = ("documents", "samples", "tables")
+# アップロードの保存先（UPLOAD_DIR 直下）と save_upload が付けるファイル名の形。
+# 帳票登録の見本（samples）はもう保存しないので、ここには入れない（前の版の残骸は remove_sample_dir が消す）
+UPLOAD_SUBDIRS = ("documents", "tables")
 _STORED_NAME = re.compile(r"[0-9a-f]{32}\.[A-Za-z0-9]+")
+# 前の版が見本の Excel を置いていたフォルダ（UPLOAD_DIR 直下）
+SAMPLE_SUBDIR = "samples"
 
 
 class UploadError(Exception):
@@ -91,6 +97,19 @@ class StoredFile:
     file_name: str     # 元のファイル名（表示・ダウンロード用）
     file_hash: str     # sha256
     size: int
+
+
+@dataclass
+class MemoryFile:
+    """保存せずにメモリへ読んだアップロード（帳票登録の見本の Excel）。"""
+
+    data: bytes        # ブックの中身そのもの
+    file_name: str     # 元のファイル名（表示用）
+    file_hash: str     # sha256
+
+    @property
+    def size(self) -> int:
+        return len(self.data)
 
 
 def original_name(storage) -> str:
@@ -116,8 +135,8 @@ def upload_path(stored_path: str) -> Path:
     return path
 
 
-def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> StoredFile:
-    """アップロードを UPLOAD_DIR/subdir に保存する。拡張子・サイズ・空ファイルを確認し、失敗時は消して UploadError。"""
+def _checked_name(storage, allowed: set[str]) -> tuple[str, str]:
+    """元のファイル名と拡張子。名前が無い・扱えない拡張子なら UploadError。"""
     name = original_name(storage)
     if not name:
         raise UploadError("ファイルを選択してください")
@@ -127,7 +146,38 @@ def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> Stor
         kinds = " / ".join(sorted(allowed_exts))
         hint = "（.xls はExcelで .xlsx に保存し直してください）" if ext == ".xls" else ""
         raise UploadError(f"{kinds} のファイルを選んでください{hint}")
+    return name, ext
 
+
+def read_upload(storage, allowed: set[str], max_bytes: int) -> MemoryFile:
+    """アップロードをディスクに置かずにメモリへ読む。拡張子・サイズ・空ファイルを確認する。
+
+    帳票登録の見本の Excel に使う。置いた Excel はサーバーに残さない（利用者の指示 2026-09-21
+    「見本のExcelは置かずに、設定だけ保持するようにしてほしい」）ので、保存先を作らずに
+    中身と sha256 だけを返す。呼び出し側は読み取った結果（WorkbookInfo）だけを短い間覚えておく。
+    """
+    name, _ext = _checked_name(storage, allowed)
+    digest = hashlib.sha256()
+    chunks: list[bytes] = []
+    size = 0
+    stream = getattr(storage, "stream", storage)
+    while True:
+        chunk = stream.read(CHUNK_SIZE)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_bytes:
+            raise UploadError(f"ファイルが大きすぎます（上限 {_format_size(max_bytes)}）")
+        digest.update(chunk)
+        chunks.append(chunk)
+    if size == 0:
+        raise UploadError("ファイルが空です")
+    return MemoryFile(data=b"".join(chunks), file_name=name, file_hash=digest.hexdigest())
+
+
+def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> StoredFile:
+    """アップロードを UPLOAD_DIR/subdir に保存する。拡張子・サイズ・空ファイルを確認し、失敗時は消して UploadError。"""
+    name, ext = _checked_name(storage, allowed)
     stored = f"{subdir.strip('/')}/{uuid4().hex}{ext}"
     dest = upload_path(stored)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -153,10 +203,12 @@ def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> Stor
     return StoredFile(stored_path=stored, file_name=name, file_hash=digest.hexdigest(), size=size)
 
 
-def precheck_excel(path, max_cells: int | None = None, max_merged: int | None = None,
+def precheck_excel(source, max_cells: int | None = None, max_merged: int | None = None,
                    max_rows: int | None = None) -> None:
     """Excel（.xlsx/.xlsm）として開いてよいかを、中身を展開せずに確かめる。問題があれば UploadError。
 
+    source: ファイルのパス、またはブックの中身そのもの（bytes）。帳票登録の見本の Excel は
+      保存しないので bytes で渡す（zipfile はどちらも同じように読める）。
     max_cells: セル数の上限（省略時は MAX_CELLS）。
     max_merged: 結合セルの面積の上限（省略時は MAX_MERGED_CELLS。帳票は FORM_MAX_MERGED_CELLS を渡す）。
     max_rows: 行（<row>）の数の上限（省略時は max_merged と同じ値）。通常モードの openpyxl は、セルの無い
@@ -164,15 +216,18 @@ def precheck_excel(path, max_cells: int | None = None, max_merged: int | None = 
       （100万行で約9秒）。帳票は画面を開くたびに開き直すので、結合セルと同じ目安（1回あたり2秒程度）で断る。
       一覧表は読み取り専用モードで開き行の書式を作らないので、MAX_MERGED_CELLS のままで困らない。
     """
-    path = Path(path)
-    with open(path, "rb") as f:
-        head = f.read(8)
+    if isinstance(source, (bytes, bytearray)):
+        head, book = bytes(source[:8]), io.BytesIO(source)
+    else:
+        book = Path(source)
+        with open(book, "rb") as f:
+            head = f.read(8)
     if head.startswith(OLE_MAGIC[:4]):
         raise UploadError("パスワード付きのブック、または .xls 形式です。パスワードを外して .xlsx 形式で保存し直してください")
     if not head.startswith(ZIP_MAGIC):
         raise UploadError("Excelファイル（.xlsx / .xlsm）として読み込めません。Excelで開いて .xlsx 形式で保存し直してください")
     try:
-        with zipfile.ZipFile(path) as zf:
+        with zipfile.ZipFile(book) as zf:
             infos = zf.infolist()
             names = {i.filename for i in infos}
             if "xl/workbook.bin" in names:
@@ -419,6 +474,20 @@ def remove_upload(stored_path: str | None) -> bool:
     except OSError:
         pass
     return False
+
+
+def remove_sample_dir(base) -> int:
+    """前の版が置いた見本の Excel（uploads/samples）をフォルダごと消す。消したファイルの件数を返す。
+
+    帳票登録は見本の Excel を受け取っても置かなくなった（利用者の指示 2026-09-21）。
+    前の版で置いたままのファイルが残ることがあるので、起動時に片付ける。
+    """
+    folder = Path(base) / SAMPLE_SUBDIR
+    if not folder.is_dir():
+        return 0
+    count = sum(1 for p in folder.rglob("*") if p.is_file())
+    shutil.rmtree(folder, ignore_errors=True)
+    return count
 
 
 def remove_orphan_import_dirs(tables_dir, known_ids) -> int:

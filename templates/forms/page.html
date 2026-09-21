@@ -19,7 +19,7 @@
       <div class="notice" role="note">
         {% if pattern_count == 0 %}
           帳票の種類がまだありません。先に<a href="{{ url_for('form_types.index') }}">帳票登録</a>で、
-          見本の Excel から読み取る欄を決めてください。
+          この帳票の Excel を置いて読み取る欄を決めてください（置いた Excel はサーバーに残りません）。
         {% else %}
           使用中の帳票の種類がありません。<a href="{{ url_for('form_types.index') }}">帳票登録</a>で［使用開始］を押してください。
         {% endif %}

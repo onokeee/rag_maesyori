@@ -43,12 +43,13 @@ GRID_CELL_CHARS = 40
 DATA_PAGE = 100
 ISSUES_SHOWN = 200
 
-# 画面で選べる役割（列の対応づけ）。ここに無い役割（人名・数値・区分など）は候補のまま使い、画面では「その他」に見せる
-SCREEN_ROLES = [("key", "識別番号"), ("date", "日付"), ("entity", "設備"), ("log", "AI整形の対象（追記ログ）"),
-                ("attribute", "その他")]
+# 画面で選べる役割（列の対応づけ）。ここに無い役割（人名・数値・区分など）は候補のまま使い、画面では「その他」に見せる。
+# 名前はどんな表にも当てはまる言い方にする（利用者の指示 2026-09-21。entity は「設備」、log は
+# 「AI整形の対象（追記ログ）」と呼んでいたが、設備の記録以外の表には当てはまらなかった）。
+# 中で使う名前（key/date/entity/log/attribute）は変えない（前に保存した取り込み設定がそのまま読める）。
+SCREEN_ROLES = [("key", "識別番号"), ("date", "日付"), ("entity", "対象（設備・製品・顧客など）"),
+                ("log", "経過の記録（1つのセルに日付ごとに書き足した列）"), ("attribute", "その他")]
 SCREEN_ROLE_KEYS = {role for role, _label in SCREEN_ROLES}
-TYPE_LABELS = {"code": "コード", "string": "文字", "text": "長文", "date": "日付", "datetime": "日時", "time": "時刻",
-               "number": "数値", "enum": "選択肢", "status": "状態"}
 KIND_LABELS = {"header": "見出し", "data": "データ", "subtotal": "小計・合計", "note": "注記", "continuation": "継続行",
                "excluded": "除外", "title": "表題", "blank": "空行"}
 TABLE_KIND_LABELS = {"list": "一覧表", "crosstab": "クロス集計", "form_like": "帳票らしい", "unknown": "不明"}
@@ -116,7 +117,7 @@ def _layout(imp: dict, source, sheet: str, header_rows=None, data_end=None, use_
 
 
 def _after_read_panel(spec) -> str:
-    """読み込みのあとに開く段。追記ログ列があれば AI整形、なければ内容の確認。"""
+    """読み込みのあとに開く段。経過の記録の列があれば AI整形、なければ内容の確認。"""
     return "ai" if spec is not None and spec.log_stage is not None else "preview"
 
 
@@ -505,31 +506,25 @@ def _suggest(imp: dict):
     return guess, suggest_columns(guess.headers, samples)
 
 
-# 型の仲間。仲間が違うときだけ「値は…らしい」と知らせる（日付⇔日時、文字⇔長文は読み方が変わらない）
-_TYPE_FAMILY = {"date": "日付", "datetime": "日付", "time": "日付", "number": "数値",
-                "code": "文字", "string": "文字", "text": "文字", "enum": "文字", "status": "文字"}
+def _unused_note(sugg) -> str:
+    """はじめから「使わない」にしてある列の、その理由（見出しの下に小さく出す。ふつうの列は空）。
 
-
-def _warnings_of(sugg) -> list[str]:
-    """その列で知らせることがあるときだけ出す1行（何も無ければ空）。"""
-    out = []
-    if sugg.type_error_rate:
-        out.append(f"型エラー {round(sugg.type_error_rate * 100, 1)}%")
-    if sugg.blank_rate >= 0.5:
-        out.append(f"空欄 {int(round(sugg.blank_rate * 100))}%")
-    if sugg.inferred_type and _TYPE_FAMILY.get(sugg.inferred_type) != _TYPE_FAMILY.get(sugg.type):
-        out.append(f"値は「{TYPE_LABELS.get(sugg.inferred_type, sugg.inferred_type)}」らしい")
-    if sugg.md == "omit":
-        out.append("空欄だけなので、はじめから使わない設定にしています" if sugg.omit_reason == "blank"
-                   else "記録に不要な管理用の列らしいので、はじめから使わない設定にしています")
-    return out
+    理由が読めないと、チェックの外れている列を入れ直してよいのか分からない。
+    「知らせ」の列は 2026-09-21 にやめた（ほとんどの行で空で、表の上の行と同じことを書いていた）。
+    型エラー・空欄の割合は表の上（_columns_todo）に出すので、ここには書かない。
+    「値は「日付」らしい」も出さない（日付の役割は日付として読める列にしか出ないので、読んでも直せない）。
+    """
+    if sugg.md != "omit":
+        return ""
+    return ("空欄だけなので、はじめから使わない設定にしています" if sugg.omit_reason == "blank"
+            else "記録に不要な管理用の列らしいので、はじめから使わない設定にしています")
 
 
 def _column_row(sugg) -> dict:
-    """画面の1行（使う・見出し・役割と、知らせること）。"""
+    """画面の1行（使う・見出し・役割・値の例と、使わない設定にしている理由）。"""
     return {"index": sugg.index, "header": sugg.header, "use": sugg.md != "omit",
             "role": _screen_role(sugg.role), "type": sugg.type, "examples": list(sugg.examples or [])[:3],
-            "warnings": _warnings_of(sugg)}
+            "note": _unused_note(sugg)}
 
 
 DATE_TYPES = ("date", "datetime")
@@ -556,18 +551,19 @@ def _has_date_column(pairs) -> bool:
 # 意味がないので、次の条件をすべて満たすときは表をたたんで要約1行だけ出す。
 #   1. 識別番号の列がちょうど1つで、見出しが辞書と完全一致している（matched_by == "dictionary"）
 #   2. 日付の列がちょうど1つで、同じく完全一致している
-#   3. 設備の列は0か1つ。1つなら完全一致している（0なら要約に「設備の列はありません」と書く）
-#   4. AI整形の対象の列は0か1つ。1つなら完全一致している（0なら要約にそう書く）
+#   3. 対象の列は0か1つ。1つなら完全一致している（0なら要約に「対象の列はありません」と書く）
+#   4. 経過の記録の列は0か1つ。1つなら完全一致している（0なら要約にそう書く）
 #   5. 出す列のどれにも、出すかどうかを決め直す理由が無い
 #      ＝ 読めない値がある（type_error_rate > 0）／ほとんど空欄（blank_rate >= UNSURE_BLANK_RATE）
 # 似た語で当たっただけ（matched_by == "similar"）や、値の並びから当てた（"none"）列が四つの役割に
 # 付いていると 1〜4 で外れる。役割が本当に合っているかは人にしか決められないので、表を開く。
-# 半分くらい空欄なのは「知らせ」に出すだけで決め直す理由にしない（出しても困らないため）。
+# 半分くらい空欄なのは決め直す理由にしない（出しても困らないため。ここに出さなければ画面のどこにも出ない）。
 UNSURE_BLANK_RATE = 0.9
 
-# 四つの役割（画面で決められるもの）と、要約・知らせに出す名前。識別番号と日付は無いと決まらない
+# 四つの役割（画面で決められるもの）と、要約・上の行に出す短い名前（プルダウンの但し書きまでは書かない）。
+# 識別番号と日付は無いと決まらない
 _DECIDED_ROLES = [("key", "識別番号", True), ("date", "日付", True),
-                  ("entity", "設備", False), ("log", "AI整形の対象", False)]
+                  ("entity", "対象", False), ("log", "経過の記録", False)]
 
 
 def _role_columns(pairs, role: str) -> list[tuple[dict, object]]:
@@ -657,8 +653,8 @@ def _build_spec(payload: dict, guess, suggestions):
         # 「型を日付にしてください」は画面に直す場所が無いので、こちらの言い方に置き換える
         errors = date_errors + [e for e in errors if not e.startswith("日付の列「")]
     if sum(1 for u in used if u["role"] == "log") > 1:
-        # 黙って最初の列だけを AI整形の対象にしない（2列目は追記ログとして1行につながれて出てしまう）
-        errors.insert(0, "AI整形の対象は1列だけにしてください")
+        # 黙って最初の列だけを経過の記録にしない（2列目は日付ごとに分けられず1行につながれて出てしまう）
+        errors.insert(0, "経過の記録の列は1つだけにしてください")
     return spec, errors
 
 
@@ -788,7 +784,7 @@ def _not_ready_reason(imp: dict, spec) -> str:
     return ""
 
 
-# ---- AI整形（任意。追記ログの列があるときだけ） ----------------------------------------------------
+# ---- AI整形（任意。経過の記録の列があるときだけ） --------------------------------------------------
 
 def _ai_job(import_id: int) -> dict | None:
     return jobs.latest_job("table_import", import_id, kind="ai_format")
@@ -820,7 +816,7 @@ def _panel_ai(imp: dict):
         return _panel("", job=_job_info(job, import_id), reading=True)
     spec = _spec_for(imp)
     if spec is not None and spec.log_stage is None:
-        return _locked("追記ログの列（AI整形の対象）がないので、この取り込みでは使いません")
+        return _locked("経過の記録の列がないので、この取り込みでは使いません")
     reason = _not_ready_reason(imp, spec)
     if reason:
         return _locked(reason)
@@ -843,7 +839,7 @@ def _panel_ai(imp: dict):
         job_url=url_for("tables.api_job", job_id=ai_job["id"]) if ai_job else None,
         counts=ai_items.counts(imp["template_id"], "log", import_id=import_id),
         scopes=SCOPE_LABELS, item_labels=ai_items.STATUS_LABELS, **_ai_connection_ctx())
-    return _panel(html, note=f"対象の列: {col.display if col else log_key}",
+    return _panel(html, note=f"経過の記録の列: {col.display if col else log_key}",
                   job=_job_info(ai_job, import_id) if ai_job and not ai_job.get("finished") else None)
 
 
@@ -887,7 +883,7 @@ def ai_trial(import_id: int):
     imp = _load_import(import_id)
     spec = _spec_for(imp)
     if spec is None or spec.log_stage is None:
-        return _json_error("AI整形の対象の列がありません")
+        return _json_error("経過の記録の列がありません")
     if imp["status"] == "confirmed":
         # 試し実行の結果は下書きに入るが、zip は確定したときの md を渡す。食い違わないよう断る
         return _json_error("確定後は試し実行できません（結果が確定した Markdown に入らないため）。"

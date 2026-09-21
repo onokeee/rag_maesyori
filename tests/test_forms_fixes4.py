@@ -130,7 +130,9 @@ def test_form_type_panel_explains_how_to_set_the_unit(app, client, tmp_path):
     add_field(client, pattern_id, "報告書", "A2", "B2")
     with app.app_context():
         assert next(f for f in db.load_pattern(pattern_id).fields if f.display_name == "作業時間").data_type == "number"
-    panel = client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
+    from tests.test_forms_flow import panel_html
+
+    panel = panel_html(client, pattern_id, book=path)
     assert "帳票に単位が書かれていません" in panel and "値に単位（分・時間など）を付けて入力できます" in panel
 
 

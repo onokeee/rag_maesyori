@@ -34,7 +34,7 @@ def ai_client(ai_app):
 
 
 def _read_import(app, client) -> int:
-    """CSV を取り込み、列の対応づけ（追記ログ列あり）まで済ませて読み込みを終える。"""
+    """CSV を取り込み、列の対応づけ（「経過の記録」の列あり）まで済ませて読み込みを終える。"""
     return imported(app, client, "a.csv", "T", ai_role="log")
 
 

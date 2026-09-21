@@ -104,17 +104,27 @@ def test_label_without_a_value_can_be_registered(grid):
 
 # ---- 画面 ---------------------------------------------------------------------------
 
+# 置いた Excel はサーバーに残らないので、画面（ブラウザ）と同じように毎回一緒に送る
+
+def _part(path):
+    return (io.BytesIO(path.read_bytes()), path.name)
+
+
 def _create(client, path, name="点検報告書"):
-    res = client.post("/form-types/new",
-                      data={"name": name, "samples": (io.BytesIO(path.read_bytes()), path.name)},
+    res = client.post("/form-types/new", data={"name": name, "book": _part(path)},
                       content_type="multipart/form-data")
     assert res.status_code == 200, res.get_data(as_text=True)
     return res.get_json()["pattern_id"]
 
 
-def _panel(client, pattern_id, sample=None) -> str:
-    url = f"/form-types/{pattern_id}/panel" + (f"?sample={sample}" if sample else "")
-    return client.get(url).get_json()["html"]
+def _panel(client, pattern_id, path=None) -> str:
+    """項目の一覧（HTML の断片）。Excel を渡すとシートと読み取りテストも出る。"""
+    if path is None:
+        return client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
+    res = client.post(f"/form-types/{pattern_id}/panel", data={"book": _part(path)},
+                      content_type="multipart/form-data")
+    assert res.status_code == 200, res.get_data(as_text=True)
+    return res.get_json()["html"]
 
 
 def test_build_panel_adds_and_deletes_fields_by_clicking(app, client, tmp_path):
@@ -122,16 +132,15 @@ def test_build_panel_adds_and_deletes_fields_by_clicking(app, client, tmp_path):
     pattern_id = _create(client, path)
     page = client.get("/form-types/").get_data(as_text=True)
     assert "点検報告書" in page and "form_types.js" in page
-    panel = _panel(client, pattern_id)
+    panel = _panel(client, pattern_id, path)
     assert 'data-cell="A1"' in panel and "まだ項目がありません" in panel
     # クリックを送るための仕掛け（form_types.js が使う）と、明細表の印
     assert 'id="cellBuilder"' in panel and "data-click-hint" in panel
     assert 'data-table-head="1"' in panel
 
-    with app.app_context():
-        sample_id = db.list_samples(pattern_id)[0]["id"]
-    data = {"sample": sample_id, "sheet": "報告書", "label_cell": "A1", "value_cell": "B1"}
-    body = client.post(f"/form-types/{pattern_id}/fields", data=data).get_json()
+    data = {"sheet": "報告書", "label_cell": "A1", "value_cell": "B1", "book": _part(path)}
+    body = client.post(f"/form-types/{pattern_id}/fields", data=data,
+                       content_type="multipart/form-data").get_json()
     assert "「報告番号」を項目にしました" in body["message"] and "R-001" in body["html"]
     assert "点検報告書" in body["list_html"]
     with app.app_context():
@@ -142,12 +151,14 @@ def test_build_panel_adds_and_deletes_fields_by_clicking(app, client, tmp_path):
     assert pattern.fields[0].cell == "B1" and pattern.fields[0].sheet_name == "報告書"
 
     # 同じセルをもう一度クリックしても増えない
-    body = client.post(f"/form-types/{pattern_id}/fields", data=data).get_json()
+    data["book"] = _part(path)
+    body = client.post(f"/form-types/{pattern_id}/fields", data=data,
+                       content_type="multipart/form-data").get_json()
     assert body["message"] == "そのセルはもう項目になっています"
 
     # 明細表は列見出しを1回クリックするだけ
-    client.post(f"/form-types/{pattern_id}/fields",
-                data={"sample": sample_id, "sheet": "報告書", "label_cell": "A8", "value_cell": ""})
+    client.post(f"/form-types/{pattern_id}/fields", content_type="multipart/form-data",
+                data={"sheet": "報告書", "label_cell": "A8", "value_cell": "", "book": _part(path)})
     with app.app_context():
         table = [f for f in db.load_pattern(pattern_id).fields if f.data_type == "table"]
     assert len(table) == 1 and table[0].table_columns == ["品番", "品名", "数量"]
@@ -174,8 +185,7 @@ def test_a_type_without_fields_cannot_be_used(app, client, tmp_path):
 
 def test_the_name_comes_from_the_file_name_and_can_be_changed(app, client, tmp_path):
     path = _book(tmp_path / "設備点検表.xlsx")
-    res = client.post("/form-types/new",
-                      data={"name": "", "samples": (io.BytesIO(path.read_bytes()), path.name)},
+    res = client.post("/form-types/new", data={"name": "", "book": _part(path)},
                       content_type="multipart/form-data")
     pattern_id = res.get_json()["pattern_id"]
     with app.app_context():
@@ -189,14 +199,14 @@ def test_the_name_comes_from_the_file_name_and_can_be_changed(app, client, tmp_p
 
 def test_a_field_label_can_be_typed_by_hand(app, client, tmp_path):
     """読み取る項目の見出しは手で直せる。直るのは書き出す名前だけで、探す見出しとセルは変えない。"""
-    pattern_id = _create(client, _book(tmp_path / "click.xlsx"))
-    with app.app_context():
-        sample_id = db.list_samples(pattern_id)[0]["id"]
-    _click(client, pattern_id, sample_id, "A1", "B1")
-    _click(client, pattern_id, sample_id, "A2", "B2")
+    path = _book(tmp_path / "click.xlsx")
+    pattern_id = _create(client, path)
+    _click(client, pattern_id, path, "A1", "B1")
+    _click(client, pattern_id, path, "A2", "B2")
 
     body = client.post(f"/form-types/{pattern_id}/fields/report_id/label",
-                       data={"name": "受付番号", "sample": sample_id}).get_json()
+                       data={"name": "受付番号", "book": _part(path)},
+                       content_type="multipart/form-data").get_json()
     assert body["message"] == "見出しを「受付番号」にしました"
     assert "- 受付番号: R-001" in body["html"]      # 読み取りテストの Markdown に新しい名前で書き出す
     with app.app_context():
@@ -204,7 +214,7 @@ def test_a_field_label_can_be_typed_by_hand(app, client, tmp_path):
     assert field.display_name == "受付番号"
     assert field.candidates[0] == "報告番号" and field.cell == "B1"   # 探す先は変わらない
 
-    # 開き直しても直した見出しのまま。見本での書き方は「探す見出し」として残る
+    # Excel を置いていなくても、直した見出しのまま。置いた帳票での書き方は「探す見出し」として残る
     panel = _panel(client, pattern_id)
     assert 'value="受付番号"' in panel and "探す見出し: 報告番号" in panel
 
@@ -218,14 +228,12 @@ def test_a_field_label_can_be_typed_by_hand(app, client, tmp_path):
 
 
 def test_a_field_found_by_its_cell_when_the_label_is_missing(app, client, tmp_path):
-    """見出しの無い「値だけ」の項目は、見本でクリックしたセルの番地から読む。"""
+    """見出しの無い「値だけ」の項目は、クリックしたセルの番地から読む。"""
     path = _book(tmp_path / "click.xlsx")
     pattern_id = _create(client, path)
-    with app.app_context():
-        sample_id = db.list_samples(pattern_id)[0]["id"]
-    client.post(f"/form-types/{pattern_id}/fields",
-                data={"sample": sample_id, "sheet": "報告書", "label_cell": "A5", "value_cell": "A5"})
-    assert "異音あり" in _panel(client, pattern_id)     # 読み取りテストは同じ欄に出る
+    client.post(f"/form-types/{pattern_id}/fields", content_type="multipart/form-data",
+                data={"sheet": "報告書", "label_cell": "A5", "value_cell": "A5", "book": _part(path)})
+    assert "異音あり" in _panel(client, pattern_id, path)     # 読み取りテストは同じ欄に出る
 
 
 # ---- 版によって書き方が違う帳票 -------------------------------------------------------
@@ -349,19 +357,19 @@ def _two_people_book(path, equipment_label="設備No", equipment_row=4):
     return path
 
 
-def _click(client, pattern_id, sample_id, label_cell, value_cell="", sheet="報告書"):
-    return client.post(f"/form-types/{pattern_id}/fields",
-                       data={"sample": sample_id, "sheet": sheet,
-                             "label_cell": label_cell, "value_cell": value_cell}).get_json()
+def _click(client, pattern_id, path, label_cell, value_cell="", sheet="報告書"):
+    """画面と同じクリック（いま見ている Excel を一緒に送る）。"""
+    return client.post(f"/form-types/{pattern_id}/fields", content_type="multipart/form-data",
+                       data={"sheet": sheet, "label_cell": label_cell, "value_cell": value_cell,
+                             "book": _part(path)}).get_json()
 
 
 def test_two_labels_of_the_same_meaning_on_one_sheet_become_two_fields(app, client, tmp_path):
-    """同じ見本の別のセル（「担当者」と「報告者」）は、辞書の名前が同じでもそれぞれ項目になる。"""
-    pattern_id = _create(client, _two_people_book(tmp_path / "二人.xlsx"))
-    with app.app_context():
-        sample_id = db.list_samples(pattern_id)[0]["id"]
-    assert "「担当者」を項目にしました" in _click(client, pattern_id, sample_id, "A2", "B2")["message"]
-    body = _click(client, pattern_id, sample_id, "A3", "B3")
+    """同じ帳票の別のセル（「担当者」と「報告者」）は、辞書の名前が同じでもそれぞれ項目になる。"""
+    path = _two_people_book(tmp_path / "二人.xlsx")
+    pattern_id = _create(client, path)
+    assert "「担当者」を項目にしました" in _click(client, pattern_id, path, "A2", "B2")["message"]
+    body = _click(client, pattern_id, path, "A3", "B3")
     assert "「報告者」を「担当者」とは別の項目にしました" in body["message"]
 
     with app.app_context():
@@ -371,22 +379,26 @@ def test_two_labels_of_the_same_meaning_on_one_sheet_become_two_fields(app, clie
     assert [f.candidates[0] for f in fields] == ["担当者", "報告者"]
     assert [f.display_name for f in fields] == ["担当者", "報告者"]
     assert [f.label_cell for f in fields] == ["A2", "A3"]
-    panel = _panel(client, pattern_id)
+    panel = _panel(client, pattern_id, path)
     assert "清水 彩花" in panel and "長谷川 聡" in panel
 
 
-def test_the_same_field_written_differently_in_another_sample_is_still_merged(app, client, tmp_path):
-    """別の見本で書き方の違う同じ欄（「設備No」と「設備番号」）は、今までどおり見出しに足す。"""
-    pattern_id = _create(client, _two_people_book(tmp_path / "v1.xlsx", "設備No"))
+def test_the_same_field_written_differently_in_another_book_is_still_merged(app, client, tmp_path):
+    """書き方の違う同じ帳票（「設備No」と「設備番号」）に置き替えてクリックすると、見出しに足す。
+
+    見本を何枚も預かる代わりに、画面で Excel を置き替えて同じ欄をクリックする。
+    """
+    first = _two_people_book(tmp_path / "v1.xlsx", "設備No")
+    pattern_id = _create(client, first)
     other = _two_people_book(tmp_path / "v2.xlsx", "設備番号", equipment_row=6)
-    res = client.post(f"/form-types/{pattern_id}/samples",
-                      data={"samples": (io.BytesIO(other.read_bytes()), other.name)},
+    # 別の書き方の帳票に置き替える（新しい種類は作らない）
+    res = client.post(f"/form-types/{pattern_id}/panel", data={"book": _part(other)},
                       content_type="multipart/form-data")
     assert res.status_code == 200, res.get_data(as_text=True)
-    with app.app_context():
-        samples = db.list_samples(pattern_id)
-    _click(client, pattern_id, samples[0]["id"], "A4", "B4")
-    body = _click(client, pattern_id, samples[1]["id"], "A6", "B6")
+    assert "v2.xlsx" in res.get_json()["html"]
+
+    _click(client, pattern_id, first, "A4", "B4")
+    body = _click(client, pattern_id, other, "A6", "B6")
     assert "の見出しに「設備番号」を足しました" in body["message"]
 
     with app.app_context():

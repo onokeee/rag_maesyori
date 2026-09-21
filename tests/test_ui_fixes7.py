@@ -171,15 +171,19 @@ def test_the_sticky_sheet_pane_clears_the_file_name_bar_for_a_single_form():
     assert css.index(single) < css.index(batch)
 
 
-# ---- 登録画面: 項目を削除するとき、見ている見本を送る ---------------------------------------------
+# ---- 登録画面: 項目を削除するとき、いま見ている Excel を送る -----------------------------------------
 
-def test_deleting_a_field_posts_the_sample_that_is_open():
-    """見本が2つ以上あるとき、削除で1つ目の見本の表示に戻らないようにする。"""
+def test_deleting_a_field_posts_the_book_that_is_open():
+    """置いた Excel はサーバーに残らないので、削除のときも一緒に送ってシートを出したままにする。"""
     js = (STATIC / "form_types.js").read_text(encoding="utf-8")
     handler = js[js.index('const field = event.target.closest("[data-delete-field]");'):]
-    handler = handler[:handler.index("const sampleDel")]
-    assert 'data.append("sample", (root && root.dataset.sample) || "");' in handler
-    assert "new FormData()" in handler and "postForm(field.dataset.deleteField, data)" in handler
+    handler = handler[:handler.index("async function openType")]
+    assert "postForm(field.dataset.deleteField, withBook())" in handler
+    # withBook は、持っているファイルを送る（無ければ、さっき読んでもらったブックの合図を送る）
+    book = js[js.index("function withBook(data)"):]
+    book = book[:book.index("// ---- 返ってきた断片")]
+    assert 'form.append("book", bookFile, bookFile.name)' in book
+    assert 'form.append("book_hash", hash)' in book
 
 
 # ---- 登録画面: 失敗したあとに置き直したファイルの名前を使う ---------------------------------------

@@ -1,4 +1,4 @@
-"""追記ログ（対応内容など）のルール処理で使うデータ構造。"""
+"""「経過の記録」（対応内容など。コードでは log）のルール処理で使うデータ構造。"""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field

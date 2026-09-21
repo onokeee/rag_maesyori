@@ -189,7 +189,7 @@ def fill_key(xl) -> str:
 
 @dataclass
 class WorkbookInfo:
-    path: Path
+    path: Path | None   # 読んだファイル（メモリから読んだときは None）
     grids: dict[str, SheetGrid]
     images: list[dict]
     date1904: bool = False  # 1904年基準のブック（日付シリアル値の起点が違う）
@@ -205,17 +205,29 @@ class WorkbookInfo:
         return [img for img in self.images if img["sheet"] in sheet_names]
 
 
-def load_workbook_info(path: str | Path) -> WorkbookInfo:
+def load_workbook_info(path: str | Path | io.BytesIO) -> WorkbookInfo:
+    """ブックを読む。パスのほか、メモリの中のブック（BytesIO）も渡せる。
+
+    読み方は同じで、どこから読むかだけが違う。帳票登録は見本の Excel をサーバーに置かずに読むので
+    BytesIO を渡す（2026-09-21 の利用者の指示「見本のExcelは置かずに、設定だけ保持する」）。
+    """
+    def source():
+        if isinstance(path, (str, Path)):
+            return path
+        path.seek(0)   # 同じブックを3回読む（openpyxl・画像・数式）ので、そのつど先頭へ戻す
+        return path
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        wb = load_workbook(path, data_only=True)
+        wb = load_workbook(source(), data_only=True)
     try:
         grids = {ws.title: SheetGrid(ws) for ws in wb.worksheets}
         date1904 = wb.epoch == MAC_EPOCH
     finally:
         wb.close()
-    return WorkbookInfo(path=Path(path), grids=grids, images=detect_images(path), date1904=date1904,
-                        uncached_formulas=uncached_formula_cells(path))
+    return WorkbookInfo(path=Path(path) if isinstance(path, (str, Path)) else None, grids=grids,
+                        images=detect_images(source()), date1904=date1904,
+                        uncached_formulas=uncached_formula_cells(source()))
 
 
 def uncached_formula_cells(path: str | Path) -> dict[str, set[tuple[int, int]]]:

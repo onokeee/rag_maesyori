@@ -61,7 +61,11 @@ _NG_CHARS = '.:/\\*?"<>|'
 
 
 def _version_dir(version: str) -> str:
-    """版ごとのサブフォルダ名（例: Rev.1・2019.10制定 → Rev1_2019制定）。"""
+    """版ごとのサブフォルダ名（例: Rev.1・2019.10制定 → Rev1_2019制定）。
+
+    名前の付け方は F1〜F5 で共通で、「版の名前＋いつから」。ローマ字は使わず、
+    Windows のフォルダ名に使えない文字（. : / \\ * ? " < > |）も使わない（`Rev.1` → `Rev1`）。
+    """
     label, since = REV_INFO[version]
     year, kind = since[:4], since.lstrip("0123456789.")     # 2019.10制定 → 2019 / 制定
     return "".join(c for c in f"{label}_{year}{kind}" if c not in _NG_CHARS)
@@ -1569,6 +1573,7 @@ def _readme(specs: list[FileSpec], records: list[Record]) -> str:
         "",
         "様式の版ごとにサブフォルダを分けてある。各サブフォルダの中身は同じ版の .xlsx だけなので、",
         "アプリの「帳票取り込み」にフォルダ1つ分をまとめて入れれば、帳票の種類とシートを1回選ぶだけで全ファイルを読み取れる。",
+        "フォルダ名は「版の名前＋いつから」。",
         "",
         "```",
         FORM_DIR + "/",

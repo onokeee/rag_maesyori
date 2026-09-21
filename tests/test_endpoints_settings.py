@@ -66,12 +66,7 @@ def test_there_is_no_saved_settings_endpoint(client):
     assert client.post("/tables/templates/1/delete").status_code == 404
 
 
-# ---- 帳票の種類: 見本・状態・削除、帳票の JSON と元ファイル ------------------------------------------
-
-def _upload(client, url, path, field, extra=None):
-    data = {**(extra or {}), field: (io.BytesIO(path.read_bytes()), path.name)}
-    return client.post(url, data=data, content_type="multipart/form-data")
-
+# ---- 帳票の種類: 状態・削除、帳票の JSON と元ファイル ----------------------------------------------
 
 def _make_form_type(app, client, sample_dir) -> int:
     from tests.test_forms_flow import add_field, create_type
@@ -86,61 +81,52 @@ def _upload_files(tmp_path) -> set[str]:
     return {p.name for p in (tmp_path / "uploads").rglob("*") if p.is_file()}
 
 
-def test_form_type_samples_status_and_delete(app, client, sample_dir, tmp_path):
+def test_form_type_status_and_delete(app, client, sample_dir, tmp_path):
+    """使用開始・停止・削除。置いた Excel はどこにも残らない（2026-09-21 の利用者の指示）。"""
+    from tests.test_forms_flow import book_part
+
     pattern_id = _make_form_type(app, client, sample_dir)
     other_id = _make_form_type(app, client, sample_dir)
 
+    # 種類を作っても、セルをクリックしても、Excel はサーバーに残らない
+    assert _upload_files(tmp_path) == set()
+    with app.app_context():
+        tables = {row[0] for row in db.get_db().execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "pattern_samples" not in tables
+
     res = client.post(f"/form-types/{pattern_id}/status", json={"status": "active"})
     assert res.status_code == 200 and "使用を開始しました" in res.get_json()["message"]
+    assert "見本" not in res.get_json()["message"]
     with app.app_context():
         assert db.load_pattern(pattern_id).status == "active"
     assert client.post(f"/form-types/{pattern_id}/status", json={"status": "zzz"}).status_code == 400
     assert client.post("/form-types/9999/status", json={"status": "active"}).status_code == 404
 
-    # 見本の追加（Excel でないファイルはエラー）
-    res = _upload(client, f"/form-types/{pattern_id}/samples", sample_dir / "shifted.xlsx", "samples")
-    assert res.status_code == 200 and "見本ファイルを1件追加しました" in res.get_json()["message"]
-    # 使用開始の時点で見本の Excel は消える（design.md 3.3）ので、残るのはこのあと足した分だけ
-    res = _upload(client, f"/form-types/{pattern_id}/samples", sample_dir / "table.xlsx", "samples")
-    assert res.status_code == 200, res.get_json()
-    before = _upload_files(tmp_path)
-    res = client.post(f"/form-types/{pattern_id}/samples",
-                      data={"samples": (io.BytesIO(b"not excel"), "x.xlsx")},
+    # Excel を置き直すとシートが出る（種類は増えない）。Excel でないファイルは断る
+    res = client.post(f"/form-types/{pattern_id}/panel",
+                      data={"book": book_part(sample_dir / "shifted.xlsx")},
                       content_type="multipart/form-data")
-    assert res.status_code == 400 and "1件目のファイル: Excelファイル" in res.get_json()["error"]
-    assert _upload_files(tmp_path) == before          # 読めなかったファイルは残さない
+    assert res.status_code == 200 and 'data-cell="A1"' in res.get_json()["html"]
+    assert _upload_files(tmp_path) == set()
+    res = client.post(f"/form-types/{pattern_id}/panel",
+                      data={"book": (io.BytesIO(b"not excel"), "x.xlsx")},
+                      content_type="multipart/form-data")
+    assert res.status_code == 400 and "Excelファイル" in res.get_json()["error"]
+    assert _upload_files(tmp_path) == set()
     with app.app_context():
-        samples = db.list_samples(pattern_id)
-        other_samples = db.list_samples(other_id)
-    assert len(samples) == 2
-
-    # 他の種類の見本は消せない
-    assert client.post(f"/form-types/{pattern_id}/samples/{other_samples[0]['id']}/delete").status_code == 404
-    assert client.post(f"/form-types/{pattern_id}/samples/9999/delete").status_code == 404
-    with app.app_context():
-        assert len(db.list_samples(other_id)) == 1
-
-    stored = samples[-1]["stored_path"].split("/")[-1]
-    assert stored in _upload_files(tmp_path)
-    res = client.post(f"/form-types/{pattern_id}/samples/{samples[-1]['id']}/delete")
-    assert res.get_json()["message"] == "見本ファイルを削除しました"
-    assert stored not in _upload_files(tmp_path)
-    with app.app_context():
-        assert [s["id"] for s in db.list_samples(pattern_id)] == [samples[0]["id"]]
+        assert len(db.list_patterns()) == 2      # 置き直しで種類は増えない
 
     res = client.post(f"/form-types/{pattern_id}/status", json={"status": "inactive"})
     assert "使用を停止しました" in res.get_json()["message"]
     with app.app_context():
         assert db.load_pattern(pattern_id).status == "inactive"
 
-    # 種類を削除すると見本ファイルも消える
-    remaining = samples[0]["stored_path"].split("/")[-1]
     res = client.post(f"/form-types/{pattern_id}/delete")
     assert "を削除しました" in res.get_json()["message"]
-    assert remaining not in _upload_files(tmp_path)
     with app.app_context():
-        assert db.list_samples(pattern_id) == []
-        assert len(db.list_samples(other_id)) == 1
+        assert db.load_pattern(pattern_id) is None
+        assert db.load_pattern(other_id) is not None
     assert client.post(f"/form-types/{pattern_id}/delete").status_code == 404
 
 
@@ -226,9 +212,11 @@ def test_the_section_of_a_clicked_cell_is_saved_with_the_field(app, client, tmp_
     with app.app_context():
         field = db.load_pattern(pattern_id).fields[0]
     assert field.section == "回答"
-    # 画面を開き直しても区画は残り、読み取りテストは回答側の値を出す
-    # （見本のシートには両方の値が写っているので、Markdown の中身で確かめる）
-    panel = client.get(f"/form-types/{pattern_id}/panel").get_json()["html"]
+    # 同じ帳票の Excel を置き直しても区画は残り、読み取りテストは回答側の値を出す
+    # （シートには両方の値が写っているので、Markdown の中身で確かめる）
+    from tests.test_forms_flow import panel_html
+
+    panel = panel_html(client, pattern_id, book=path)
     markdown = panel[panel.index("md-preview"):]
     assert "## 処置内容\n回答側の処置" in markdown and "発行側の処置" not in markdown
     with app.app_context():

@@ -20,7 +20,7 @@ class StdColumn:
     synonyms: tuple[str, ...] = field(default_factory=tuple)
     unit: str = ""
     md: str = "attribute"  # body/attribute/omit
-    log_candidate: bool = False  # 追記ログの列になりやすい（AI整形の対象候補）
+    log_candidate: bool = False  # 役割「経過の記録」（log）になりやすい列
 
 
 def _c(key, display, type_, role, synonyms, unit="", md="attribute", log_candidate=False) -> StdColumn:

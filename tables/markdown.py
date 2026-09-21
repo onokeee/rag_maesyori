@@ -2,7 +2,7 @@
 
 決まり（docs/design.md 6章）: 同じ入力から同じバイト列。生成日時・取込ID・行番号の一覧を本文に書かない。
 レコード内に空行を入れない。パイプ表を使わない。出す列の中身は1文字も削らない（人名・コードの列も出す）。
-追記ログ列は logproc のルール出力（対応の時系列）＋ AI 照合に通った要点だけを出す。
+「経過の記録」の列（role=log）は logproc のルール出力（対応の時系列）＋ AI 照合に通った要点だけを出す。
 大きい記録は「（続きn/m）」に分けて、どの部分にも管理No・設備・日付を書く（切られても身元が分かるように）。
 """
 from __future__ import annotations
@@ -38,7 +38,7 @@ class MdFile:
         return self.text.encode("utf-8")
 
 
-# ---- 追記ログ（logproc） ----------------------------------------------------------------
+# ---- 経過の記録（role=log。logproc） -------------------------------------------------------
 
 def people_index_for(spec: TableSpec, records: list[dict]):
     """記入者の判定に使う人物の索引（人物一覧＋担当列の値）。"""
@@ -477,7 +477,7 @@ def _split_record(title: str, body: list[str], repeat: list[str]) -> list[list[s
     return out
 
 
-# ---- 追記ログ列の行 -------------------------------------------------------------------
+# ---- 経過の記録の列の行 ---------------------------------------------------------------
 
 
 def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people) -> list[str]:
@@ -569,7 +569,7 @@ def render_all(spec: TableSpec, records: list[dict], ai_results: dict | None) ->
 
 
 def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names: _Names) -> list[MdFile]:
-    """記録ファイル（月ごと、または設備×月ごとに1ファイル。件数では分けない）。"""
+    """記録ファイル（月ごと、または対象×月ごとに1ファイル。件数では分けない）。"""
     md = spec.markdown or {}
     prefix = spec.file_prefix
     by_entity = md.get("group_by") == "entity_month"

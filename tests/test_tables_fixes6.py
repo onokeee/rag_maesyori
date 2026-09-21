@@ -117,7 +117,7 @@ process.stdout.write(JSON.stringify({{rows: inputs.map(parseRows), ends: inputs.
     assert got["ends"] == [_row_no(x) for x in _ROW_INPUTS]
 
 
-# ---- R6T-5: 既定の候補で AI整形の対象（追記ログ）は1列だけ ---------------------------------------------------------
+# ---- R6T-5: 既定の候補で「経過の記録」（role=log）は1列だけ -----------------------------------------------------
 
 def test_default_suggestions_tick_only_one_log_column():
     from tables.mapping import suggest_columns

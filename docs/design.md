@@ -21,7 +21,7 @@
 - 取り込みは2系統に分かれる。
   - **帳票**（1ファイル＝1件。例：設備修理報告書）… 中身は「ラベル探し」だけで読む。
   - **一覧表**（Excel/CSV、1行＝1件。例：トラブル対応一覧、故障履歴CSV、部位停止時間のクロス集計）。
-- 一覧表の文章列（例：日次の追記ログが1セルに入った「対応内容」）は、**手元で式系列に分解**し、任意で **AI整形（keep モード、原文と差分）** を重ねる。
+- 一覧表の文章列（例：日付ごとに書き足した経過の記録が1セルに入った「対応内容」。画面の役割名は「経過の記録」、コードでは `log`／`logproc`）は、**手元で式系列に分解**し、任意で **AI整形（keep モード、原文と差分）** を重ねる。
 - AI は OpenAI 互換 API（実装 `services/llm.py`）。AI なしでも全フローが成立すること。
 - 対象 LightRAG: 1.5.7 だけ対象。
 
@@ -56,7 +56,9 @@
 | 帳票の読み取り設定（旧 pattern/テンプレート） | 帳票の種類 | テンプレート、パターン |
 | 帳票の種類を作る画面 | 帳票登録 | パターン編集、設定 |
 | 一覧表の設定（table spec） | 取り込み設定（その取り込みだけのもの。保存しない） | 表テンプレート |
-| 見本（sample） | 見本ファイル | サンプルExcel |
+| 帳票登録で置く Excel（サーバーに残さない） | この帳票のExcel | 見本、見本ファイル、サンプルExcel |
+| 一覧表の、1つのセルに日付ごとに書き足した列 | 経過の記録（役割名。コードは `log`・`logproc`） | 追記ログ、AI整形の対象 |
+| 一覧表の、記録が何についてのものかを表す列 | 対象（設備・製品・顧客など。コードは `entity`） | 設備 |
 | 抽出 | 読み取り | 解析、前処理、抽出 |
 | 帳票の確認画面 | 読み取り結果の確認・修正 | 前処理結果、抽出結果 |
 | 登録 | 確定（ボタン: 確定してダウンロード） | 登録 |
@@ -124,18 +126,21 @@ AI による種類の推定・空欄探しは無い（0.1）。
 1. **ファイル**：Excel/CSV をドロップ。
 2. **読み取り方**：CSV は文字コード・区切り・前置行、Excel はシート。変えるたびに自動で保存し、下の「表の範囲」を作り直す（取り込み設定は保存しないので、選ぶものは無い）。
 3. **表の範囲と見出し行**：先頭60行の色つきグリッドで確かめ、必要なら直す。
-4. **列の対応づけ**：表の上に「表の名前」（ファイル名から入れておく）を１つだけ置く。この段で決められるのは **「使う（＝Markdown に出す）」と「役割（識別番号 / 日付 / 設備 / AI整形の対象（追記ログ）/ その他）」だけ**で、キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値から候補づくり（`tables/mapping.suggest_columns`）が決める。保存するとその取り込みの設定（`table_imports.spec_json`）になり、読み込みが始まる。
-   - **決まっていれば要約1行だけ**にする（利用者の問い 2026-09-20「列の対応付けを行う意味は？」）。決めることが無いのに20行を超える表を出しても意味がないため。要約は見つけた四つの役割を名指しし、出す列と出さない列の数も書く（例:「カルテNo＝識別番号、発生日時＝日付、設備番号＝設備、対応内容＝AI整形の対象として読み取ります。20列のうち20列を Markdown に出します（出さない列はありません）。」）。設備やAI整形の対象の列が無い表では「設備の列はありません。」のようにそのまま書く。［変更する］（`static/tables.js` の `openColumnsTable`）で表が開く。
+4. **列の対応づけ**：表の上に「表の名前」（ファイル名から入れておく）を１つだけ置く。この段で決められるのは **「使う（＝Markdown に出す）」と「役割（識別番号 / 日付 / 対象（設備・製品・顧客など）/ 経過の記録（1つのセルに日付ごとに書き足した列）/ その他）」だけ**で、キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値から候補づくり（`tables/mapping.suggest_columns`）が決める。保存するとその取り込みの設定（`table_imports.spec_json`）になり、読み込みが始まる。
+   - **役割の名前はどんな表にも当てはまる言い方にする**（利用者の問い 2026-09-21「役割プルダウンに『設備』があるのはなぜ？」「『AI整形の対象(追記ログ)』の追記ログの意味が分からない」）。このアプリは設備の記録だけを読むものではないため、`entity` は「設備」→「対象（設備・製品・顧客など）」、`log` は「AI整形の対象（追記ログ）」→「経過の記録（1つのセルに日付ごとに書き足した列）」にした。**中で使う名前（`key` / `date` / `entity` / `log` / `attribute`）は変えていない**ので、前に保存した取り込み設定（`spec_json`）はそのまま読める。要約・上の行・エラー文では短縮名「対象」「経過の記録」を使う（但し書きまで入れると1行が読めない長さになるため。但し書きが付くのはプルダウンだけ）。
+   - 表と一緒に**役割の説明（`data-role-help`）**を出す（`templates/tables/_p_columns.html`）。要約1行のときは表ごと隠れ、［変更する］で表と一緒に出る（役割を選ぶ人だけが読めばよいため）。対象＝その記録が何についてのものかを表す列で、見出しにも分割後の各かたまりにも書く。経過の記録＝例「対応内容・対応履歴・経過・対応メモ」。日付ごとに切り分けて時系列で出す（AI を使わなくても出る）。1つの表で1列だけ。
+   - **決まっていれば要約1行だけ**にする（利用者の問い 2026-09-20「列の対応付けを行う意味は？」）。決めることが無いのに20行を超える表を出しても意味がないため。要約は見つけた四つの役割を名指しし、出す列と出さない列の数も書く（例:「カルテNo＝識別番号、発生日時＝日付、設備番号＝対象、対応内容＝経過の記録として読み取ります。20列のうち20列を Markdown に出します（出さない列はありません）。」）。対象や経過の記録の列が無い表では「対象の列はありません。」のようにそのまま書く。［変更する］（`static/tables.js` の `openColumnsTable`）で表が開く。
    - **「決まっている」の決まり**（`views/tables.py` の `_columns_todo`・`UNSURE_BLANK_RATE`）。次をすべて満たすときだけ要約にする。
      1. 識別番号の列がちょうど１つで、見出しが標準キー辞書と完全一致（`matched_by == "dictionary"`）
      2. 日付の列がちょうど１つで、同じく完全一致
-     3. 設備の列は０か１つ。１つなら完全一致（０なら要約に「設備の列はありません」と書く）
-     4. AI整形の対象の列は０か１つ。１つなら完全一致（０なら要約にそう書く）
+     3. 対象の列は０か１つ。１つなら完全一致（０なら要約に「対象の列はありません」と書く）
+     4. 経過の記録の列は０か１つ。１つなら完全一致（０なら要約にそう書く）
      5. 出す列のどれにも、出すかどうかを決め直す理由が無い＝読み取れない値がある（`type_error_rate > 0`）／ほとんど空欄（`blank_rate >= 0.9`）
-     似た語で当たっただけ（`matched_by == "similar"`）や値の並びから当てた（`"none"`）列が四つの役割に付いていると 1〜4 で外れる。役割が合っているかは人にしか決められないため。半分くらい空欄なのは「知らせ」に出すだけで決め直す理由にしない。
-   - **決まっていないときは今までどおり表**を開き、上に決めてもらうことを１行ずつ並べる（「識別番号の列が決まっていません。1つ選んでください」「列「アラーム」に読み取れない値があります（5.0%）。出すかどうか決めてください」など）。表には列ごとに「使う」「見出し（読むだけ）」「役割」「値の例」と、知らせること（型エラー・空欄が多い・値の型が違う・はじめから使わない設定）があるときだけその列に出す。
+     似た語で当たっただけ（`matched_by == "similar"`）や値の並びから当てた（`"none"`）列が四つの役割に付いていると 1〜4 で外れる。役割が合っているかは人にしか決められないため。半分くらい空欄なのは決め直す理由にしない（出しても困らないため。ここに出さなければ画面のどこにも出ない）。
+   - **決まっていないときは今までどおり表**を開き、上に決めてもらうことを１行ずつ並べる（「識別番号の列が決まっていません。1つ選んでください」「列「アラーム」に読み取れない値があります（5.0%）。出すかどうか決めてください」など）。
+   - **表の列は「使う」「見出し（そのまま項目名になる。読むだけ）」「役割」「値の例」の4つだけ**。5列目の「知らせ」は 2026-09-21 にやめた（ほとんどの行で空のうえ、書くことが表の上の行と重なっていたため）。型エラー％・空欄％は表の上の行に出し、**はじめから「使わない」にしてある列の理由だけ**を見出しの下に小さく出す（`views/tables.py` の `_unused_note`。「空欄だけなので、はじめから使わない設定にしています」／「記録に不要な管理用の列らしいので、…」）。理由が読めないと、チェックの外れている列を入れ直してよいのか分からないため。「値は「日付」らしい」（推定した型と決めた型の食い違い）は廃止した（日付の役割は日付として読める列にしか出ないので、読んでも直せない）。
    - 要約のときも**列の表は隠して DOM に残す**ので、［変更する］を押しても押さなくても保存で送る中身（＝できる Markdown）は変わらない（`tests/test_tables_columns_summary.py`）。
-5. **AI整形（任意）**：決めた1つの列（いまは一覧表の追記ログ列）の文章を構成する。**AI接続の設定（接続先URL・APIキー・使うモデル・接続テスト）はこの段の中に畳んで置く**（`details`、既定は閉じる）。対象の列が無い取り込みでは灰色のままで、見出しに「追記ログの列（AI整形の対象）がないので、この取り込みでは使いません」と1行だけ出す。
+5. **AI整形（任意）**：④で「経過の記録」にした1つの列の文章を構成する。**AI接続の設定（接続先URL・APIキー・使うモデル・接続テスト）はこの段の中に畳んで置く**（`details`、既定は閉じる）。その列が無い取り込みでは灰色のままで、見出しに「経過の記録の列がないので、この取り込みでは使いません」と1行だけ出す。段の1行目には、ルールで日付・記入者ごとに分けるところまでは AI なしで Markdown に出ること、AI整形はそのうえに原文と照合できた「対応の要点」と記録の種別を足すだけであることを書く。
 6. **できるものの確認**：作られる md の一覧と中身、警告、合計の照合。
 7. **確定してダウンロード（zip）**：渡し終わるとその取り込みのデータは消える（3.3）。
 
@@ -143,14 +148,30 @@ AI による種類の推定・空欄探しは無い（0.1）。
 
 1画面。登録済みの帳票の種類の一覧も同じ画面に出す。
 
-1. **見本ファイル**：帳票の Excel をドロップ。
+**置いた Excel はサーバーに残さない**（利用者の指示 2026-09-21）。残るのは読み取りの設定だけ（3.3「帳票登録は Excel を
+1つも残さない」）。そのぶん、シートを出すには**ブラウザが持っているファイルを毎回送り直す**必要がある。
+
+- ブラウザ（`static/form_types.js`）は選ばれた `File` を `bookFile` に持ち続け、`withBook()` がセルのクリック・項目の削除・
+  見出しの手直し・使用開始のたびに `book` という部品で一緒に送る。別の種類を開いたら持ち越さない。
+- サーバーは受け取った Excel を読み取り、**読み取った結果（`WorkbookInfo`）だけ**を `core/workbook_cache.py` が短い間だけ
+  メモリに覚える（鍵＝作業場所の id ＋ファイルの sha256、30分・8件・64MB まで、古いものから落とす、ディスクには書かない、
+  アプリを終えれば消える）。2回目からは開き直さずに済む（結合セル・図形のあるブックは開くのに数秒かかるため）。
+  ファイルの代わりに `book_hash`（sha256）だけを送って、覚えているブックを指すこともできる。
+- `POST /form-types/<id>/panel`（`GET` は設定だけ）が「同じ帳票の Excel をもう一度置く」入口。**種類は増えない**。
+  書き方の違う版に**置き替えて**同じ欄をクリックすると、その項目の探す見出しに足される（前の「見本を何枚も預かる」の代わり）。
+- 受け取る大きさの上限は `views.form_types.BOOK_MAX_BYTES = 50MB`（`MAX_CONTENT_LENGTH` とは別。保存せずメモリで読むため）。
+
+1. **この帳票のExcel**：帳票の Excel をドロップ（1ファイル。サーバーには残らない）。
 2. **名前**：ファイル名から入れておく。直せる。
 3. **項目を決める**：シートのグリッドで、見出しセル → 値セル の順にクリックすると項目が1つ増える。
    「読み取る項目」の見出しはその場で手打ちで直せる（`POST /form-types/<id>/fields/<field_name>/label`）。
    直るのは **Markdown に書き出す名前（キー）だけ**で、探す見出し（候補ラベル）と読み取るセルはクリックしたときのまま。
    もとの見出しは「探す見出し: …」として行の下に残る。ほかの項目と同じ名前には直せない（重なると断る）。
-4. **読み取りテスト**：その場で読み取り結果を出す。
-5. **使用開始**。
+4. **読み取りテスト**：その場で読み取り結果を出す（Excel を置いていないときは「できません。設定は残っています」と断る）。
+5. **使用開始**：何も消さない（もともと Excel を預かっていない）。押したあとも画面はそのまま続けて使える。
+
+保存した種類を開き直すと（`GET /form-types/<id>/panel`）、項目の一覧と見出しの手直しはできるが、シートは出ない。
+値の欄は「—（Excelを置くと、この設定で読んだ値が出ます）」。［この帳票のExcelを置く］で同じ帳票を置くとシートが戻る。
 
 ### 2.6 設定の画面（無い）
 
@@ -211,6 +232,9 @@ ai_items(id PK, template_id, import_id, stage_id, row_key, template_version_id, 
 AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込みを束ねているため。
 `aiproc/runner.load_spec` は取り込みの行（`table_imports.spec_json`）から設定を読む。
 `_m9` が一時的に置いた同名の互換ビューは `_m10_drop_unused` で落とした（同じマイグレーションで使わない `period_json` 列も落とす）。
+**見本の Excel の控え（`pattern_samples`）も無い**（マイグレーション `_m12_drop_pattern_samples` で落とした。
+利用者の指示 2026-09-21：「帳票登録で、見本のExcelは置かずに、設定だけ保持するようにしてほしい」）。
+帳票の種類が持つのは `patterns` / `pattern_sheets` / `pattern_fields` の設定だけ。
 
 一覧表の行データはDBに持たない。取り込み中だけ `data/tables/imports/<import_id>/`（`rows.jsonl.gz`・`issues.csv`・`md/`・`preview_md/`・`source_cache.json`）に置き、ダウンロードしたらフォルダごと消す（3.3）。確定済み全行の保存（`state/current.jsonl.gz`）は作らない（8.1）。
 
@@ -282,8 +306,8 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
   - **ファイルを置いたときにサーバー側で勝手に前の分を捨てない**。「その人の分をぜんぶ」捨てると、
     同じ人が別のタブで開いている作業まで消えてしまう。捨てる番号は画面が指す（上の 2.）。
     タブを再読み込みしたあとなど、画面が番号を忘れた分は 3. の時間切れで片付く。
-  - **帳票登録の見本の Excel（`pattern_samples`）には持ち主を持たせていない**ので、上の 1.・2. では捨てない。
-    捨てるのは［使用開始］のときと起動時（`purge_all_samples`）。画面にもそう書く。
+  - **帳票登録は Excel を預からない**（2026-09-21 の利用者の指示）ので、捨てる対象がそもそも無い。
+    置かれた Excel は要求の中で読み取って捨て、`uploads/` にも DB にも残さない（下の「登録中だけ残すもの」）。
   - どちらも `purge_documents` / `purge_table_import` を通るので、消えるものは上の表のとおり。
     設定（帳票の種類・AI接続）は捨てない（一覧表の取り込み設定は取り込みの行にあるので一緒に捨てる）。
 - **消し方**：`core/purge.py`（`purge_documents` / `purge_batch` / `purge_table_import`）。消す表は名前で決め打ちせず、その取り込みを指す列（`document_id` / `import_id`）を持つ表を `sqlite_master` から探す（表が増えても消し残さない）。
@@ -325,9 +349,18 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
   消えないボタン（帳票の `original`）には「（消えません）」と書く。
 - **画面のメッセージにファイル名を出さない**：`flash` は署名付きセッションクッキーとしてブラウザに残るので、
   取引先名や「社外秘」を含みうるファイル名は載せない（サーバー側を消してもブラウザに残るため）。
-- **登録中だけ残すもの**：帳票の種類の見本ファイル（`uploads/samples/<uuid>.xlsx`＋`pattern_samples`）。項目を作る間だけ使い、
-  ［使用開始］で消す。登録の途中で画面を閉じたものは起動時のお掃除で消える（画面から1件ずつ消すこともできる）。
+- **帳票登録は Excel を1つも残さない**（利用者の指示 2026-09-21「帳票登録で、見本のExcelは置かずに、設定だけ保持する
+  ようにしてほしい」）。前の版は見本を `uploads/samples/<uuid>.xlsx`＋`pattern_samples` に預かり、［使用開始］で消していた。
+  いまは**預からない**：置かれた Excel はその要求の中で `core/files.read_upload` がメモリに読み、`excel.workbook.load_workbook_info`
+  が `BytesIO` から開いて、中身（bytes）はそのまま捨てる。`uploads/` には何も作らない（`UPLOAD_SUBDIRS` から `samples` を外した）。
+  `pattern_samples` 表はマイグレーション `_m12_drop_pattern_samples` で落とす。［使用開始］は何も消さない（もともと何も無い）。
+  起動時の `core/purge.purge_old_sample_files()`（`core.files.remove_sample_dir`。前の `purge_all_samples` と入れ替え）は、
+  **前の版が残した `uploads/samples` フォルダだけ**を片付ける。
+  帳票の種類が持つのは設定だけ：シート名・見出しのセル・値のセル・読み取る向き・項目名。
   一覧表の「表の名前」は取り込みの行にしか無く、取り込みと一緒に消えるので、ファイル名を初期値にしてよい。
+  - werkzeug の受け取り方だけは残る穴：アップロードの1つの部品が 500KB を超えると、超えた分を OS の名前の無い一時ファイルに
+    逃がし、要求が終わると消す（Windows では `FILE_FLAG_DELETE_ON_CLOSE`）。このアプリのアップロードは前からすべてそうで、
+    こちらのコードは何も書かない。実物の帳票は 20〜110KB なので実際には逃げない（`views.form_types._read_book` の説明に書いてある）。
 - **新しい表**：取り込みを指す列は必ず `document_id` / `import_id` という名前にする（purge の探索に乗せるため）。
   使わない表はそもそも作らない（`table_outputs`・`table_downloads`・`table_template_samples`・`alias_entries` はスキーマから外し、
   古いDBのためにマイグレーション `_m5` で落とす）。
@@ -338,16 +371,16 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
 
 | WP | 担当パス | 内容 |
 |---|---|---|
-| WP-core | `models/database.py`, `core/__init__.py`, `core/jobs.py`, `core/files.py`, `core/naming.py`, `core/mdtext.py`, `tests/test_core_*.py` | DB（全スキーマ・マイグレーション・WAL）、ジョブ実行、アップロード保存と事前チェック、安全なファイル名、Markdown テキスト処理 |
+| WP-core | `models/database.py`, `core/__init__.py`, `core/jobs.py`, `core/files.py`, `core/naming.py`, `core/mdtext.py`, `core/workbook_cache.py`, `tests/test_core_*.py` | DB（全スキーマ・マイグレーション・WAL）、ジョブ実行、アップロード保存と事前チェック、帳票登録が置いた Excel の一時的な覚え、安全なファイル名、Markdown テキスト処理 |
 | WP-read | `tables/__init__.py`, `tables/source.py`, `tables/csv_source.py`, `tables/excel_source.py`, `tables/detect.py`, `tables/dictionary.py`, `tables/mapping.py`, `tests/test_tables_read*.py` | 表ソース（CSV/Excel）、見出し帯・行分類・種類判定、標準キー辞書、列の対応づけ候補 |
 | WP-pipe | `tables/spec.py`, `tables/normalize.py`, `tables/checks.py`, `tables/markdown.py`, `tables/records.py`, `tables/outputs.py`, `tables/pipeline.py`, `tables/store.py`, `tests/test_tables_pipe*.py` | 取り込み設定の仕様、正規化、チェック、md生成（記録ファイルだけ）、zip、全体の実行関数、DBアクセス（`tables/state.py` は 8.1 で外した。`tables/summaries.py` は 6.3 で外した） |
-| WP-log | `logproc/*.py`, `tests/test_logproc*.py` | 追記ログの分割、日時解決、記入者、識別子・数量・予定句、マスク、用語集、時系列の描画 |
+| WP-log | `logproc/*.py`, `tests/test_logproc*.py` | 「経過の記録」の列（コードでは `log`／`logproc`。画面の役割名は 2.4 ④）の分割、日時解決、記入者、識別子・数量・予定句、マスク、用語集、時系列の描画 |
 | WP-ai | `aiproc/*.py`, `services/llm.py`（ジョブ用呼び出し口の追加のみ。既存関数の挙動は変えない）, `tests/test_aiproc*.py`, `tests/fake_servers.py`（拡張のみ） | 構造化出力の方式判定、プロンプト生成、照合、キャッシュ、AIジョブ、custom 段 |
 | WP-forms | `excel/*`, `pattern/*`, `export/formats.py`, `tests/test_extraction.py`, `tests/test_forms_md.py` | 帳票の md 改善（タイトル・ファイル名・定型文削減・値の NFKC・単位・出さない項目）、種類定義の拡張、一覧表らしさ判定関数 |
 | WP-shell | `app.py`, `config.py`, `templates/base.html`, `templates/components/_ui.html`, `templates/errors/*`, `static/style.css`, `static/app.js`, `views/__init__.py` | レイアウト・デザイン・ヘッダー（3画面だけ）・段（`.step` と `ragSections`）・エラー画面、blueprint 登録。ホーム画面・設定画面・`views/home.py`・`views/settings.py`・`templates/home.html`・`templates/settings/*` は削除済み |
 | WP-formsui | `views/forms.py`, `views/form_types.py`, `templates/forms/*`, `templates/form_types/*`, `static/review.js`, `tests/test_forms_flow.py` | 帳票フロー画面と帳票の種類の管理画面 |
 | WP-tablesui | `views/tables.py`, `templates/tables/*`, `static/tables.js`, `tests/test_tables_flow.py`, `tests/test_tables_columns_summary.py` | 一覧表の1画面（読み取り方・範囲・列の対応づけ・AI整形・確認・ダウンロード） |
-| WP-samples | `scripts/samples/*`（追記のみ）, `samples/`（生成物） | T1 に「対応内容」追記ログ列を追加（書き方の揺れを再現）など |
+| WP-samples | `scripts/samples/*`（追記のみ）, `samples/`（生成物） | T1 に「対応内容」（経過の記録）の列を追加（書き方の揺れを再現）など |
 
 依存：WP-core・WP-read・WP-log・WP-forms は並行（第1波）。WP-pipe・WP-ai は第1波の後（第2波）。WP-shell は第1波と並行可（テンプレートのみ）。WP-formsui・WP-tablesui は第2波の後（第3波）。
 
@@ -358,15 +391,18 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
 # core/files.py
 class UploadError(Exception): ...
 @dataclass class StoredFile: stored_path: str; file_name: str; file_hash: str; size: int
+@dataclass class MemoryFile: data: bytes; file_name: str; file_hash: str   # size は len(data)
 def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> StoredFile   # 分割読みで sha256
-def precheck_excel(path, max_cells=None, max_merged=None, max_rows=None) -> None   # OLE(D0CF11E0)=パスワード付き/xls、xl/workbook.bin=xlsb、Strict名前空間、zip展開上限(合計500MB/1パーツ200MB/圧縮率100。圧縮率はブック全体でも見る＝小さいパーツを並べて展開させない)、
-                                      # 結合セルの面積の合計(200万セル。帳票・見本は FORM_MAX_MERGED_CELLS=20万。通常モードで開くと結合1つごとに全セルをたどるため)、セル数（<c> の数。帳票・見本は EXCEL_MAX_CELLS=50万、省略時 100万）、
+def read_upload(storage, allowed: set[str], max_bytes: int) -> MemoryFile   # 保存せずメモリへ（帳票登録。3.3「帳票登録は Excel を1つも残さない」）
+def precheck_excel(source, max_cells=None, max_merged=None, max_rows=None) -> None   # source はパスまたはブックの中身(bytes)。 OLE(D0CF11E0)=パスワード付き/xls、xl/workbook.bin=xlsb、Strict名前空間、zip展開上限(合計500MB/1パーツ200MB/圧縮率100。圧縮率はブック全体でも見る＝小さいパーツを並べて展開させない)、
+                                      # 結合セルの面積の合計(200万セル。帳票と帳票登録で置く Excel は FORM_MAX_MERGED_CELLS=20万。通常モードで開くと結合1つごとに全セルをたどるため)、セル数（<c> の数。帳票と帳票登録で置く Excel は EXCEL_MAX_CELLS=50万、省略時 100万）、
                                       # ハイパーリンク・コメントの範囲（ref）の面積の合計(ブック全体で MAX_LINKED_CELLS=5万。A1:XFD1048576 で固まらないように)、
-                                      # <row> の数(max_rows。省略時は max_merged と同じ。帳票・見本は20万行、一覧表は200万行)、
+                                      # <row> の数(max_rows。省略時は max_merged と同じ。帳票と帳票登録で置く Excel は20万行、一覧表は200万行)、
                                       # 図形(描画パーツの図形数・大きさ×参照するシート数)、シートが1つも無いブック、壊れた圧縮データ(zlib.error/EOFError) → UploadError(日本語。ファイル名・例外の種類名は入れない)
                                       # 上の結合・セル・行・リンクの数え方: 1つのパーツを複数の <sheet> が指していると openpyxl はその回数だけ読み直すので、参照される回数を掛けて数える
 def upload_path(stored_path) -> Path;  def remove_upload(stored_path) -> bool   # 消せたら True。掴まれて消せないときは中身を0バイトにして False
 def remove_orphan_uploads(upload_dir, known: set[str]) -> int;  def remove_orphan_import_dirs(tables_dir, import_ids: set[int]) -> int
+def remove_sample_dir(base) -> int   # 前の版が置いた uploads/samples をフォルダごと消す（起動時の片付けだけに使う）
 
 # core/purge.py（3.3 データを残さない）
 def purge_documents(doc_ids) -> int;  def purge_batch(batch_id: str) -> int;  def purge_table_import(import_id: int) -> int   # 戻り値は消した行数
@@ -378,6 +414,12 @@ def forget_id_counters(db) -> int   # 空になった取り込みの表の sqlit
 def discard_documents(doc_ids, session_id=None) -> int;  def discard_table_imports(import_ids, session_id=None) -> int
 def purge_session(session_id, *, include_busy=False, documents=True, tables=True) -> tuple[int, int]
 IDLE_HOURS = 2   # 旧名 STALE_HOURS（別名として残す）。def sweep_stale(hours=IDLE_HOURS) -> tuple[int, int]
+def purge_old_sample_files() -> int   # 前の版が置いた uploads/samples を起動時に片付ける（旧 purge_all_samples）
+
+# core/workbook_cache.py（帳票登録。置いた Excel を「読み取った形」だけメモリに覚える。ディスクには書かない）
+@dataclass class Book: file_name: str; file_hash: str; size: int; info: WorkbookInfo; used_at: float
+def put(session_id, book) -> Book;  def get(session_id, file_hash) -> Book | None;  def clear() -> None;  def count() -> int
+TTL_SECONDS = 30*60;  MAX_ENTRIES = 8;  MAX_BYTES = 64MB   # 古いもの→入れた順に落とす。出し入れは Lock の中（waitress は8スレッド）
 
 # core/naming.py
 def safe_filename_part(text: str, max_len: int = 60) -> str   # NFKC、\ / : * ? " < > | 制御文字 空白 '[' ']' を _ に、'.[' を除去、前後の . _ を除去
@@ -548,7 +590,7 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - **パイプ表は使わない**。`- 項目: 値`。
 - 値は NFKC＋空白の畳み込み。ただし**囲み文字（丸数字 ①、丸英字 Ⓐ、丸カナ ㋐ など）は原文どおり残す**（`core/mdtext.nfkc_keep_enclosed`。①→1 だと番号と本文の区切りが消える）。日付・数値の解析、NA 判定、コードの突き合わせなど**比較用の正規化は従来どおり NFKC のみ**。設備番号・設備名は名寄せ辞書で正式表記に。数値は単位付き（`停止時間: 95分`）。
 - 全ファイル共通の定型文を入れない。出典は末尾1行 `- 出典: 元ファイル名（識別番号）`。
-- **入力の内容は削らない・書き換えない**（2026-09-20 の利用者の指示）。出す列・項目の中身はそのまま書く：人名（person 役割・担当者・押印欄）もコードの列（`- 状態コード: 9`）も出す。出さないのは、画面で「出さない」にした列・項目と、値が空欄だけの列だけ。組み替え（1行＝1レコード、`- 項目: 値`、長い追記ログを1語も落とさず時系列に分ける）と表記の正規化（和暦→西暦・単位・NFKC）は続ける。
+- **入力の内容は削らない・書き換えない**（2026-09-20 の利用者の指示）。出す列・項目の中身はそのまま書く：人名（person 役割・担当者・押印欄）もコードの列（`- 状態コード: 9`）も出す。出さないのは、画面で「出さない」にした列・項目と、値が空欄だけの列だけ。組み替え（1行＝1レコード、`- 項目: 値`、長い経過の記録を1語も落とさず時系列に分ける）と表記の正規化（和暦→西暦・単位・NFKC）は続ける。
 - ファイル名は `core/naming.md_filename`。論理文書に対して安定・一意。`.[` `]` は除去。**LightRAG のファイル名ヒント（`.[legacy-R(...)]`）は付けない**：ヒントはサーバー側の取り込み設定より優先され、そのサーバーが知らない書き方だと取り込みが HTTP 400 で断られる。チャンクへの耐性は本文の作り方（6.2 の記録の分割）だけで成り立たせる。
 - 推定トークン数（`core/mdtext.estimate_tokens`）は**実トークン以上**になる式（非ASCII 1文字=1.1、ASCII の記号 1文字=1、数字のまとまり1つ=1＋3桁ごとに1、ほかの ASCII 2文字=1。o200k_base は数字を3桁ずつ・記号を1文字ずつ区切るため、日時・品番の多い記録も実トークンを下回らない。まれな漢字（髙・﨑 など）だけは1文字あたり実トークンの方が多い）。記録の上限・見出しへの識別子付与の判定に使う。
 
@@ -619,7 +661,7 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
   同じ帳票の別の項目やファイル名から年を推すと、外れたときに Markdown に誤った日付を書くことになるため。「24/8/25」のような2桁の年は年の欄が空とは限らないので、今までどおり「日付として解釈できません」。
 
 ### 6.2 一覧表（記録ファイル）
-ファイル単位の既定：**発生年月ごと**（`{prefix}_{YYYY-MM}.md`）。**件数では分けない**（その月の記録は1ファイルに全件。LightRAG は1ファイルを丸ごと読んでからチャンクに分けるので、ファイルを分けても記録の切られ方は変わらない）。設定で「設備×月」も選択可（`{prefix}_{設備番号}_{YYYY-MM}.md`）。日付が空の行は `{prefix}_日付なし.md`。
+ファイル単位の既定：**発生年月ごと**（`{prefix}_{YYYY-MM}.md`）。**件数では分けない**（その月の記録は1ファイルに全件。LightRAG は1ファイルを丸ごと読んでからチャンクに分けるので、ファイルを分けても記録の切られ方は変わらない）。設定で「対象×月」（`markdown.group_by = "entity_month"`）も選択可（`{prefix}_{対象の値}_{YYYY-MM}.md`）。画面からは選べない。日付が空の行は `{prefix}_日付なし.md`。
 ```
 # トラブル対応一覧 2026年8月の記録
 
@@ -659,7 +701,7 @@ AI の出力スキーマ（keep）：`{"entries":[{"id","segs":[...],"t":[種別
 - 設備名の列がない code 型の entity 列では、「ETC-302(OXIDEエッチャ 2号機)」「CVD-203 W-CVD 3号機」を設備番号と名前に分けてから、ファイル分け・表示に使う（番号は英字と数字を含むものだけ。名前の側も番号だけなら分けない。`tables/records.split_entity_code`）。
 
 ### 6.3 一覧表で作るファイル（2026-09-20: 記録ファイルだけにした）
-- 作るのは `{prefix}_{YYYY-MM}.md`（設備×月の設定なら `{prefix}_{entity}_{YYYY-MM}.md`）だけ。**集計ファイル（月次・設備別年度）とデータセット説明は作らない**。
+- 作るのは `{prefix}_{YYYY-MM}.md`（対象×月の設定なら `{prefix}_{entity}_{YYYY-MM}.md`）だけ。**集計ファイル（月次・設備別年度）とデータセット説明は作らない**。
   - 理由（利用者の判断）: 「件数」「順位」「推移」には答えなくてよい。**定量的な集計や計算は RAG の仕組みにそもそも向いていない**。データセット説明も要らない。
   - `tables/summaries.py`（month_summaries・entity_fiscal_year_summaries・dataset_counts と、その計算だけに使っていた resolve_metrics・fmt_average・coverage_months・measure_columns・category_column・fmt_measure・fiscal_year_of など）と `tables/markdown.render_dataset_card` は削除した。記録ファイルにも使う処理（設備の値・月・数値の書き方）は `tables/records.py` に残している。
   - 取り込み設定の `markdown.dataset_card` / `markdown.summaries`（`SummarySpec`）も外した（保存済みの JSON にあっても読み飛ばす）。
@@ -744,8 +786,8 @@ F1 98.5% ／ F2 97.7% ／ F3 95.0% ／ F4 100.0% ／ F5 95.8%、
   （3.3「欠けないダウンロード」。手元の元の Excel から取り込み直す）。ブラウザが保存し終えたことを画面から知らせて
   から消す形（受け取り確認）にすれば防げるが、ダウンロードを2段階にする変更になるため未実施。
   応答を作れなかったとき・206/304・1バイトも送れなかったときは消さない。
-- 帳票の種類の見本ファイルは、［使用開始］を押した時点でサーバーから消す（設定だけ残す）。登録の途中で画面を
-  閉じたものは起動時のお掃除で消える。あとから項目を直すときは、同じ帳票の Excel をもう一度置く。
+- 帳票登録で置いた Excel は**そもそも保存しない**（2026-09-21。読み取った結果だけを `core/workbook_cache.py` が
+  メモリに短い間だけ覚える）。［使用開始］は何も消さない。あとから項目を直すときは、同じ帳票の Excel をもう一度置く。
 - `instance/app.db` のファイル自体は残る（中身は `secure_delete` + `VACUUM` で消える）。`.flask_secret`・`data/model_settings.yaml`
   （APIキーを平文で持つ）・`env` も残る。
 - AI の応答のキャッシュ（`llm_calls`）は、払った取り込み（`import_id`）を持つ。どの行の結果にも結び付いていないもの
@@ -809,7 +851,7 @@ F1 98.5% ／ F2 97.7% ／ F3 95.0% ／ F4 100.0% ／ F5 95.8%、
   学習・保存を通しても区画が変わらない）。読み取り結果で入力欄に Enter を押しても、［確定］は押されない
   （当時あった［AIで空欄を探す］も押されなかった。この帳票の AI 補助は 2026-09-20 に削除した）。
   種類の項目が設備だけで識別子にならないときの「- 出典:」の行は、H1 と同じ項目（番号の項目、無ければ日付）を添える。
-- 帳票・帳票の見本のアップロードは、結合セルの面積の合計が 20万セル（`core/files.FORM_MAX_MERGED_CELLS`）を超えるブックを断る
+- 帳票取り込みと帳票登録で置く Excel は、結合セルの面積の合計が 20万セル（`core/files.FORM_MAX_MERGED_CELLS`）を超えるブックを断る
   （行全体の結合 13個以上・列全体の結合など。一覧表は読み取り専用で開き結合を展開しないので、従来の 200万セルのまま）。
 - 一覧表: 大文字・小文字だけ違う設備のファイル名には `_2` を付ける（Windows のフォルダで上書きし合わない）。256列を超えるシートと、
   「行×列」がセル数の上限（`tables/excel_source.DEFAULT_MAX_CELLS` 50万。中身のほとんどが空）を超えるシートは、行を最終列まで埋めない
@@ -835,7 +877,7 @@ F1 98.5% ／ F2 97.7% ／ F3 95.0% ／ F4 100.0% ／ F5 95.8%、
   「回答」など）は `excel/tables.sections_of` で内側から外側まで返し、「探す区画」がどれかに当たればその区画の中とみなす。
   明細表の項目も「探す区画」の中を先に探す（無ければシート全体）。確認画面の「変更した項目」は単位だけの変更も出す。
 - 一覧表: 手で決めた見出し行が先頭80行より下でも読む。行番号の入力（「1-3, 5」）は全角も含めてサーバーと画面で同じ規則で読む
-  （範囲は10行まで）。役割「追記ログ」は1列だけに付ける。日付の役割が変わらなければ期間の日付列を保つ。キーの重複を断る。
+  （範囲は10行まで）。役割「経過の記録」（`log`）は1列だけに付ける。日付の役割が変わらなければ期間の日付列を保つ。キーの重複を断る。
   確定済みの取り込みでは試し実行をしない。読み込み直しが始まって渡せなかったときは 404 ではなく画面に戻して知らせる。
   Excel は 16,384 列・1,048,576 行を超えるシートを断り、値のある列が 2,000 列を超えるシートも CSV と同じ文で断る。
   md のフォルダのパスが長すぎるときは「表の名前」を短くするよう知らせる。

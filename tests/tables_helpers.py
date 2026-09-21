@@ -87,7 +87,7 @@ def screen_role(role: str, ai_role: str | None = None) -> str:
 
 
 def columns_payload(name: str, columns=COLUMNS, ai_role: str | None = None, **extra) -> dict:
-    """列の対応づけの保存に送る JSON。ai_role="log" を渡すと追記ログの列を AI整形の対象にする。"""
+    """列の対応づけの保存に送る JSON。ai_role="log" を渡すとその列を役割「経過の記録」にする。"""
     payload = {
         "name": name,
         "columns": [{"index": i, "use": True, "role": screen_role(r, ai_role)}

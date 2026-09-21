@@ -235,7 +235,7 @@ def test_spec_roundtrip_validate_and_resolve():
     errors = validate_spec(bad)
     joined = "\n".join(errors)
     for fragment in ("表の名前", "1bad", "重複", "表示名", "型「weird」", "mdでの扱い", "記録キーの列「missing」",
-                     "日付", "設備×月", "zzz"):
+                     "日付", "対象×月", "zzz"):
         assert fragment in joined, fragment
 
     res = resolve_columns(spec, ["管理No", "発生日", "設備番号", "設備名", "故障区分", "現象", "処置内容", "停止時間(h)",

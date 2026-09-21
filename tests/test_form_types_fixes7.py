@@ -1,4 +1,4 @@
-"""帳票登録の直し（2枚目のシートの項目・手で直した見出し・項目を全部消したとき・見本を消したあと）。
+"""帳票登録の直し（2枚目のシートの項目・手で直した見出し・項目を全部消したとき・Excel を置いていないとき）。
 
 このまわりで見つかった不具合:
   - 同じ見出し語が2枚のシートにあると、2つ目の項目が1枚目の値をそのまま読む
@@ -6,6 +6,9 @@
   - 手で直した見出しが、次にセルをクリックしたときに元の見出しへ勝手に戻る
   - 使用中の種類から項目を全部削除でき、中身の無い Markdown を作り続ける
   - 使用開始の直後、登録した項目が全部「—（見つかりません）」になる
+
+置いた Excel はサーバーに残らない（2026-09-21 の利用者の指示）ので、どの操作でも画面と同じように
+その Excel を一緒に送る。
 """
 import io
 
@@ -14,33 +17,26 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 
 from models import database as db
-from tests.test_forms_flow import activate, create_type, upload_forms
+from tests.test_forms_flow import activate, add_field, book_part, create_type, panel_html, upload_forms
 
 
 def _create(client, path, name="二次報告書") -> int:
-    res = client.post("/form-types/new",
-                      data={"name": name, "samples": (io.BytesIO(path.read_bytes()), path.name)},
+    res = client.post("/form-types/new", data={"name": name, "book": book_part(path)},
                       content_type="multipart/form-data")
     assert res.status_code == 200, res.get_data(as_text=True)
     return res.get_json()["pattern_id"]
 
 
-def _sample_id(app, pattern_id: int) -> int:
-    with app.app_context():
-        return db.list_samples(pattern_id)[0]["id"]
-
-
-def _click(client, pattern_id, sample_id, sheet, label_cell, value_cell=""):
-    res = client.post(f"/form-types/{pattern_id}/fields",
-                      data={"sample": sample_id, "sheet": sheet,
-                            "label_cell": label_cell, "value_cell": value_cell})
+def _click(client, pattern_id, path, sheet, label_cell, value_cell=""):
+    res = client.post(f"/form-types/{pattern_id}/fields", content_type="multipart/form-data",
+                      data={"sheet": sheet, "label_cell": label_cell, "value_cell": value_cell,
+                            "book": book_part(path)})
     assert res.status_code == 200, res.get_data(as_text=True)
     return res.get_json()
 
 
-def _panel(client, pattern_id, sample=None) -> str:
-    url = f"/form-types/{pattern_id}/panel" + (f"?sample={sample}" if sample else "")
-    return client.get(url).get_json()["html"]
+def _panel(client, pattern_id, path=None) -> str:
+    return panel_html(client, pattern_id, book=path)
 
 
 def _fill(ws, *coords) -> None:
@@ -72,16 +68,15 @@ def test_a_field_registered_on_the_second_sheet_reads_its_own_sheet(app, client,
     """
     path = _two_sheet_book(tmp_path / "二枚.xlsx")
     pattern_id = _create(client, path)
-    sample_id = _sample_id(app, pattern_id)
-    _click(client, pattern_id, sample_id, "1次報告", "A3", "B3")
-    _click(client, pattern_id, sample_id, "2次報告", "A2", "B2")
+    _click(client, pattern_id, path, "1次報告", "A3", "B3")
+    _click(client, pattern_id, path, "2次報告", "A2", "B2")
 
     with app.app_context():
         fields = db.load_pattern(pattern_id).fields
     assert len(fields) == 2 and [f.sheet_name for f in fields] == ["1次報告", "2次報告"]
 
     # 読み取りテストの Markdown に、1次と2次の値がそれぞれ出る
-    panel = _panel(client, pattern_id)
+    panel = _panel(client, pattern_id, path)
     assert "1次の内容" in panel and "2次の内容" in panel
 
     # 使用開始して取り込んでも同じ（2つ目の項目が自分のセルを読む）
@@ -102,7 +97,7 @@ def test_a_lone_field_on_the_second_sheet_is_not_filled_from_the_first(app, clie
     """項目が1つでも同じ。2枚目に登録した項目が1枚目の同名の欄を読まない。"""
     path = _two_sheet_book(tmp_path / "二枚単独.xlsx")
     pattern_id = _create(client, path)
-    _click(client, pattern_id, _sample_id(app, pattern_id), "2次報告", "A2", "B2")
+    _click(client, pattern_id, path, "2次報告", "A2", "B2")
     activate(client, pattern_id)
 
     doc_id, = upload_forms(client, path)
@@ -142,10 +137,9 @@ def test_the_second_sheet_is_chosen_by_its_name_even_with_few_fields(app, client
     """
     sample = _attachment_book(tmp_path / "見本.xlsx")
     pattern_id = _create(client, sample, name="設備修理報告書")
-    sample_id = _sample_id(app, pattern_id)
     for coord in ("A1", "A2", "A3", "A4", "A5", "A6"):
-        _click(client, pattern_id, sample_id, "修理報告書", coord, f"B{coord[1:]}")
-    _click(client, pattern_id, sample_id, "別紙", "A1", "B1")
+        _click(client, pattern_id, sample, "修理報告書", coord, f"B{coord[1:]}")
+    _click(client, pattern_id, sample, "別紙", "A1", "B1")
     activate(client, pattern_id)
 
     # 別紙の記入位置が2行下にずれた帳票
@@ -160,10 +154,9 @@ def test_a_field_is_never_filled_from_the_same_cell_of_another_sheet(app, client
     """その項目のシートでセルが空でも、別のシートの同じ番地は読まない（空のままにする）。"""
     sample = _attachment_book(tmp_path / "見本2.xlsx")
     pattern_id = _create(client, sample, name="設備修理報告書2")
-    sample_id = _sample_id(app, pattern_id)
     for coord in ("A1", "A2", "A3", "A4", "A5", "A6"):
-        _click(client, pattern_id, sample_id, "修理報告書", coord, f"B{coord[1:]}")
-    _click(client, pattern_id, sample_id, "別紙", "A1", "B1")
+        _click(client, pattern_id, sample, "修理報告書", coord, f"B{coord[1:]}")
+    _click(client, pattern_id, sample, "別紙", "A1", "B1")
     activate(client, pattern_id)
 
     target = _attachment_book(tmp_path / "対象2.xlsx", note_row=3)
@@ -194,14 +187,14 @@ def _two_people_book(path):
 
 def test_a_hand_typed_label_survives_the_next_click(app, client, tmp_path):
     """見出しを手で「担当者」に直したあと、担当者の欄をクリックしても手の直しが消えない。"""
-    pattern_id = _create(client, _two_people_book(tmp_path / "二人.xlsx"), name="人の帳票")
-    sample_id = _sample_id(app, pattern_id)
-    _click(client, pattern_id, sample_id, "報告書", "A1", "B1")
+    path = _two_people_book(tmp_path / "二人.xlsx")
+    pattern_id = _create(client, path, name="人の帳票")
+    _click(client, pattern_id, path, "報告書", "A1", "B1")
 
     res = client.post(f"/form-types/{pattern_id}/fields/reporter/label", json={"name": "担当者"})
     assert res.status_code == 200 and "見出しを「担当者」にしました" in res.get_json()["message"]
 
-    body = _click(client, pattern_id, sample_id, "報告書", "A2", "B2")
+    body = _click(client, pattern_id, path, "報告書", "A2", "B2")
     with app.app_context():
         fields = db.load_pattern(pattern_id).fields
     names = {f.field_name: f.display_name for f in fields}
@@ -212,10 +205,10 @@ def test_a_hand_typed_label_survives_the_next_click(app, client, tmp_path):
 
 def test_two_auto_named_fields_are_still_told_apart_by_their_labels(app, client, tmp_path):
     """手で直していない項目どうしは、これまでどおりクリックした見出しで見分ける。"""
-    pattern_id = _create(client, _two_people_book(tmp_path / "二人2.xlsx"), name="人の帳票2")
-    sample_id = _sample_id(app, pattern_id)
-    _click(client, pattern_id, sample_id, "報告書", "A1", "B1")
-    _click(client, pattern_id, sample_id, "報告書", "A2", "B2")
+    path = _two_people_book(tmp_path / "二人2.xlsx")
+    pattern_id = _create(client, path, name="人の帳票2")
+    _click(client, pattern_id, path, "報告書", "A1", "B1")
+    _click(client, pattern_id, path, "報告書", "A2", "B2")
 
     with app.app_context():
         fields = db.load_pattern(pattern_id).fields
@@ -230,8 +223,7 @@ def test_deleting_the_last_field_stops_an_active_type(app, client, sample_dir):
     そのままだと「0項目中0項目が見つかりました」で読み取れてしまい、中身の無い .md ができていた。
     """
     pattern_id = create_type(client, sample_dir / "standard.xlsx", "設備修理報告書")
-    client.post(f"/form-types/{pattern_id}/fields",
-                data={"sheet": "修理報告書", "label_cell": "A3", "value_cell": "B3"})
+    add_field(client, pattern_id, "修理報告書", "A3", "B3")
     activate(client, pattern_id)
 
     res = client.post(f"/form-types/{pattern_id}/fields/report_id/delete")
@@ -250,8 +242,7 @@ def test_deleting_one_of_several_fields_keeps_the_type_in_use(app, client, sampl
     """項目が残っているなら、使用中のまま（削除のたびに止めない）。"""
     pattern_id = create_type(client, sample_dir / "standard.xlsx", "設備修理報告書")
     for label, value in (("A3", "B3"), ("E4", "F4")):
-        client.post(f"/form-types/{pattern_id}/fields",
-                    data={"sheet": "修理報告書", "label_cell": label, "value_cell": value})
+        add_field(client, pattern_id, "修理報告書", label, value)
     activate(client, pattern_id)
 
     res = client.post(f"/form-types/{pattern_id}/fields/report_id/delete")
@@ -260,45 +251,50 @@ def test_deleting_one_of_several_fields_keeps_the_type_in_use(app, client, sampl
         assert db.load_pattern(pattern_id).status == "active"
 
 
-# ---- 使用開始の直後の文言（見本はもうサーバーに無い） ---------------------------------------------
+# ---- Excel を置いていないときの文言（サーバーには残していない） ------------------------------------
 
-def test_the_panel_after_activation_says_the_sample_is_gone(app, client, sample_dir):
-    """使用開始で見本が消えたあと、「見つかりません」「項目を1つ以上作ると」とは言わない。"""
-    pattern_id = create_type(client, sample_dir / "standard.xlsx", "設備修理報告書")
-    client.post(f"/form-types/{pattern_id}/fields",
-                data={"sheet": "修理報告書", "label_cell": "A3", "value_cell": "B3"})
-    before = _panel(client, pattern_id)
+def test_the_panel_without_a_book_says_the_excel_is_not_kept(app, client, sample_dir):
+    """Excel を置いていない画面では、「見つかりません」「項目を1つ以上作ると」とは言わない。
+
+    置いた Excel は残さないので、種類を開き直したときはシートも読み取りテストも出せない。
+    そのことと「設定は残っている」ことを画面で言う。
+    """
+    path = sample_dir / "standard.xlsx"
+    pattern_id = create_type(client, path, "設備修理報告書")
+    add_field(client, pattern_id, "修理報告書", "A3", "B3")
+    before = _panel(client, pattern_id, path)
     assert "1項目中 <strong>1</strong>項目が見つかりました" in before
 
-    res = client.post(f"/form-types/{pattern_id}/status", json={"status": "active"})
-    panel = res.get_json()["html"]
-    assert "—（見つかりません）" not in panel
-    assert "—（見本のExcelを消したので値は出せません）" in panel
-    assert "項目を1つ以上作ると、ここに読み取り結果が出ます。" not in panel
-    assert "見本のExcelがサーバーに無いので、読み取りテストはできません" in panel
-
-
-# ---- 見本が2つ以上あるとき、項目を削除しても表示が戻らない -----------------------------------------
-
-def test_deleting_a_field_keeps_the_sample_that_is_being_looked_at(app, client, tmp_path):
-    """2つ目の見本を見ているときに項目を削除しても、1つ目の見本の表示に戻らない。"""
-    first = _two_people_book(tmp_path / "一番.xlsx")
-    pattern_id = _create(client, first, name="見本が二つ")
-    second = _two_people_book(tmp_path / "二番.xlsx")
-    res = client.post(f"/form-types/{pattern_id}/samples",
-                      data={"samples": (io.BytesIO(second.read_bytes()), "二番.xlsx")},
+    # 使用開始しても、置いている Excel はそのまま見られる（消すものがもう無い）
+    res = client.post(f"/form-types/{pattern_id}/status",
+                      data={"status": "active", "book": book_part(path)},
                       content_type="multipart/form-data")
-    assert res.status_code == 200
-    with app.app_context():
-        samples = db.list_samples(pattern_id)
-    assert len(samples) == 2
-    second_id = samples[1]["id"]
+    assert "1項目中 <strong>1</strong>項目が見つかりました" in res.get_json()["html"]
+    assert "見本のExcelはサーバーから消しました" not in res.get_json()["message"]
 
-    _click(client, pattern_id, samples[0]["id"], "報告書", "A1", "B1")
-    assert f'data-sample="{second_id}"' in _panel(client, pattern_id, sample=second_id)
+    # 開き直したとき（Excel を置いていない）は、設定だけの画面になる
+    panel = _panel(client, pattern_id)
+    assert "—（見つかりません）" not in panel
+    assert "—（Excelを置くと、この設定で読んだ値が出ます）" in panel
+    assert "項目を1つ以上作ると、ここに読み取り結果が出ます。" not in panel
+    assert "いま Excel を置いていないので、読み取りテストはできません" in panel
+    assert "サーバーに残していません" in panel
 
-    # 画面の JS と同じように、見ている見本を一緒に送る
-    res = client.post(f"/form-types/{pattern_id}/fields/reporter/delete", data={"sample": second_id})
+
+# ---- 置いた Excel を替えたあと、項目を削除しても表示が戻らない ---------------------------------------
+
+def test_deleting_a_field_keeps_the_book_that_is_being_looked_at(app, client, tmp_path):
+    """2つ目の Excel を見ているときに項目を削除しても、その Excel の表示のままにする。"""
+    first = _two_people_book(tmp_path / "一番.xlsx")
+    pattern_id = _create(client, first, name="Excelを置き替える")
+    second = _two_people_book(tmp_path / "二番.xlsx")
+
+    _click(client, pattern_id, first, "報告書", "A1", "B1")
+    assert "二番.xlsx" in _panel(client, pattern_id, second)
+
+    # 画面の JS と同じように、いま見ている Excel を一緒に送る
+    res = client.post(f"/form-types/{pattern_id}/fields/reporter/delete",
+                      data={"book": book_part(second)}, content_type="multipart/form-data")
     assert res.status_code == 200
     html = res.get_json()["html"]
-    assert f'data-sample="{second_id}"' in html and "二番.xlsx" in html
+    assert "二番.xlsx" in html and 'data-cell="A1"' in html

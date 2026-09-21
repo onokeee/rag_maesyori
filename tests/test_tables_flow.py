@@ -197,19 +197,8 @@ def test_source_rejects_an_encoding_that_is_not_offered(app, client):
     assert layout["html"] or layout.get("locked")
 
 
-def test_column_editor_shows_japanese_type_names(app, client):
-    """型が合っていないかもしれないという注意書きを、英語キー（date / number / enum）のまま出さない。"""
-    import re
-
-    text = "管理No,発生日,設備番号,設備名,状態コード,対応内容,停止時間\r\n" + "".join(
-        f"MS-{i:04d},2026-08-{i:02d},EQ-01,搬送ロボット1号機,{i % 3},点検した,{i * 5}\r\n" for i in range(1, 29))
-    import_id = upload_csv(client, "型.csv", text)
-    csv_source(client, import_id)
-    save_layout(client, import_id)
-    html = panel_html(client, import_id, "columns")
-    shown = re.findall(r"値は「([^」]+)」らしい", html)
-    assert shown, "型が合っていない列の注意書きが出ていない"
-    assert not ({"date", "number", "enum", "string", "text", "code"} & set(shown)), shown
+# 「値は「日付」らしい」の注意書き（英語キーのまま出していないかを見ていたテスト）は、「知らせ」の列ごと
+# 2026-09-21 にやめた（利用者の指示）。出なくなったことは tests/test_tables_column_words.py で見る。
 
 
 def test_preview_panel_says_it_is_already_confirmed(app, client):

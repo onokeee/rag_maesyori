@@ -95,8 +95,8 @@ def suggest_columns(headers: list[str], sample_rows) -> list[ColumnSuggestion]:
 
 
 def _keep_one_log(out: list[ColumnSuggestion]) -> None:
-    """AI整形の対象（追記ログ）は1列だけ。辞書で当たった列、なければ最初の列を残し、
-    ほかは長文にする（何も変えずに保存しただけで「AI整形の対象は1列だけ」と断られないように）。"""
+    """役割「経過の記録」（log）は1列だけ。辞書で当たった列、なければ最初の列を残し、
+    ほかは長文にする（何も変えずに保存しただけで「経過の記録の列は1つだけに」と断られないように）。"""
     logs = [s for s in out if s.role == "log"]
     if len(logs) <= 1:
         return

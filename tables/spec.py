@@ -1,6 +1,6 @@
 """一覧表の取り込み設定（TableSpec）。JSON で保存する（dataclass ⇔ dict、検証、spec_hash）。
 
-- 列の定義（ColumnSpec）、追記ログ列の段（LogStageSpec）、AI の custom 段を持つ。
+- 列の定義（ColumnSpec）、「経過の記録」の列の段（LogStageSpec。画面の役割名は「経過の記録」）、AI の custom 段を持つ。
 - 取り込み時の見出しとの照合（resolve_columns）と、画面の候補からの設定作成（spec_from_suggestions）もここに置く。
 """
 from __future__ import annotations
@@ -154,7 +154,7 @@ class TableSpec:
     def file_prefix(self) -> str:
         return str((self.markdown or {}).get("file_prefix") or self.name)
 
-# ---- 追記ログの基準日 ------------------------------------------------------------------
+# ---- 経過の記録の基準日 ----------------------------------------------------------------
 
 _BASE_DATE_RE = re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})")
 
@@ -168,7 +168,7 @@ def _sget(obj, name: str, default=None):
 
 
 def base_date_from(values: dict, spec) -> date | None:
-    """追記ログの相対日付（「翌週」など）を解くときの基準日。無ければ None（＝年不明）。
+    """経過の記録の相対日付（「翌週」など）を解くときの基準日。無ければ None（＝年不明）。
 
     探す順: 期間の日付列 → role='date' の列すべて → occurred_at。'-' でも '/' でも読む。
     AI整形（aiproc.runner）と Markdown（tables.markdown）で同じ日付にするため、ここ1か所に置く。
@@ -325,7 +325,7 @@ def validate_spec(spec: TableSpec) -> list[str]:
             if not isinstance(factor, (int, float)) or isinstance(factor, bool) or factor <= 0:
                 errors.append(f"列「{label}」の単位換算「{unit}」の倍率が正しくありません")
     if len([c for c in spec.columns if c.role == "entity"]) > 1:
-        errors.append("役割「entity（設備など）」の列は1つだけにしてください")
+        errors.append("役割「対象（設備・製品・顧客など）」の列は1つだけにしてください")
 
     all_keys = set(keys)
     record = spec.record or {}
@@ -365,7 +365,7 @@ def validate_spec(spec: TableSpec) -> list[str]:
     if md.get("group_by") not in GROUP_BY:
         errors.append("記録ファイルのまとめ方は month / entity_month から選んでください")
     elif md.get("group_by") == "entity_month" and not spec.first_role("entity"):
-        errors.append("設備×月でまとめるには、役割「entity（設備など）」の列が必要です")
+        errors.append("対象×月でまとめるには、役割「対象（設備・製品・顧客など）」の列が必要です")
     for key in _as_list(md.get("title_columns")):
         base = str(key).split(":")[0]
         if base not in all_keys:
@@ -374,7 +374,7 @@ def validate_spec(spec: TableSpec) -> list[str]:
     if spec.log_stage is not None:
         col = spec.column(spec.log_stage.column)
         if col is None:
-            errors.append(f"AI整形の対象列「{spec.log_stage.column}」がありません")
+            errors.append(f"経過の記録の列「{spec.log_stage.column}」がありません")
         for key in spec.log_stage.context_columns:
             if key not in keys:
                 errors.append(f"AI整形に添える列「{key}」がありません")

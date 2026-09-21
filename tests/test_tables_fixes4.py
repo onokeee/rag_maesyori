@@ -370,7 +370,7 @@ def test_two_ai_columns_are_refused_on_save(app, client):
     set_role(body, "現象", "log")
     set_role(body, "対応内容", "log")
     res = save_columns(client, import_id, body)
-    assert res.status_code == 400 and res.get_json()["error"] == "AI整形の対象は1列だけにしてください"
+    assert res.status_code == 400 and res.get_json()["error"] == "経過の記録の列は1つだけにしてください"
 
 
 # ---- R4-2: 見出し行のないCSVは、見出しがデータのように見えると知らせる ------------------------------------

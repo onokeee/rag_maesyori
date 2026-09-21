@@ -1,4 +1,5 @@
-{#- 段5「AI整形（任意）」の中身。mdファイルを作るときに、追記ログ列の文章を組み立てる部分だけ AI を使う。 -#}
+{#- 段5「AI整形（任意）」の中身。mdファイルを作るときに、経過の記録の列（④で選んだ1列）の文章を
+    組み立てる部分だけ AI を使う。分けるところまではルールだけでやるので、AI が無くても Markdown は出る。 -#}
 {% import "components/_ui.html" as ui %}
 <div data-ai-page
      data-split-url="{{ url_for('tables.ai_split_preview', import_id=imp.id) }}"
@@ -11,8 +12,9 @@
      data-trial-keys='{{ trial_keys | tojson }}'
      data-external="{{ '1' if external else '0' }}">
 
-  <p class="hint">列「{{ log_display }}」の追記ログを、ルールで日付・記入者ごとに分けます（AIなしでも Markdown に出ます）。
-    AI整形をすると、原文と照合できた「対応の要点」と記録の種別を追加します。しなくても先へ進めます。</p>
+  <p class="hint">④で「経過の記録」にした列「{{ log_display }}」を、ルールで日付・記入者ごとに分けて時系列にします
+    （ここまでは AI なしで Markdown に出ます）。AI整形をすると、そのうえに原文と照合できた「対応の要点」と
+    記録の種別を足します。しなくても先へ進めます。</p>
 
   <div class="sub-block">
     <h3 class="sub-title">1. 分割プレビュー（AIなし）</h3>
