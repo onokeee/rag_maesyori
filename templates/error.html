@@ -1,0 +1,70 @@
+{#- エラー画面（1枚）。app.py が code（400/403/404/413/500）と、必要なら host_refused・home_url・limit を渡す。
+    枠（カード・題・戻るボタン）は共通で、題と本文だけが code で変わる。 -#}
+{% extends "base.html" %}
+{% set TITLES = {400: "このページは開けません", 403: "この操作は受け付けませんでした", 404: "ページが見つかりません",
+                 413: "ファイルが大きすぎます", 500: "エラーが発生しました"} %}
+{% block title %}{{ TITLES.get(code, TITLES[500]) }}{% endblock %}
+{% block content %}
+<div class="card narrow">
+  <div class="card-head">
+    <h1 class="card-title">{{ TITLES.get(code, TITLES[500]) }}</h1>
+  </div>
+
+  {% if code == 400 %}
+  {#- サーバーが待ち受けていない名前（別名・hosts の書き換えなど）で開かれた。同じアドレスのホームへ戻しても断られるので、開けるアドレスを示す -#}
+  {% if host_refused %}
+  <p>このアドレスでは開けません。このアプリは <strong>{{ home_url }}</strong> で開いてください。</p>
+  {% else %}
+  <p>このページは再読み込みや古いアドレスからは開けません。取り込みの画面から開き直してください。</p>
+  {% endif %}
+  <div class="btn-row">
+    {% if host_refused %}
+    <a class="btn primary" href="{{ home_url }}">{{ home_url }} を開く</a>
+    {% else %}
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+    {% endif %}
+  </div>
+
+  {% elif code == 403 %}
+  <p>ほかのサイトのページから送られてきた操作に見えたため、途中で止めました。データは変わっていません。</p>
+  <p class="hint">このアプリはログインが無く、社内LANの中だけで使うようにしてあります。そのため、ほかのサイトのページが利用者のブラウザを使って勝手に書き込むことを防いでいます。</p>
+  <p>心当たりがないときは、取り込みの画面からもう一度やり直してください。ブックマークや履歴から古い画面を開いたときにも出ることがあります。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+
+  {% elif code == 404 %}
+  {#- 帳票の種類・取り込み設定はダウンロードでは消えない（design.md §3.3）ので、設定の URL には別の文を出す -#}
+  {%- set p = request.path -%}
+  {%- if p.startswith("/form-types") -%}
+    {%- set back = (url_for('form_types.index'), "帳票登録へ") -%}
+  {%- elif p.startswith("/tables/templates") -%}
+    {%- set back = (url_for('tables.new'), "表の取り込みへ") -%}
+  {%- else -%}
+    {%- set back = None -%}
+  {%- endif %}
+  {% if back %}
+  <p>この設定は見つかりませんでした（削除された可能性があります）。URL が違うこともあります。</p>
+  {% else %}
+  <p>お探しの帳票／取り込みは見つかりませんでした。ダウンロード済み（渡したデータはサーバーに残しません）か、しばらく置いたままで捨てられたか、URL が違います。もう一度ファイルを取り込んでください。</p>
+  {% endif %}
+  <div class="btn-row">
+    {% if back %}<a class="btn" href="{{ back[0] }}">{{ back[1] }}</a>{% endif %}
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+
+  {% elif code == 413 %}
+  <p>1回に送れるのは合計 {{ limit }} までです。いま選んだファイルは合計でこれを超えたため、受け付けませんでした（何も保存していません）。</p>
+  <p>帳票をまとめて取り込むときは、ファイルを何回かに分けて選んでください。画像の多いブックは、不要な画像を消して保存し直すと小さくなります。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+
+  {% else %}
+  <p>処理の途中で問題が起きました。もう一度やり直してください。何度も同じところで止まるときは、起動した画面（コマンドプロンプト）に出ているメッセージを確認してください。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

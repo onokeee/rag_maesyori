@@ -287,11 +287,19 @@ def test_other_db_errors_still_raise(app, monkeypatch):
 # 6巡目の「別の担当の領域だったので残した」修正の確認。
 #
 # - 試し実行の片付けが、まだある取り込みが払った応答まで消さないこと（core.purge と同じ持ち主の確認）
-# - 列の対応づけの保存エラーを1件だけにしないこと（static/app.js の postJson → static/tables.js の表示）
-# - AI整形の［見積もる］を連打できないこと（static/tables.js）
+# - 列の対応づけの保存エラーを1件だけにしないこと（static/app.js の postJson → static/app.js（表の取り込み） の表示）
+# - AI整形の［見積もる］を連打できないこと（static/app.js（表の取り込み））
 # ====================================================================================================
 
 STATIC = Path(__file__).resolve().parents[1] / "static"
+
+
+def _js_section(name: str) -> str:
+    """static/app.js のうち、その画面の部分（「// ==== name: 」の見出しから次の見出しまで）。"""
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    start = js.index(f"// ==== {name}: ")
+    nxt = js.find("\n// ==== ", start + 1)
+    return js[start:nxt if nxt >= 0 else len(js)]
 
 
 # ---- 試し実行の片付け: 持ち主のいる応答は消さない ---------------------------------------------------
@@ -330,7 +338,7 @@ def test_a_trial_on_a_deleted_import_keeps_a_response_another_import_paid_for(ap
 
 # ---- 画面側（node で確かめる） ------------------------------------------------------------------
 # 画面は3つの1枚ページになり、段の中身は fetch で入れ替わる（2026-09-20 の作り直し）。
-# static/tables.js は window.ragFetch（static/app.js）を通してサーバとやりとりするので、
+# static/app.js（表の取り込み） は window.ragFetch（static/app.js）を通してサーバとやりとりするので、
 # ragFetch は本物を切り出して使い、DOM だけを最小限の代わりで置き換える。
 
 def _run_node(script: str):
@@ -349,10 +357,10 @@ def _rag_fetch() -> str:
 
 
 def _tables_js() -> str:
-    return (STATIC / "tables.js").read_text(encoding="utf-8")
+    return _js_section("tables")
 
 
-# 画面を持たない node で static/tables.js を動かすための、最小限の DOM の代わり
+# 画面を持たない node で static/app.js（表の取り込み） を動かすための、最小限の DOM の代わり
 _DOM_STUB = """
 class N {
   constructor(tag) {
@@ -738,7 +746,7 @@ globalThis.window = { location: { reload() { reloads++; } } };
 #
 # 読み取り結果（③）は帳票を縦に並べるだけで、1件ずつ確定するボタンが無い。確定した件数で
 # 動かしていた［次の未確定の帳票へ］は、どれも未確定のままなので必ず1件目に戻っていた。
-# 静的ファイルはサーバを通さないので、node で本物の static/review.js の一部を動かして確かめる。
+# 静的ファイルはサーバを通さないので、node で本物の static/app.js（帳票取り込み） の一部を動かして確かめる。
 # ====================================================================================================
 
 _mark_ui_fixes7 = pytest.mark.skipif(shutil.which("node") is None, reason="node が無い")
@@ -753,8 +761,8 @@ def _run_node_ui_fixes7(script: str):
 
 
 def _batch_bar_source() -> str:
-    """static/review.js の「進み具合の1行」の部分だけ取り出す（本物のコードを動かす）。"""
-    js = (STATIC / "review.js").read_text(encoding="utf-8")
+    """static/app.js（帳票取り込み） の「進み具合の1行」の部分だけ取り出す（本物のコードを動かす）。"""
+    js = _js_section("forms")
     start = js.index("  // ---- まとめて置いたときの進み具合")
     return js[start:js.index("  function gotoBlock(")]
 
@@ -844,7 +852,7 @@ def test_the_next_button_is_off_when_only_one_form_is_shown():
 @_mark_ui_fixes7
 def test_going_to_a_form_that_was_not_read_says_why():
     """読み取れなかった帳票の［読み取り結果を見る］は、黙って何も起きないのではなく理由を出す。"""
-    js = (STATIC / "review.js").read_text(encoding="utf-8")
+    js = _js_section("forms")
     start = js.index("  function gotoBlock(")
     body = js[start:js.index("\n  }", start) + 4]
     script = """
@@ -874,7 +882,7 @@ def test_the_download_keeps_the_handed_over_ids_for_the_close_time_cleanup():
     purge_after_send は本文を渡しきれなかったときは消さない（tests/test_retention.py）ので、
     渡した番号を docs から抜いたままにすると、どの片付けにも載らなくなる。
     """
-    js = (STATIC / "review.js").read_text(encoding="utf-8")
+    js = _js_section("forms")
     assert "let handedOver = [];" in js
     # 画面を閉じるときの送り先に、渡しに行った分も載せる
     assert "doc_ids: docs.map((d) => d.id).concat(handedOver)" in js
@@ -908,7 +916,7 @@ def test_the_sticky_sheet_pane_clears_the_file_name_bar_for_a_single_form():
 @_mark_ui_fixes7
 def test_deleting_a_field_posts_the_book_that_is_open():
     """置いた Excel はサーバーに残らないので、削除のときも一緒に送ってシートを出したままにする。"""
-    js = (STATIC / "form_types.js").read_text(encoding="utf-8")
+    js = _js_section("form_types")
     handler = js[js.index('const field = event.target.closest("[data-delete-field]");'):]
     handler = handler[:handler.index("async function openType")]
     assert "postForm(field.dataset.deleteField, withBook())" in handler
@@ -924,7 +932,7 @@ def test_deleting_a_field_posts_the_book_that_is_open():
 @_mark_ui_fixes7
 def test_dropping_another_file_after_a_failure_replaces_the_auto_filled_name():
     """1回目に断られたあと別のファイルを置いたら、前のファイル名のまま登録しない。"""
-    js = (STATIC / "form_types.js").read_text(encoding="utf-8")
+    js = _js_section("form_types")
     block = js[js.index('file.addEventListener("change"'):]
     block = block[:block.index("newForm.addEventListener")]
     # 自動で入れた名前かどうかを覚えておき、そのときだけ置き直したファイルの名前に入れ替える

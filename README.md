@@ -183,7 +183,7 @@ Markdown はサーバーの設定に関わらず読めるように作ります�
 ## サンプルデータ
 
 - `python scripts/make_samples.py` … 小さな帳票の見本（修理報告書3種・点検記録表）を `samples/` に作ります（テストでも使います）。
-- `python scripts/generate_samples.py` … 動作確認用の大きなサンプル（帳票 F1〜F5、一覧表 T1〜T5）を作ります。内容は [samples/README.md](samples/README.md) と `samples/tables/*_README.md` を参照してください。T3（月別のクロス集計）は現在の範囲では取り込めません。
+- `python scripts/make_samples.py --large` … 動作確認用の大きなサンプル（帳票 F1〜F5、一覧表 T1〜T5）を作ります（`--only T1,F3` で絞れます）。内容は [samples/README.md](samples/README.md) と `samples/tables/*_README.md` を参照してください。T3（月別のクロス集計）は現在の範囲では取り込めません。
 - 帳票のサンプルは**様式の版ごとにフォルダが分かれています**（`samples/forms/<様式>/<版>/*.xlsx`。例: `F1_設備修理報告書/Rev1_2019制定/`）。版フォルダの中身は .xlsx だけなので、フォルダを1つそのまま帳票取り込みに置けば、帳票の種類とシートを1回選ぶだけでまとめて読めます。`_README.md` と `_expected.jsonl` は様式フォルダの直下にあります。
 - 版フォルダの名前の付け方は F1〜F5 で共通で、**「版の名前＋いつから」**です（`Rev1_2019制定`・`Rev5_2025年4月改訂`。制定・改訂の時期が帳票のどこにも書かれていない版は、使われていた時期を書きます＝`A3横_Rev1_2023まで`）。版の名前だけでは区別が付かないものにだけ、区別に要るものを足します（F3 は様式番号とシート枚数、F5 は用紙サイズ）。
 
@@ -200,21 +200,26 @@ Markdown はサーバーの設定に関わらず読めるように作ります�
 
 ## 構成
 
+ファイルの数を最小限にしてあります。Python はフォルダ（パッケージ）に分けず、領域ごとに1ファイルです。
+1ファイルの中は「# ==== 元 core/jobs.py ====」のような見出しで区切ってあり、旧パッケージの並びのまま読めます。
+
 ```
-app.py                 Flask アプリ（create_app）と起動
-config.py              設定（env ファイルを読み込み）
-core/                  ジョブ実行、アップロード保存と事前チェック、帳票登録が置いた Excel の一時的な覚え（workbook_cache.py。メモリだけ）、取り込んだデータの削除（purge.py）、安全なファイル名、Markdown テキスト処理
-models/database.py     SQLite（スキーマ・マイグレーション、帳票の種類・帳票）
-excel/ pattern/        帳票: Excel のセル構造、ラベル探索による読み取り、帳票の種類の定義と候補
-export/formats.py      帳票の Markdown（JSON の書き出しはありません）
-tables/                一覧表: CSV/Excel の読み取り、表の範囲判定、列の対応づけ、正規化、チェック、記録の Markdown、zip
-logproc/               「経過の記録」の列の分割（日時・記入者・識別子）、伏せ字、時系列の描画（コードの中での呼び名が log）
-aiproc/                AI整形: プロンプト、原文照合、キャッシュ、ジョブ、見積もり
-services/              OpenAI 互換 API の接続（llm.py）
-views/ templates/ static/  画面（帳票取り込み・表の取り込み・帳票登録の3つ）
-scripts/               サンプルの生成
-tests/                 pytest（偽の OpenAI 互換サーバーで通信まで検証）
-docs/                  設計書（design.md）と調査資料（research/）
+app.py                 Flask アプリ（create_app）・設定（env ファイルを読み込み。旧 config.py）・起動
+core.py                共通の土台: 安全なファイル名、Markdown テキスト処理、アップロード保存と事前チェック、
+                       帳票登録が置いた Excel の一時的な覚え（メモリだけ）、ジョブ実行、取り込んだデータの削除
+database.py            SQLite（スキーマ・マイグレーション、帳票の種類・帳票）
+forms.py               帳票: Excel のセル構造、ラベル探索による読み取り、帳票の種類の定義と候補、帳票の Markdown
+tables.py              一覧表: CSV/Excel の読み取り、表の範囲判定、列の対応づけ、正規化、チェック、記録の Markdown、zip、DB、ジョブ
+logproc.py             「経過の記録」の列の分割（日時・記入者・識別子）、伏せ字、時系列の描画（コードの中での呼び名が log）
+aiproc.py              AI整形: プロンプト、原文照合、キャッシュ、ジョブ、見積もり
+llm.py                 OpenAI 互換 API の接続と、画面から保存する AI接続の設定
+views.py               画面（帳票取り込み・表の取り込み・帳票登録の3つの blueprint と共通の小物）
+templates/             base.html（枠）・ui.html（共通の部品）・forms.html・form_types.html・tables.html（画面1つ＝1ファイル。
+                       段の中身の断片は各ファイルの中のマクロ part_*）・error.html（エラー画面）
+static/                app.js（共通＋3画面ぶんを1ファイルに。画面ごとの見出し「// ==== 」で区切る）・style.css
+scripts/               make_samples.py（サンプルの生成。--large で大きなサンプル）・lightrag_offline_eval.py・samples/（大きなサンプルの生成器）
+tests/                 pytest（conftest.py に偽の OpenAI 互換サーバーと表の取り込みの操作。test_forms / test_tables / test_ai / test_core / test_cross）
+docs/                  設計書（design.md）と調査資料（research.md と、その元データの json）
 ```
 
 ## テスト

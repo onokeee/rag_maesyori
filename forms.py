@@ -3473,7 +3473,7 @@ def _split_table_lines(lines: list[str]) -> list[list[str]]:
     """明細表の行を、1節が TABLE_SECTION_TOKENS に収まるまとまりに分ける。
 
     分けないと、明細表の行だけで埋まった断片（LightRAG のチャンク）ができ、
-    その断片の中に識別番号も設備名も日付も1文字も無くなる（docs/research/LightRAGオフライン評価.md 8.5）。
+    その断片の中に識別番号も設備名も日付も1文字も無くなる（docs/research.md 2章（LightRAG オフライン評価）8.5）。
     """
     parts: list[list[str]] = []
     current: list[str] = []

@@ -419,7 +419,7 @@ def _log_section(incidents: list[dm.Incident], logs: dict, log_meta) -> str:
         "## 対応内容列（追記型の対応ログ）",
         "",
         "保全・製造・生技・メーカーFEなど複数人が、発生から完了までの対応を1セルに追記していった体裁の列。"
-        "アプリの AI整形／ログ分割（`logproc/`、`docs/research/対応内容AI整形設計.md` 2章）の主な入力を想定している。",
+        "アプリの AI整形／ログ分割（`logproc/`、`docs/research.md` 4章（対応内容AI整形設計）2節）の主な入力を想定している。",
         "`scripts/samples/_t1_log.py` が各 Incident の 発生（occurred_at）・連絡（reported_at）・初動（response_started_at）・調査・原因・"
         "処置・使用部品・メーカー対応・結果（completed_at）・状態から作るので、他の列（発生日・原因・処置内容・使用部品・担当者・状態・完了日）と"
         "日時・内容が矛盾しない。",

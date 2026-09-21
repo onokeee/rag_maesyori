@@ -1,5 +1,8 @@
-// 全画面共通: トースト、fetch（ragFetch）、1画面の中の段（ragSections）、
-// ファイルのドロップ、確認ダイアログ、ジョブ進捗
+// 画面の JavaScript（1ファイル）。
+//   1. 全画面共通: トースト、fetch（ragFetch）、1画面の中の段（ragSections）、ファイルのドロップ、確認ダイアログ、ジョブ進捗
+//   2. 帳票取り込み（/forms。旧 review.js）  3. 帳票登録（/form-types。旧 form_types.js）  4. 表の取り込み（/tables。旧 tables.js）
+// 2〜4 はそれぞれ自分の画面（#formsPage / #typesPage / [data-tables-page]）が無ければ何もしない。
+// tests/test_cross.py は「// ==== 」の見出しでこのファイルを区切って、その画面の部分だけを node で動かす。
 "use strict";
 
 // ---- トースト -------------------------------------------------------------------
@@ -438,3 +441,1929 @@ window.ragSections = ragSections;
 window.ragDiscard = ragDiscard;
 window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox, ragFetch, ragSections,
                ragDiscard };
+
+
+// ==== forms: 帳票取り込み（/forms。旧 review.js） ====
+// 帳票取り込み（/forms）: 1枚の画面で ファイルを置く → 種類とシート → 読み取り結果 → 確定してダウンロード。
+// 画面は移動しない。どの操作も fetch でルートを呼び、返ってきた HTML の断片をその場に入れ替える。
+//
+// まとめて置いた帳票（同じフォーム）は、②で1回だけ種類とシートを決め、③に全部の読み取り結果を
+// 縦に並べる（利用者の指示 2026-09-20）。重くならないよう、元のシートの表はその帳票が画面に
+// 近づいた時点で読み込む（スクロールのたびに位置を見る）。
+(function () {
+  "use strict";
+
+  const page = document.getElementById("formsPage");
+  if (!page) return;
+
+  const toast = (msg, kind) => (window.App && window.App.toast ? window.App.toast(msg, kind) : null);
+
+  // ---- 段の開け閉て・通信は app.js（window.ragSections / window.ragFetch）を使う ----
+  const rag = window.ragSections;
+  const sections = {
+    el: rag.el,
+    open: (step, scroll) => rag.open(step, { scroll: !!scroll }),
+    done: rag.done,
+    close: rag.close,
+    note: rag.note,
+    show: (step) => rag.open(step, { scroll: true }),
+  };
+  // quiet: エラーの言い方はこの画面の側で決める（ragFetch の自動トーストと二重に出さない）
+  const get = (url) => window.ragFetch(url, { quiet: true });
+  const postJson = (url, body) => window.ragFetch(url, { json: body, quiet: true });
+  const postForm = (url, data) => window.ragFetch(url, { form: data, quiet: true });
+  const uuid = () => ((window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
+
+  // ---- 作業中の表示（同じ画面の中に出す。閉じたら消えてよい） ----
+  function work(name, text) {
+    const line = page.querySelector('[data-work="' + name + '"]');
+    if (!line) return;
+    const span = line.querySelector("[data-work-text]");
+    if (span) span.textContent = text || "";
+    line.hidden = !text;
+  }
+
+  // ---- 画面の状態 ----
+  let docs = [];        // [{id, file_name, state}]
+  const el = {
+    typeBody: page.querySelector("[data-type-body]"),
+    reviewBody: page.querySelector("[data-review-body]"),
+    finishBody: page.querySelector("[data-finish-body]"),
+    docName: page.querySelector('#step-type [data-step-summary]'),
+    fileNote: page.querySelector('#step-file [data-step-summary]'),
+    saveStatus: page.querySelector('#step-review [data-step-summary]'),
+  };
+  const ids = () => docs.map((d) => d.id).join(",");
+  const setStatus = (text) => { if (el.saveStatus) el.saveStatus.textContent = text; };
+  const isDone = (d) => d.state === "confirmed" || d.state === "modified";
+  const docOf = (id) => docs.find((d) => d.id === id) || null;
+
+  // ダウンロードしないまま画面を離れたら、この画面で取り込んだ分は捨てる（利用者の指示 2026-09-20）。
+  // docs に残っているものが「まだダウンロードしていない分」そのもの（ダウンロード・削除で docs から抜ける）。
+  // 渡しに行った分（handedOver）も一緒に送る。途中で切れた・保存をやめたときはサーバーに残っていて、
+  // docs から抜けたままだと画面を閉じても捨てられない（消えたと思っているデータが残る）。
+  // すでに消えている番号は黙って飛ばされる（core.purge.discard_documents）。
+  let handedOver = [];
+  const guard = (window.ragDiscard || { watch: () => ({ now: async () => {}, clear() {}, arm() {} }) })
+    .watch(page.dataset.discardUrl || "/forms/discard",
+      () => ({ doc_ids: docs.map((d) => d.id).concat(handedOver) }));
+
+  // ---- 1 ファイルを置く ----
+  const uploadForm = document.getElementById("uploadForm");
+  if (uploadForm) {
+    // 置いた（またはクリックで選んだ）時点でそのまま読み取る。ボタンは押さなくてよい
+    uploadForm.querySelector("input[type=file]")?.addEventListener("change", (event) => {
+      if (event.target.files && event.target.files.length) uploadForm.requestSubmit();
+    });
+    uploadForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const input = uploadForm.querySelector("input[type=file]");
+      const files = input && input.files ? Array.from(input.files) : [];
+      if (!files.length) { toast("ファイルを置いてください", "err"); return; }
+      const button = uploadForm.querySelector("button[type=submit]");
+      if (button) button.disabled = true;
+      work("upload", files.length > 1 ? files.length + "件のファイルを取り込んでいます…" : "ファイルを取り込んでいます…");
+      try {
+        // 新しいファイルを置いたら、前の分（ダウンロードしていない帳票）はその場で捨てる
+        if (docs.length || handedOver.length) { await guard.now(); handedOver = []; resetPage(); }
+        const data = new FormData();
+        files.forEach((f) => data.append("file", f));
+        const res = await postForm(page.dataset.uploadUrl, data);
+        (res.errors || []).forEach((m) => toast(m, "err"));
+        docs = (res.docs || []).map((d) => Object.assign({ state: "unread" }, d));
+        if (el.fileNote) {
+          el.fileNote.textContent = docs.length > 1
+            ? docs.length + "件を取り込みました（まとめて読み取ります）"
+            : (docs[0] ? docs[0].file_name : "");
+        }
+        if (input) { input.value = ""; input.dispatchEvent(new Event("change", { bubbles: true })); }
+        await openType();
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        work("upload", "");
+        if (button) button.disabled = false;
+      }
+    });
+  }
+
+  // ---- 2 帳票の種類とシート（置かれた分すべてに同じ設定を使う） ----
+  async function openType() {
+    if (!docs.length) { resetPage(); return; }
+    clearReview();
+    setStatus("");
+    sections.done("file");
+    sections.open("type");
+    if (el.docName) {
+      el.docName.textContent = docs.length > 1 ? docs.length + "件のファイル" : (docs[0] ? docs[0].file_name : "");
+    }
+    el.typeBody.innerHTML = '<p class="muted">読み込んでいます…</p>';
+    try {
+      const url = (page.dataset.typeUrl || "/forms/type") + "?ids=" + encodeURIComponent(ids());
+      const res = await get(url);
+      el.typeBody.innerHTML = res.html || "";
+      bindTypeForm();
+    } catch (e) {
+      el.typeBody.innerHTML = '<p class="warn"></p>';
+      el.typeBody.querySelector(".warn").textContent = e.message;
+    }
+    await refreshFinish();
+    sections.show("type");
+  }
+
+  function bindTypeForm() {
+    const form = el.typeBody.querySelector("[data-type-form]");
+    if (!form) return;
+    const parse = (text) => { try { return JSON.parse(text || "{}"); } catch (e) { return {}; } };
+    const suggested = parse(form.dataset.suggested);
+    const fileCounts = parse(form.dataset.fileCounts);
+
+    // 種類を選び直したら、その種類で見つかったシートとファイルごとの項目数を出し直す
+    function showCounts(patternId) {
+      const counts = fileCounts[patternId] || {};
+      form.querySelectorAll("[data-file-count]").forEach((node) => {
+        const n = counts[node.dataset.fileCount];
+        if (n === undefined) return;
+        node.textContent = n;
+        const chip = node.closest("[data-file-row]");
+        if (chip) chip.classList.toggle("is-weak", n === 0);
+      });
+    }
+    showCounts(String(form.querySelector("input[name=pattern_id]:checked")?.value || ""));
+
+    form.querySelectorAll("input[name=pattern_id]").forEach((radio) => {
+      radio.addEventListener("change", () => {
+        showCounts(radio.value);
+        const sheets = suggested[radio.value];
+        if (!sheets || !sheets.length) return;
+        form.querySelectorAll("input[name=sheets]").forEach((box) => { box.checked = sheets.includes(box.value); });
+      });
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = form.querySelector("button[type=submit]");
+      if (button) button.disabled = true;
+      work("read", docs.length > 1 ? docs.length + "件の帳票を読み取っています…" : "帳票を読み取っています…");
+      try {
+        const res = await postForm(form.dataset.readUrl, new FormData(form));
+        (res.errors || []).forEach((m) => toast(m, "err"));
+        showReview(res);
+        await refreshFinish();
+        sections.done("type");
+        sections.show("review");
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        work("read", "");
+        if (button) button.disabled = false;
+      }
+    });
+  }
+
+  // 取り込みをやめる（確認ダイアログは app.js が先に出す。ここは「はい」のあとの本番）
+  page.addEventListener("click", async (event) => {
+    const drop = event.target.closest("[data-drop-doc][data-confirmed='1']");
+    if (!drop) return;
+    const id = Number(drop.dataset.dropDoc);
+    try {
+      await postJson("/forms/" + id + "/delete", {});
+      docs = docs.filter((d) => d.id !== id);
+      toast(docs.length ? "このファイルを外しました" : "この帳票の取り込みをやめました", "ok");
+      if (docs.length) await openType();
+      else resetPage();
+    } catch (e) { toast(e.message, "err"); }
+  });
+
+  function resetPage() {
+    docs = [];
+    el.typeBody.textContent = "";
+    el.finishBody.textContent = "";
+    clearReview();
+    if (el.fileNote) el.fileNote.textContent = "";
+    if (el.docName) el.docName.textContent = "";
+    ["type", "review", "finish"].forEach(sections.close);
+    sections.close("file");
+    sections.show("file");
+  }
+
+  // ---- 3 読み取り結果（帳票を縦に全部並べる。その場で直す・途中保存） ----
+  const SOURCES = {
+    auto: ["自動で読み取り", "blue"], manual: ["手で修正", "teal"], blank: ["空欄", "gray"],
+  };
+  const STATE_COLORS = { "確定済み": "green", "修正中": "violet", "未確定": "gray" };
+  const blocks = new Map();   // 帳票ID → その帳票の塊（入力欄・版・保存の状態）
+  let watcher = null;         // 元のシートを読み込むための、スクロールを見る役
+
+  function clearReview() {
+    blocks.forEach((b) => clearTimeout(b.timer));
+    blocks.clear();
+    stopWatching();
+    el.reviewBody.textContent = "";
+    sections.close("review");
+    sections.close("finish");
+  }
+
+  function showReview(res) {
+    clearReview();
+    el.reviewBody.innerHTML = (res && res.html) || "";
+    // 読み取れた帳票の状態をサーバの返事にそろえる（読み取れなかったファイルは並ばない）
+    if (res && res.docs) {
+      const states = new Map(res.docs.map((d) => [d.id, d.state]));
+      docs.forEach((d) => { if (states.has(d.id)) d.state = states.get(d.id); });
+    }
+    sections.open("review");
+    el.reviewBody.querySelectorAll(".review-doc").forEach(bindBlock);
+    watchGrids();
+    updateBar();
+    setStatus("");
+  }
+
+  function bindBlock(root) {
+    const b = {
+      id: Number(root.dataset.doc),
+      root,
+      form: root.querySelector("[data-review-form]"),
+      fieldBoxes: [],
+      sheetGrids: [],
+      sheetTabs: [],
+      paneTabs: [],
+      activeBox: null,
+      dirty: false,
+      timer: null,
+      saving: null,
+      gridLoaded: !root.querySelector("[data-grid-wait]"),
+      gridLoading: null,
+      pageToken: uuid(),
+    };
+    if (!b.form) return;
+    blocks.set(b.id, b);
+    b.fieldBoxes = Array.from(b.form.querySelectorAll("[data-field]"));
+    b.sheetGrids = Array.from(root.querySelectorAll(".sheet-grid"));
+    b.sheetTabs = Array.from(root.querySelectorAll("[data-sheet-tab]"));
+    b.paneTabs = Array.from(root.querySelectorAll("[data-pane-tab]"));
+
+    b.sheetTabs.forEach((tab) => tab.addEventListener("click", async () => {
+      await loadGrid(b);
+      showSheet(b, tab.dataset.sheetTab);
+    }));
+
+    b.paneTabs.forEach((tab) => tab.addEventListener("click", () => {
+      b.paneTabs.forEach((t) => t.setAttribute("aria-selected", t === tab ? "true" : "false"));
+      b.form.querySelectorAll("[data-pane]").forEach((p) => { p.hidden = p.dataset.pane !== tab.dataset.paneTab; });
+    }));
+
+    b.fieldBoxes.forEach((box) => {
+      const input = box.querySelector("input.input, textarea.input");
+      if (input) input.addEventListener("focus", () => { b.activeBox = box; highlight(b, box); });
+      box.addEventListener("focusin", (event) => {
+        if (!event.target.classList.contains("cell-input")) return;
+        box._activeCell = event.target;
+        b.activeBox = box;
+        highlight(b, box);
+      });
+      const table = box.querySelector("[data-table-editor]");
+      if (table) {
+        table.addEventListener("input", () => syncTable(box));
+        box.addEventListener("click", (event) => onTableClick(b, box, table, event));
+      }
+    });
+
+    // セルをクリック → 選んでいる項目にその値を入れる（あとから読み込む表にも効く）
+    root.addEventListener("click", (event) => {
+      const td = event.target.closest("td[data-cell]");
+      if (!td || !b.activeBox) return;
+      const input = inputOf(b.activeBox);
+      if (!input) return;
+      input.value = td.textContent.trim();
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      root.querySelectorAll("td.hl-value").forEach((c) => c.classList.remove("hl-value"));
+      td.classList.add("hl-value");
+      input.focus();
+      toast("セル " + td.dataset.cell + " の値を入れました", "info");
+    });
+
+    b.form.addEventListener("input", (event) => {
+      if (!event.target.name || !event.target.name.startsWith("value-")) return;
+      b.dirty = true;
+      setSaveText(b, "未保存の変更があります");
+      setStatus("未保存の変更があります");
+      clearTimeout(b.timer);
+      b.timer = setTimeout(() => saveNow(b), 700);
+    });
+
+    const nextBtn = root.querySelector("[data-next-issue]");
+    if (nextBtn) nextBtn.addEventListener("click", () => gotoNextIssue(b));
+  }
+
+  const inputOf = (box) => box._activeCell || box.querySelector("input.input, textarea.input, textarea.cell-input");
+  const valueOf = (box) => box.querySelector("[name^='value-']");
+  const versionOf = (b) => b.root.dataset.version || "";
+
+  function setSaveText(b, text) {
+    const node = b.root.querySelector("[data-doc-save]");
+    if (node) node.textContent = text || "";
+  }
+
+  // ---- 元のシートの表は、その帳票が画面に近づいてから読み込む ----
+  // 位置を自分で見る（IntersectionObserver は、画面に出していない窓では動かないことがある）。
+  const GRID_MARGIN = 600;   // 画面の上下 600px 手前から読み込む
+
+  function checkGrids() {
+    const waiting = Array.from(blocks.values()).filter((b) => !b.gridLoaded && !b.gridLoading);
+    if (!waiting.length) { stopWatching(); return; }
+    const height = window.innerHeight || document.documentElement.clientHeight || 0;
+    waiting.forEach((b) => {
+      const box = b.root.getBoundingClientRect();
+      if (box.bottom > -GRID_MARGIN && box.top < height + GRID_MARGIN) loadGrid(b);
+    });
+  }
+
+  function stopWatching() {
+    if (!watcher) return;
+    window.removeEventListener("scroll", watcher, true);
+    window.removeEventListener("resize", watcher);
+    watcher = null;
+  }
+
+  function watchGrids() {
+    stopWatching();
+    if (!blocks.size) return;
+    let timer = null;      // スクロール中に何度も測らない
+    watcher = () => {
+      if (timer) return;
+      timer = setTimeout(() => { timer = null; checkGrids(); }, 120);
+    };
+    window.addEventListener("scroll", watcher, true);   // 中の枠のスクロールも拾う
+    window.addEventListener("resize", watcher);
+    checkGrids();
+  }
+
+  function loadGrid(b) {
+    if (b.gridLoaded) return Promise.resolve();
+    if (b.gridLoading) return b.gridLoading;
+    const slot = b.root.querySelector("[data-grid-slot]");
+    b.gridLoading = (async () => {
+      try {
+        const res = await get(b.root.dataset.gridUrl);
+        if (slot) slot.innerHTML = res.html || "";
+        b.sheetGrids = Array.from(b.root.querySelectorAll(".sheet-grid"));
+      } catch (e) {
+        if (slot) {
+          slot.textContent = "";
+          const p = document.createElement("p");
+          p.className = "warn";
+          p.textContent = "元のシートを読み込めませんでした（" + e.message + "）";
+          slot.appendChild(p);
+        }
+      } finally {
+        b.gridLoaded = true;      // 失敗しても何度も取りに行かない
+        b.gridLoading = null;
+      }
+    })();
+    return b.gridLoading;
+  }
+
+  function showSheet(b, name) {
+    let shown = null;
+    b.sheetGrids.forEach((g) => {
+      const on = g.dataset.sheet === name;
+      g.hidden = !on;
+      if (on) shown = g;
+    });
+    b.sheetTabs.forEach((t) => t.setAttribute("aria-selected", t.dataset.sheetTab === name ? "true" : "false"));
+    return shown;
+  }
+
+  const topLeft = (coord) => (coord || "").split(":")[0];
+
+  function highlight(b, box) {
+    if (!b.gridLoaded) { loadGrid(b).then(() => highlight(b, box)); return; }
+    b.root.querySelectorAll("td.hl-label, td.hl-value").forEach((td) => td.classList.remove("hl-label", "hl-value"));
+    const sheet = box.dataset.sheet;
+    let grid = sheet ? b.sheetGrids.find((g) => g.dataset.sheet === sheet) : null;
+    if (!grid) return;
+    if (grid.hidden) grid = showSheet(b, sheet);
+    if (!grid) return;
+    const label = grid.querySelector("td[data-cell='" + topLeft(box.dataset.labelCell) + "']");
+    const value = grid.querySelector("td[data-cell='" + topLeft(box.dataset.valueCell) + "']");
+    if (label) label.classList.add("hl-label");
+    if (value) value.classList.add("hl-value");
+    const target = value || label;
+    if (target) target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  // 明細表: セルの編集・行の追加と削除 → hidden の JSON に戻す
+  function syncTable(box) {
+    const hidden = box.querySelector("[data-table-value]");
+    const table = box.querySelector("[data-table-editor]");
+    if (!hidden || !table) return;
+    const columns = Array.from(table.querySelectorAll("thead th[scope=col]")).map((th) => th.textContent.trim());
+    const rows = Array.from(table.querySelectorAll("tbody tr")).map((tr) =>
+      Array.from(tr.querySelectorAll(".cell-input")).map((e) => e.value));
+    hidden.value = JSON.stringify({ columns, rows });
+    hidden.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function onTableClick(b, box, table, event) {
+    const remove = event.target.closest("[data-remove-table-row]");
+    if (remove) {
+      const tr = remove.closest("tr");
+      if (box._activeCell && tr.contains(box._activeCell)) {
+        box._activeCell = null;
+        if (b.activeBox === box) b.activeBox = null;
+      }
+      tr.remove();
+      syncTable(box);
+      return;
+    }
+    if (!event.target.closest("[data-add-table-row]")) return;
+    const body = table.querySelector("tbody");
+    const n = table.querySelectorAll("thead th[scope=col]").length;
+    const tr = document.createElement("tr");
+    for (let i = 0; i < n; i += 1) {
+      const td = document.createElement("td");
+      const ta = document.createElement("textarea");
+      ta.className = "cell-input";
+      ta.rows = 1;
+      td.appendChild(ta);
+      tr.appendChild(td);
+    }
+    const td = document.createElement("td");
+    td.className = "center";
+    td.innerHTML = '<button type="button" class="btn small ghost" data-remove-table-row>行を削除</button>';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    const first = tr.querySelector(".cell-input");
+    if (first) first.focus();
+  }
+
+  function values(b) {
+    const out = {};
+    b.fieldBoxes.forEach((box) => {
+      const input = valueOf(box);
+      if (input) out[box.dataset.field] = input.value;
+    });
+    return out;
+  }
+
+  function setVersion(b, v) {
+    if (!v) return;
+    b.root.dataset.version = v;
+    const input = b.form.querySelector("[data-version-input]");
+    if (input) input.value = v;
+  }
+
+  async function saveNow(b) {
+    if (b.saving) await b.saving;
+    if (!b.dirty) return;
+    b.dirty = false;
+    setSaveText(b, "保存中…");
+    setStatus("保存中…");
+    b.saving = (async () => {
+      try {
+        const body = { values: values(b), version: versionOf(b), page_token: b.pageToken };
+        const res = await fetch(b.root.dataset.draftUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok && res.status !== 204) {
+          let msg = "保存できませんでした（" + res.status + "）";
+          try { const d = await res.json(); if (d.error) msg = d.error; } catch (e) { /* 本文なし */ }
+          throw new Error(msg);
+        }
+        setVersion(b, res.headers.get("X-Doc-Version"));
+        const summary = await postJson(b.root.dataset.previewUrl,
+          { values: values(b), version: versionOf(b), page_token: b.pageToken });
+        if (summary) applySummary(b, summary);
+        setSaveText(b, "保存しました");
+        setStatus("保存しました");
+      } catch (err) {
+        b.dirty = true;
+        setSaveText(b, "保存できませんでした");
+        setStatus("保存できませんでした");
+        toast(err.message, "err");
+      }
+    })();
+    await b.saving;
+    b.saving = null;
+  }
+
+  function applySummary(b, s) {
+    Object.entries(s.counts || {}).forEach(([key, n]) => {
+      const node = b.root.querySelector("[data-count='" + key + "']");
+      if (!node) return;
+      node.textContent = n;
+      const chip = node.closest(".chip");
+      if (chip) chip.classList.toggle("is-zero", !n);
+    });
+    b.fieldBoxes.forEach((box) => {
+      const st = (s.fields || {})[box.dataset.field];
+      if (!st) return;
+      box.dataset.issue = st.issue ? "1" : "0";
+      box.classList.toggle("is-issue", !!st.issue);
+      const badge = box.querySelector("[data-source-badge]");
+      const src = SOURCES[st.source] || SOURCES.auto;
+      if (badge) { badge.textContent = src[0]; badge.className = "badge badge-" + src[1]; }
+      const warn = box.querySelector("[data-warning]");
+      if (warn) {
+        const text = st.warning || "";
+        warn.textContent = text;
+        warn.hidden = !text;
+      }
+    });
+    const pre = b.root.querySelector("[data-md-preview]");
+    if (pre && typeof s.markdown === "string") pre.textContent = s.markdown;
+    const name = b.root.querySelector("[data-md-name]");
+    if (name && s.file_name) name.textContent = s.file_name;
+    if (s.state) {
+      const doc = docOf(b.id);
+      if (doc) doc.state = s.state;
+      b.root.dataset.state = s.state;
+    }
+    setState(b, (s.counts || {}).issue || 0);
+    updateBar();
+  }
+
+  /** 見出しの状態（要確認 n件 / 確定済み / 修正中）。 */
+  function setState(b, issues) {
+    const badge = b.root.querySelector("[data-doc-state]");
+    if (!badge) return;
+    const state = b.root.dataset.state;
+    let text = issues ? "要確認 " + issues + "件" : "未確定";
+    if (state === "confirmed") text = "確定済み";
+    else if (state === "modified") text = "修正中";
+    badge.textContent = text;
+    badge.className = "badge badge-" + (STATE_COLORS[text] || "amber");
+  }
+
+  const issueCount = (b) => b.fieldBoxes.filter((box) => box.dataset.issue === "1").length;
+
+  function gotoNextIssue(b) {
+    const issues = b.fieldBoxes.filter((x) => x.dataset.issue === "1");
+    if (!issues.length) { toast("この帳票に要確認の項目はありません", "ok"); return; }
+    b.paneTabs.forEach((t) => { if (t.dataset.paneTab === "fields") t.click(); });
+    const idx = b.activeBox ? issues.findIndex((x) => b.fieldBoxes.indexOf(x) > b.fieldBoxes.indexOf(b.activeBox)) : 0;
+    const box = issues[idx >= 0 ? idx : 0];
+    box.scrollIntoView({ block: "center" });
+    const input = inputOf(box);
+    if (input) input.focus();
+  }
+
+  // ---- まとめて置いたときの進み具合（③の上の1行） ----
+  // まとめ取り込みでは1件ずつ確定するボタンが無く、④のダウンロードまで全部が「未確定」のまま。
+  // 「確定した件数」では動かないので、いま見ている場所で数える
+
+  /** ③に縦に並んでいる帳票（読み取れなかったファイルは並ばない）。 */
+  function shownBlocks() {
+    return docs.map((d) => blocks.get(d.id)).filter(Boolean);
+  }
+
+  /** いま画面のいちばん上に来ている帳票の位置。 */
+  function currentIndex(list) {
+    let at = 0;
+    list.forEach((b, i) => { if (b.root.getBoundingClientRect().top <= 8) at = i; });
+    return at;
+  }
+
+  function updateBar(index) {
+    const text = el.reviewBody.querySelector("[data-batch-text]");
+    if (!text) return;
+    const list = shownBlocks();
+    const at = index == null ? currentIndex(list) : index;
+    const left = list.filter((b) => issueCount(b)).length;
+    text.textContent = list.length + "件中" + (at + 1) + "件目を表示中"
+      + (left ? "／要確認が残る帳票 " + left + "件" : "");
+    const button = el.reviewBody.querySelector("[data-next-doc]");
+    if (!button) return;
+    button.disabled = list.length < 2;
+    button.textContent = at >= list.length - 1 ? "先頭の帳票へ" : "次の帳票へ";
+  }
+
+  el.reviewBody.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-next-doc]")) return;
+    const list = shownBlocks();
+    if (list.length < 2) return;
+    const at = (currentIndex(list) + 1) % list.length;   // 最後まで行ったら先頭に戻る
+    gotoBlock(list[at].id);
+    updateBar(at);
+  });
+
+  function gotoBlock(id) {
+    const b = blocks.get(id);
+    if (!b) {
+      // ③に並んでいない帳票（読み取れなかった・選んだシートが無かった）。黙って何も起きないと
+      // 押し損ねたのか分からないので、理由を出す
+      const doc = docOf(id);
+      toast((doc ? doc.file_name + " は" : "この帳票は")
+        + "読み取れていません。②で読み取るシートを選び直してください", "err");
+      return;
+    }
+    sections.open("review", false);
+    b.root.scrollIntoView({ behavior: "smooth", block: "start" });
+    b.root.classList.add("is-jumped");
+    setTimeout(() => b.root.classList.remove("is-jumped"), 1200);
+  }
+
+  // 画面を閉じるときは、未保存の変更を送っておく
+  window.addEventListener("beforeunload", () => {
+    blocks.forEach((b) => {
+      if (!b.dirty) return;
+      try {
+        const blob = new Blob([JSON.stringify({ values: values(b), version: versionOf(b), page_token: b.pageToken })],
+          { type: "application/json" });
+        navigator.sendBeacon(b.root.dataset.draftUrl, blob);
+      } catch (e) { /* 送れなくても次の入力で保存される */ }
+    });
+  });
+
+  // ---- 4 確定してダウンロード ----
+  async function refreshFinish() {
+    if (!docs.length) { sections.close("finish"); return; }
+    try {
+      const url = page.dataset.finishUrl + "?ids=" + encodeURIComponent(ids());
+      const res = await get(url);
+      el.finishBody.innerHTML = res.html || "";
+      // 読み取る前は灰色のままにして、見出しに理由を1行だけ出す（「読み取り結果」より先に開かない）
+      if (res.read_yet) {
+        sections.note("finish", "");
+        sections.open("finish");
+      } else {
+        sections.close("finish");
+        sections.note("finish", "読み取りが終わると確定できます");
+      }
+    } catch (e) {
+      toast(e.message, "err");
+    }
+  }
+
+  page.addEventListener("click", async (event) => {
+    const confirmBtn = event.target.closest("[data-confirm-doc]");
+    if (confirmBtn) {
+      event.preventDefault();
+      confirmBtn.disabled = true;
+      work("confirm", "Markdown を作っています…");
+      try {
+        await confirmDoc(Number(confirmBtn.dataset.confirmDoc));
+        await refreshFinish();
+        sections.done("review", "確定しました");
+        toast("確定しました", "ok");
+        sections.show("finish");
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        work("confirm", "");
+        confirmBtn.disabled = false;
+      }
+      return;
+    }
+    const goto = event.target.closest("[data-goto-doc]");
+    if (goto) {
+      event.preventDefault();
+      gotoBlock(Number(goto.dataset.gotoDoc));
+    }
+  });
+
+  /** 1件を確定する（入力中の値は先に保存してから）。 */
+  async function confirmDoc(id) {
+    const b = blocks.get(id);
+    if (b) {
+      clearTimeout(b.timer);
+      if (b.dirty) await saveNow(b);
+      if (b.saving) await b.saving;
+    }
+    await postJson("/forms/" + id + "/confirm", { version: b ? versionOf(b) : "" });
+    const doc = docOf(id);
+    if (doc) doc.state = "confirmed";
+    if (b) {
+      b.root.dataset.state = "confirmed";
+      setState(b, issueCount(b));
+    }
+    updateBar();
+  }
+
+  // ダウンロード（zip も1件の .md も）: 確定していない帳票をこの場で全部確定してから受け取る
+  page.addEventListener("click", async (event) => {
+    const link = event.target.closest("a[data-confirm-all][data-confirmed='1']");
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    // 修正中（確定したあとに直した）帳票も確定し直す。そうしないと直した値がファイルに入らない
+    const pending = docs.filter((d) => blocks.has(d.id) && d.state !== "confirmed");
+    work("confirm", pending.length ? pending.length + "件を確定しています…" : "ダウンロードの用意をしています…");
+    try {
+      for (const d of pending) await confirmDoc(d.id);
+      await refreshFinish();
+      window.location.assign(link.getAttribute("href"));
+      // 渡しに行った分。通信が切れた・保存をやめたときはサーバーに残るので、画面を閉じるときに捨てる
+      handedOver = handedOver.concat(docs.filter(isDone).map((d) => d.id));
+      // 読み取れなかった帳票はサーバーに残る（渡していないので消えない）ので、続けて読み取れるようにする
+      const rest = docs.filter((d) => !isDone(d));
+      setTimeout(async () => {
+        toast("ダウンロードしました。渡し終えた分はサーバーから消えます", "ok");
+        if (!rest.length) { resetPage(); return; }
+        docs = rest;
+        await openType();
+      }, 1500);
+    } catch (e) {
+      toast(e.message, "err");
+      await refreshFinish();
+    } finally {
+      work("confirm", "");
+    }
+  }, true);
+})();
+
+
+// ==== form_types: 帳票登録（/form-types。旧 form_types.js） ====
+// 帳票登録（/form-types）: 1枚の画面で 登録済みの一覧 → Excel を置く → セルをクリックして項目を作る → 使用開始。
+// 画面は移動しない。どの操作も fetch でルートを呼び、返ってきた HTML の断片をその場に入れ替える。
+//
+// 置いた Excel はサーバーに残らない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ保持する」）。
+// ブラウザ側で選んだファイル（bookFile）を持ち続け、セルのクリック・項目の削除・見出しの手直し・
+// 使用開始のたびに一緒に送る。サーバーは受け取った Excel を読み取るだけで保存しない。
+(function () {
+  "use strict";
+
+  const page = document.getElementById("typesPage");
+  if (!page) return;
+
+  const toast = (msg, kind) => (window.App && window.App.toast ? window.App.toast(msg, kind) : null);
+
+  // ---- 段の開け閉て・通信は app.js（window.ragSections / window.ragFetch）を使う ----
+  const rag = window.ragSections;
+  const sections = {
+    el: rag.el,
+    open: (step, scroll) => rag.open(step, { scroll: !!scroll }),
+    done: rag.done,
+    close: rag.close,
+    note: rag.note,
+    show: (step) => rag.open(step, { scroll: true }),
+  };
+  // quiet: エラーの言い方はこの画面の側で決める（ragFetch の自動トーストと二重に出さない）
+  const get = (url) => window.ragFetch(url, { quiet: true });
+  const postJson = (url, body) => window.ragFetch(url, { json: body, quiet: true });
+  const postForm = (url, data) => window.ragFetch(url, { form: data, quiet: true });
+
+  function work(name, text) {
+    const line = page.querySelector('[data-work="' + name + '"]');
+    if (!line) return;
+    const span = line.querySelector("[data-work-text]");
+    if (span) span.textContent = text || "";
+    line.hidden = !text;
+  }
+
+  const listBody = page.querySelector("[data-list-body]");
+  const buildBody = page.querySelector("[data-build-body]");
+  const buildName = page.querySelector('#step-build [data-step-summary]');
+  let patternId = null;
+  let bookFile = null;     // いま画面で見ている帳票の Excel（ブラウザの中だけ。サーバーには残らない）
+
+  // ---- サーバーへ送るとき、いまの Excel を一緒に持たせる ----
+  // 送るものが無いときは、さっき読んでもらったブックの合図（sha256）だけを送る
+  function withBook(data) {
+    const form = data || new FormData();
+    if (bookFile) {
+      form.append("book", bookFile, bookFile.name);
+      return form;
+    }
+    const root = buildBody.querySelector("#cellBuilder");
+    const hash = root ? root.dataset.book : "";
+    if (hash) form.append("book_hash", hash);
+    return form;
+  }
+
+  // ---- 返ってきた断片を画面に入れる ----
+  function apply(res, opts) {
+    if (res.list_html !== undefined && listBody) listBody.innerHTML = res.list_html;
+    if (res.html !== undefined) {
+      buildBody.innerHTML = res.html;
+      const root = buildBody.querySelector("#cellBuilder");
+      patternId = root ? Number(root.dataset.pattern) : patternId;
+      const nameInput = buildBody.querySelector("[data-rename]");
+      if (buildName) buildName.textContent = nameInput ? nameInput.value : "";
+      bindBuilder();
+      sections.done("new", nameInput ? nameInput.value : "");
+      sections.open("build", !!(opts && opts.scroll));
+    }
+    if (res.message) toast(res.message, "ok");
+    (res.errors || []).forEach((m) => toast(m, "err"));
+  }
+
+  // ---- 新しく登録する ----
+  const newForm = document.getElementById("newTypeForm");
+  if (newForm) {
+    const file = newForm.querySelector("input[type=file]");
+    const name = newForm.querySelector("[data-type-name]");
+    if (file && name) {
+      file.addEventListener("change", () => {
+        if (!file.files || !file.files.length) { name.dataset.autofill = ""; return; }
+        const stem = file.files[0].name.replace(/\.[^.]+$/, "");
+        // 前のファイルから入れた名前が残っているとき（登録に失敗したあと）は、置き直した
+        // ファイルの名前に入れ替える。手で書いた名前はそのままにする
+        if (!name.value.trim() || name.value === name.dataset.autofill) {
+          name.value = stem;
+          name.dataset.autofill = stem;
+        }
+        // 置いたらそのままシートを開く（ボタンを押さなくてよい）
+        newForm.requestSubmit();
+      });
+    }
+    newForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!file || !file.files || !file.files.length) { toast("帳票のExcelを置いてください", "err"); return; }
+      const button = newForm.querySelector("button[type=submit]");
+      if (button) button.disabled = true;
+      work("create", "Excel を読み込んでいます…");
+      // 置かれたファイルはブラウザ側で持ち続ける（サーバーには残らないので、次の操作でまた送る）
+      bookFile = file.files[0];
+      try {
+        const res = await postForm(page.dataset.createUrl, new FormData(newForm));
+        apply(res, { scroll: true });
+        newForm.reset();
+        file.dispatchEvent(new Event("change", { bubbles: true }));
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        work("create", "");
+        if (button) button.disabled = false;
+      }
+    });
+  }
+
+  // ---- 一覧・登録中の欄のボタン（どちらも同じ操作） ----
+  page.addEventListener("click", async (event) => {
+    const open = event.target.closest("[data-open-type]");
+    if (open) {
+      event.preventDefault();
+      await openType(Number(open.dataset.openType));
+      return;
+    }
+    const status = event.target.closest("[data-set-status]");
+    if (status) {
+      event.preventDefault();
+      status.disabled = true;
+      try {
+        const id = Number(status.dataset.pattern);
+        const same = id === patternId;
+        const data = new FormData();
+        data.append("status", status.dataset.setStatus);
+        // 開いている種類なら、いまの Excel も送ってシートを出したままにする
+        const res = await postForm("/form-types/" + id + "/status", same ? withBook(data) : data);
+        if (!same) bookFile = null;   // 別の種類に切り替わるので、前の種類の Excel は持ち越さない
+        patternId = id;
+        apply(res);
+      } catch (e) { toast(e.message, "err"); }
+      status.disabled = false;
+      return;
+    }
+    // 削除（確認ダイアログは app.js が先に出す。ここは「はい」のあとの本番）
+    const del = event.target.closest("[data-delete-type][data-confirmed='1']");
+    if (del) {
+      try {
+        const res = await postJson("/form-types/" + Number(del.dataset.deleteType) + "/delete", {});
+        if (Number(del.dataset.deleteType) === patternId) {
+          buildBody.textContent = "";
+          patternId = null;
+          bookFile = null;
+          if (buildName) buildName.textContent = "";
+          sections.close("build");
+          sections.close("new");
+          sections.open("new");
+        }
+        apply(res);
+      } catch (e) { toast(e.message, "err"); }
+      return;
+    }
+    const field = event.target.closest("[data-delete-field]");
+    if (field) {
+      event.preventDefault();
+      // いま見ている Excel を送る（送らないとシートが消えてしまう）
+      try { apply(await postForm(field.dataset.deleteField, withBook())); }
+      catch (e) { toast(e.message, "err"); }
+    }
+  });
+
+  async function openType(id) {
+    if (!id) return;
+    if (id !== patternId) bookFile = null;   // 別の種類を開いたら、前の種類の Excel は持ち越さない
+    patternId = id;
+    sections.open("build");
+    buildBody.innerHTML = '<p class="muted">読み込んでいます…</p>';
+    try {
+      apply(await get("/form-types/" + id + "/panel"), { scroll: true });
+    } catch (e) {
+      buildBody.textContent = "";
+      toast(e.message, "err");
+    }
+  }
+
+  // ---- この帳票の Excel を置く（登録済みの種類を開き直したとき・別の書き方の帳票に替えるとき） ----
+  page.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-book-form]");
+    if (!form) return;
+    event.preventDefault();
+    const input = form.querySelector("input[type=file]");
+    if (!input || !input.files || !input.files.length) { toast("この帳票のExcelを置いてください", "err"); return; }
+    bookFile = input.files[0];
+    const data = new FormData();
+    data.append("book", bookFile, bookFile.name);
+    try { apply(await postForm(form.dataset.bookForm, data), { scroll: true }); }
+    catch (e) { bookFile = null; toast(e.message, "err"); }
+  });
+
+  // 選んだらそのまま読み込む（ボタンを押さなくてよい）
+  page.addEventListener("change", (event) => {
+    const input = event.target.closest("[data-book-form] input[type=file]");
+    if (input && input.files && input.files.length && input.form) input.form.requestSubmit();
+  });
+
+  // ---- 読み取る項目の見出しを直す（入力欄から離れる／Enter で保存、Escape で戻す） ----
+  // 直るのは Markdown に書く名前だけ。探す見出しと読み取るセルはクリックしたときのまま
+  page.addEventListener("keydown", (event) => {
+    const input = event.target.closest("[data-field-label]");
+    if (!input) return;
+    if (event.key === "Enter" || event.key === "Escape") {
+      event.preventDefault();
+      if (event.key === "Escape") input.value = input.dataset.saved || "";
+      input.blur();
+    }
+  });
+
+  page.addEventListener("focusout", async (event) => {
+    const input = event.target.closest("[data-field-label]");
+    if (!input) return;
+    const was = input.dataset.saved || "";
+    const value = input.value.trim();
+    if (!value || value === was) { input.value = was; return; }
+    const data = new FormData();
+    data.append("name", value);
+    try { apply(await postForm(input.dataset.fieldLabel, withBook(data))); }
+    catch (e) { input.value = was; toast(e.message, "err"); }
+  });
+
+  // ---- 名前を直す（入力欄から離れたら保存） ----
+  page.addEventListener("focusout", async (event) => {
+    const input = event.target.closest("[data-rename]");
+    if (!input) return;
+    const value = input.value.trim();
+    if (!value || value === input.dataset.saved) return;
+    try {
+      const res = await postJson(input.dataset.rename, { name: value });
+      input.dataset.saved = value;
+      if (buildName) buildName.textContent = value;
+      if (res.list_html !== undefined && listBody) listBody.innerHTML = res.list_html;
+    } catch (e) { toast(e.message, "err"); }
+  });
+
+  // ---- セルをクリックして項目を作る ----
+  let pending = null;   // {sheet, cell}
+
+  function bindBuilder() {
+    const root = buildBody.querySelector("#cellBuilder");
+    if (!root) return;
+    pending = null;
+    const hint = root.querySelector("[data-click-hint]");
+    const actions = root.querySelector("[data-click-actions]");
+    const tabs = Array.from(root.querySelectorAll("[data-sheet-tab]"));
+    const panes = Array.from(root.querySelectorAll(".sheet-grid"));
+
+    const clearHighlight = () => root.querySelectorAll("td.hl-label, td.hl-value")
+      .forEach((td) => td.classList.remove("hl-label", "hl-value"));
+
+    function reset() {
+      pending = null;
+      clearHighlight();
+      if (actions) actions.hidden = true;
+      if (hint) hint.textContent = "見出しのセルをクリックしてください。";
+    }
+
+    async function addField(sheet, labelCell, valueCell) {
+      const data = new FormData();
+      data.append("sheet", sheet);
+      data.append("label_cell", labelCell);
+      data.append("value_cell", valueCell || "");
+      if (hint) hint.textContent = "項目を作っています…";
+      try { apply(await postForm(root.dataset.addUrl, withBook(data))); }
+      catch (e) { toast(e.message, "err"); reset(); }
+    }
+
+    tabs.forEach((tab, i) => tab.addEventListener("click", () => {
+      tabs.forEach((t, j) => t.setAttribute("aria-selected", String(i === j)));
+      panes.forEach((p, j) => { p.hidden = i !== j; });
+      reset();
+    }));
+
+    root.addEventListener("click", (event) => {
+      if (event.target.closest("[data-click-cancel]")) { reset(); return; }
+      if (event.target.closest("[data-click-empty]")) {
+        if (pending) addField(pending.sheet, pending.cell, "");
+        return;
+      }
+      const td = event.target.closest("td[data-cell]");
+      if (!td) return;
+      const pane = td.closest(".sheet-grid");
+      if (!pane) return;
+      const sheet = pane.dataset.sheet;
+      const cell = td.dataset.cell;
+      if (!pending) {
+        if (td.dataset.tableHead) { addField(sheet, cell, ""); return; }  // 表は1回のクリックで項目にする
+        if (!td.textContent.trim()) return;
+        pending = { sheet: sheet, cell: cell };
+        clearHighlight();
+        td.classList.add("hl-label");
+        if (actions) actions.hidden = false;
+        if (hint) hint.textContent = "「" + td.textContent.trim().slice(0, 20) +
+          "」の値のセルをクリックしてください（同じセルに値も入っているときは、もう一度このセルを）。";
+        return;
+      }
+      if (pending.sheet !== sheet) { reset(); return; }
+      td.classList.add("hl-value");
+      addField(pending.sheet, pending.cell, cell);
+    });
+
+    // 項目の行を押すと、そのセルを光らせる
+    root.querySelectorAll("tr[data-field]").forEach((tr) => {
+      tr.addEventListener("click", (event) => {
+        if (event.target.closest("button")) return;
+        if (pending) return;
+        clearHighlight();
+        const pane = root.querySelector('.sheet-grid[data-sheet="' + (tr.dataset.sheet || "") + '"]');
+        if (!pane) return;
+        const i = panes.indexOf(pane);
+        if (i >= 0 && tabs.length) tabs[i].click();
+        [["labelCell", "hl-label"], ["valueCell", "hl-value"]].forEach((pair) => {
+          const coord = (tr.dataset[pair[0]] || "").split(":")[0];
+          const cell = coord && pane.querySelector('td[data-cell="' + coord + '"]');
+          if (cell) cell.classList.add(pair[1]);
+        });
+      });
+    });
+  }
+})();
+
+
+// ==== tables: 表の取り込み（/tables。旧 tables.js） ====
+// 表の取り込み（/tables）: 1画面で全部やる（利用者の指示 2026-09-20）。
+// 画面は移らない。段（.step）の中身はサーバが HTML の断片で返し、保存・実行は JSON でやりとりする。
+// 段: file → source → layout → columns → ai → preview → done
+(() => {
+  "use strict";
+  const page = document.querySelector("[data-tables-page]");
+  if (!page) return;
+  const { toast } = window.App;
+  const sections = window.ragSections;
+  const rf = window.ragFetch;
+  const JOB_FINISHED = ["done", "failed", "cancelled", "interrupted"];
+
+  let urls = null;                 // サーバが返す各 URL（取り込みごと）
+  let importId = null;             // いま画面で作業している取り込みの番号（捨てるときに使う）
+  const pollers = {};              // 段ごとの進捗の見張り
+  const notes = {};                // 段ごとの要約（見出しに出す）
+
+  // ダウンロードしないまま画面を離れたら、この取り込みは捨てる（利用者の指示 2026-09-20）。
+  // 番号はサーバが返す URL から取る（res.import_id があればそれを使う）。
+  const idFrom = (url) => {
+    const hit = /\/imports\/(\d+)\//.exec(url || "");
+    return hit ? Number(hit[1]) : null;
+  };
+  const guard = (window.ragDiscard || { watch: () => ({ now: async () => {} }) })
+    .watch(page.dataset.discardUrl || "/tables/discard", () => ({ import_ids: importId ? [importId] : [] }));
+
+  const el = (tag, attrs = {}, ...children) => {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (k === "class") node.className = v;
+      else if (k === "text") node.textContent = v;
+      else if (v !== null && v !== undefined) node.setAttribute(k, v);
+    }
+    for (const child of children) {
+      if (child == null) continue;
+      node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    }
+    return node;
+  };
+
+  const panelUrl = (name) => urls.panel.replace(/NAME$/, name);
+  const body = (name) => sections.body(name);
+
+  // data-confirm の付いたボタンは app.js が先に確認ダイアログを出す。確認前のクリックでは何もしない
+  const confirmed = (node) => !node.dataset.confirm || node.dataset.confirmed === "1";
+
+  const stopPoller = (name) => {
+    if (pollers[name]) {
+      pollers[name].stop();
+      delete pollers[name];
+    }
+  };
+
+  // ---- 進み具合（同じ画面の中に出す） ----------------------------------------------------
+  function poll(url, onUpdate) {
+    let stopped = false;
+    let wait = 1000;
+    let timer = null;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const job = await rf(url, { quiet: true });
+        wait = 1200;
+        onUpdate(job);
+        if (JOB_FINISHED.includes(job.status)) return;
+      } catch (e) {
+        if (e.status === 404) {
+          // 取り込みごと無くなった（ダウンロードした・自分で消した・画面を離れて捨てた）。
+          // 失敗ではないので何も言わず止め、画面を最初の状態に戻す
+          stopped = true;
+          clearTimeout(timer);
+          window.location.reload();
+          return;
+        }
+        wait = Math.min(wait * 2, 8000);   // 通信エラーは間隔を広げて続ける
+      }
+      if (!stopped) timer = setTimeout(tick, wait);
+    };
+    tick();
+    return { stop() { stopped = true; clearTimeout(timer); } };
+  }
+
+  const JOB_TITLES = { table_read: "表を読み込んでいます", table_preview: "Markdownの下書きを作っています",
+                       table_render: "Markdownを作っています", ai_format: "AI整形を実行しています" };
+
+  /** 段の中に進み具合を出し、終わったら done(job) を呼ぶ。 */
+  function runJob(name, job, onFinish) {
+    stopPoller(name);
+    const target = body(name);
+    const bar = el("div", { class: "progress-bar" });
+    const count = el("span", {});
+    const message = el("span", { class: "muted" });
+    const cancel = el("button", { type: "button", class: "btn danger-outline small", text: "中止" });
+    cancel.addEventListener("click", async () => {
+      cancel.disabled = true;
+      try {
+        const res = await rf(urls.cancel, { json: {} });
+        toast(res.message || "処理を中止しました");
+      } catch (e) {
+        cancel.disabled = false;
+      }
+    });
+    const box = el("div", { class: "progress-box" },
+      el("div", { class: "progress-head" },
+        el("span", { class: "progress-label", text: JOB_TITLES[job.kind] || "処理しています" }),
+        el("span", { class: "progress-state" })),
+      el("div", { class: "progress", role: "progressbar", "aria-label": "進み具合" }, bar),
+      el("p", { class: "progress-text" }, count, " ", message),
+      el("p", { class: "hint", text: "この画面のままお待ちください（大きなファイルは数十秒かかることがあります）。" }),
+      el("div", { class: "btn-row" }, cancel));
+    target.replaceChildren(box);
+    sections.open(name, { scroll: false });
+
+    const update = (j) => {
+      const p = j.progress || {};
+      const done = Number(p.done || 0);
+      const total = Number(p.total || 0);
+      bar.style.width = `${total ? Math.floor((done * 100) / total) : 0}%`;
+      bar.classList.toggle("indeterminate", !total && j.status === "running");
+      count.textContent = total ? `${done} / ${total}件` : "";
+      message.textContent = j.message || "";
+    };
+    update(job);
+    pollers[name] = poll(job.url, (j) => {
+      update(j);
+      if (JOB_FINISHED.includes(j.status)) {
+        stopPoller(name);
+        onFinish(j);
+      }
+    });
+  }
+
+  // ---- 段の中身を取りに行く -------------------------------------------------------------
+  function setNote(name, text) {
+    notes[name] = text || "";
+    const label = sections.el(name)?.querySelector("[data-step-summary]");
+    if (label) {
+      label.textContent = notes[name];
+      label.title = notes[name];
+    }
+  }
+
+  function lock(name, data) {
+    const section = sections.el(name);
+    if (!section) return;
+    stopPoller(name);
+    setNote(name, data.locked || "");
+    if (data.failed) {
+      // 読み込みに失敗したときは、やり直せるように開いたままにする
+      const box = body(name);
+      box.replaceChildren(
+        el("div", { class: "flash flash-error", role: "alert", text: data.locked || "" }),
+        el("div", { class: "form-actions" },
+          el("button", { type: "button", class: "btn primary", "data-reread": "" , text: "もう一度読み込む" })));
+      section.classList.remove("is-done");
+      sections.open(name, { scroll: false });
+      return;
+    }
+    section.classList.remove("is-open", "is-done");
+    body(name).replaceChildren();
+  }
+
+  async function loadPanel(name, { open = true, scroll = true, query = "" } = {}) {
+    const target = body(name);
+    if (!target || !urls) return null;
+    stopPoller(name);
+    target.replaceChildren(el("p", { class: "muted", text: "読み込んでいます…" }));
+    if (open) sections.open(name, { scroll });
+    let data;
+    try {
+      data = await rf(panelUrl(name) + query, { quiet: true });
+    } catch (e) {
+      target.replaceChildren(el("div", { class: "flash flash-error", role: "alert", text: e.message }));
+      return null;
+    }
+    if (data.locked) {
+      lock(name, data);
+      return data;
+    }
+    if (data.job && !data.job.finished) {
+      setNote(name, "");
+      runJob(name, data.job, () => loadPanel(name, { open, scroll: false }));
+      return data;
+    }
+    target.innerHTML = data.html || "";
+    setNote(name, data.note || "");
+    afterRender(name, target);
+    if (open) sections.open(name, { scroll });
+    return data;
+  }
+
+  function clearStep(name) {
+    stopPoller(name);
+    const section = sections.el(name);
+    if (!section) return;
+    section.classList.remove("is-open", "is-done");
+    setNote(name, "");
+    body(name).replaceChildren();
+  }
+
+  // 段の並び。飛ばした段にも「まだできない理由」を出すために使う
+  const STEP_ORDER = ["file", "source", "layout", "columns", "ai", "preview", "done"];
+
+  /** 読み込み・確定などのジョブを始めたあとの共通処理。進み具合は次の段の中に出す。 */
+  function afterAction(res) {
+    (res.reset || []).forEach(clearStep);
+    const next = res.next;
+    if (!next) return;
+    // 飛ばした段（例: 経過の記録の列が無いときの AI整形）は開かずに取りに行く。
+    // 取りに行かないと灰色のまま何も書かれず、なぜ使えないのかが分からない
+    const skipped = (res.reset || [])
+      .filter((name) => name !== next && STEP_ORDER.indexOf(name) < STEP_ORDER.indexOf(next));
+    const loadSkipped = () => skipped.forEach((name) => loadPanel(name, { open: false, scroll: false }));
+    if (res.job && !res.job.finished) {
+      // 処理が終わってから取りに行く（動いている間は、どの段も同じジョブの進み具合を映してしまう）
+      runJob(next, res.job, () => { loadSkipped(); loadPanel(next, { open: true, scroll: false }); });
+      return;
+    }
+    loadSkipped();
+    loadPanel(next);
+  }
+
+  // ---- 段ごとの後始末（断片を入れたあとの初期化） ------------------------------------------
+  function afterRender(name, target) {
+    if (name === "preview") {
+      const file = target.querySelector("[data-file-open]");
+      if (file) file.click();
+    }
+    if (name === "ai") {
+      // AI整形のジョブの進み具合（断片の中の progress-box は自分で動かす）
+      target.querySelectorAll(".progress-box[data-job-url]").forEach((box) => {
+        window.App.bindProgressBox(box);
+        let last = box.dataset.jobStatus;
+        box.addEventListener("job:update", (event) => {
+          const status = event.detail.status;
+          const paused = (s) => s === "paused";
+          // 実行中⇔一時停止が変わったら段を出し直す（ボタンを［再開］／［一時停止］に合わせる）
+          if (last && status && paused(last) !== paused(status) && ["running", "paused"].includes(status)) {
+            loadPanel("ai", { open: true, scroll: false });
+            return;
+          }
+          last = status || last;
+          const p = event.detail.progress || {};
+          const detail = target.querySelector("[data-ai-detail]");
+          if (detail) {
+            const rest = !p.remaining_sec ? "" : p.remaining_sec < 60 ? "／残り1分未満" : `／残り約${Math.ceil(p.remaining_sec / 60)}分`;
+            detail.textContent = `OK ${p.ok || 0}／要確認 ${p.flagged || 0}／エラー ${p.error || 0}／ルールのみ ${p.rule_only || 0}${rest}`;
+          }
+        });
+        box.addEventListener("job:finished", () => loadPanel("ai", { open: true, scroll: false }), { once: true });
+      });
+    }
+  }
+
+  // ---- 1 ファイルを置く ---------------------------------------------------------------
+  const uploadForm = page.querySelector("[data-upload-form]");
+  // 置いた（またはクリックで選んだ）時点でそのまま読み取る。ボタンは押さなくてよい
+  uploadForm?.querySelector("input[type=file]")?.addEventListener("change", (event) => {
+    if (event.target.files && event.target.files.length) uploadForm.requestSubmit();
+  });
+  uploadForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = uploadForm.querySelector("[data-upload-run]");
+    const input = uploadForm.querySelector("input[type=file]");
+    if (!input?.files?.length) {
+      toast("ファイルを選んでください。", "err");
+      return;
+    }
+    if (button) button.disabled = true;
+    sections.working("file", "ファイルを読み取っています…");
+    try {
+      // 新しいファイルを置いたら、前の取り込み（ダウンロードしていない分）はその場で捨てる
+      if (importId) { await guard.now(); importId = null; urls = null; }
+      const res = await rf(page.dataset.uploadUrl, { form: new FormData(uploadForm), quiet: true });
+      urls = res.urls;
+      importId = Number(res.import_id) || idFrom(urls && urls.panel);
+      sections.done("file", res.file_name);
+      await loadPanel("layout", { open: true, scroll: false });
+      await loadPanel("source", { open: true });
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      if (button) button.disabled = false;
+      sections.working("file", "");
+    }
+  });
+
+  page.querySelector("[data-restart]")?.addEventListener("click", async () => {
+    // 別のファイルにするときも、いまの取り込み（ダウンロードしていない分）はその場で捨てる
+    await guard.now();
+    importId = null;
+    window.location.href = page.dataset.newUrl;
+  });
+
+  // ---- 共通のクリック -------------------------------------------------------------------
+  page.addEventListener("click", async (event) => {
+    const hit = (selector) => event.target.closest(selector);
+
+    // この取り込みを削除
+    const delImport = hit("[data-import-delete]");
+    if (delImport) {
+      if (!confirmed(delImport)) return;
+      try {
+        const res = await rf(urls.delete, { json: {}, quiet: true });
+        importId = null;                      // もう消えているので、画面を離れるときに捨てるものは無い
+        toast(res.message || "削除しました");
+        window.location.href = page.dataset.newUrl;
+      } catch (e) {
+        toast(e.message, "err");
+      }
+      return;
+    }
+
+    // もう一度読み込む
+    const reread = hit("[data-reread]");
+    if (reread) {
+      reread.disabled = true;
+      try {
+        afterAction(await rf(urls.read, { json: {}, quiet: true }));
+      } catch (e) {
+        toast(e.message, "err");
+        reread.disabled = false;
+      }
+      return;
+    }
+
+    // 表の範囲: 行番号をクリックして見出し行・データの終わりを指定
+    const rownum = hit("[data-layout-page] th.rownum");
+    if (rownum) {
+      pickRow(rownum, event.shiftKey);
+      return;
+    }
+
+    // 表の範囲: この範囲で読み込む
+    const layoutSubmit = hit("[data-layout-submit]");
+    if (layoutSubmit) {
+      const root = layoutSubmit.closest("[data-layout-page]");
+      layoutSubmit.disabled = true;
+      try {
+        const res = await rf(urls.layout, {
+          json: { header_rows: root.querySelector("[data-header-input]").value,
+                  data_end_row: root.querySelector("[data-end-input]").value },
+          quiet: true });
+        sections.done("source", notes.source);
+        sections.done("layout", notes.layout);
+        afterAction(res);
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        layoutSubmit.disabled = false;
+      }
+      return;
+    }
+
+    // 列の対応づけ: ［変更する］で要約をたたんで表を出す
+    const openTable = hit("[data-columns-open]");
+    if (openTable) {
+      openColumnsTable(openTable.closest("[data-columns-editor]"));
+      return;
+    }
+
+    // 列の対応づけ: 保存して読み込む
+    const save = hit("[data-editor-save]");
+    if (save) {
+      await saveColumns(save);
+      return;
+    }
+
+    // 内容の確認: ファイルの中身、ページ送り、確定
+    const fileOpen = hit("[data-file-open]");
+    if (fileOpen) {
+      await showFile(fileOpen);
+      return;
+    }
+    const rowsPage = hit("[data-rows-page]");
+    if (rowsPage) {
+      await loadPanel("preview", { open: true, scroll: false, query: `?page=${rowsPage.dataset.rowsPage}` });
+      return;
+    }
+    const previewRetry = hit("[data-preview-retry]");
+    if (previewRetry) {
+      previewRetry.disabled = true;
+      try {
+        const res = await rf(urls.preview_start, { json: {}, quiet: true });
+        runJob("preview", res.job, () => loadPanel("preview", { open: true, scroll: false }));
+      } catch (e) {
+        toast(e.message, "err");
+        previewRetry.disabled = false;
+      }
+      return;
+    }
+    const confirmRun = hit("[data-confirm-run]");
+    if (confirmRun) {
+      if (!confirmed(confirmRun)) return;
+      confirmRun.disabled = true;
+      try {
+        const res = await rf(urls.confirm, { json: {}, quiet: true });
+        sections.done("preview", notes.preview);
+        runJob("done", res.job, () => loadPanel("done", { open: true }));
+      } catch (e) {
+        toast(e.message, "err");
+        confirmRun.disabled = false;
+      }
+      return;
+    }
+
+    // ダウンロード（押すとこの取り込みのデータは消える。design.md 3.3）
+    const download = hit("[data-done-page] a[href$='download.zip']");
+    if (download) {
+      if (!confirmed(download)) return;
+      // 渡した時点でサーバ側は消える（purge_after_send）ので、画面を離れるときに捨てるものはもう無い
+      importId = null;
+      setTimeout(() => {
+        body("done").replaceChildren(
+          el("p", { text: "ダウンロードしました。この取り込みのデータ（元のファイル・読み込んだ内容・作った Markdown）は"
+                          + "サーバーから消えています。" }),
+          el("p", { class: "hint", text: "zip を開いて、中の .md を LightRAG の画面にドラッグしてください。" }),
+          el("div", { class: "form-actions" },
+            el("button", { type: "button", class: "btn primary", "data-restart-done": "", text: "別の表を取り込む" })));
+        setNote("done", "ダウンロード済み");
+      }, 4000);
+      return;
+    }
+    if (hit("[data-restart-done]")) {
+      window.location.href = page.dataset.newUrl;
+      return;
+    }
+
+    // AI整形へ / 内容の確認へ
+    if (hit("[data-ai-next]")) {
+      sections.done("ai", notes.ai);
+      await loadPanel("preview");
+    }
+  });
+
+  // ---- 2 読み取り方（変えるたびに保存し、下の段をやり直す） ---------------------------------
+  async function saveSource() {
+    const form = page.querySelector("[data-source-form]");
+    if (!form) return;
+    const data = {};
+    form.querySelectorAll("[data-source-field]").forEach((input) => {
+      if (input.type === "radio") {
+        if (input.checked) data[input.name] = input.value;
+      } else if (input.type === "checkbox") {
+        data[input.name] = input.checked;
+      } else {
+        data[input.name] = input.value;
+      }
+    });
+    sections.working("source", "読み取り方を保存しています…");
+    try {
+      const res = await rf(urls.source, { json: data, quiet: true });
+      if (res.note) setNote("source", res.note);
+      // 「表の範囲」はこのあとすぐ読み込み直すので、ここでは消さない
+      (res.reset || []).forEach((name) => { if (name !== "layout") clearStep(name); });
+      await loadPanel("layout", { open: true, scroll: false });
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      sections.working("source", "");
+    }
+  }
+
+  page.addEventListener("change", (event) => {
+    if (event.target.closest("[data-source-field]")) {
+      saveSource();
+      return;
+    }
+    const editorRow = event.target.closest("[data-columns-editor] tr[data-col]");
+    if (editorRow) onEditorChange(editorRow, event.target);
+  });
+
+  // ---- 3 表の範囲 ---------------------------------------------------------------------
+  const KINDS = ["header", "data", "subtotal", "note", "continuation", "excluded", "title", "blank"];
+  let detectTimer = null;
+  let detectSeq = 0;
+
+  // 行番号の読み方はサーバー（views/tables.py の _int_list・_row_no）と同じ: 全角は半角にそろえ、
+  // 数字だけ・「3-4」（10行まで）だけを読む。それ以外（「3a」など）は読まない
+  const parseEnd = (text) => {
+    const x = String(text ?? "").normalize("NFKC").trim();
+    return /^[0-9]+$/.test(x) && Number(x) > 0 ? Number(x) : null;
+  };
+  const parseRows = (text) => {
+    const out = new Set();
+    String(text || "").normalize("NFKC").split(/[,、\s]+/).forEach((x) => {
+      const m = /^([0-9]+)-([0-9]+)$/.exec(x);
+      if (m) {
+        const a = Number(m[1]);
+        const b = Number(m[2]);
+        if (a > 0 && a <= b && b - a < 10) for (let n = a; n <= b; n += 1) out.add(n);
+        return;
+      }
+      const n = parseEnd(x);
+      if (n) out.add(n);
+    });
+    return [...out].sort((a, b) => a - b);
+  };
+
+  function applyLayout(root, info) {
+    root.querySelectorAll("tr[data-row]").forEach((tr) => {
+      const rc = info.rows[tr.dataset.row];
+      KINDS.forEach((k) => tr.classList.remove(`row-${k}`));
+      if (rc) {
+        tr.classList.add(`row-${rc.kind}`);
+        tr.title = rc.reason || "";
+      } else {
+        tr.classList.add("row-blank");
+        tr.title = "";
+      }
+      tr.classList.toggle("is-picked",
+        info.header_rows.includes(Number(tr.dataset.row)) || Number(tr.dataset.row) === info.data_end);
+    });
+    root.querySelector("[data-kind]").textContent = info.table_kind_label;
+    // 見出し行が見つからないと data_end < data_start になる（存在しない行番号を出さない）
+    const range = info.data_end < info.data_start ? "データの行が見つかりません" : `${info.data_start}〜${info.data_end}行目`;
+    root.querySelector("[data-range]").textContent = range;
+    root.querySelector("[data-counts]").textContent =
+      Object.entries(info.counts).map(([k, v]) => `${k} ${v}行`).join("／");
+    root.querySelector("[data-headers]").textContent = info.headers.join("、");
+    const warnings = root.querySelector("[data-warnings]");
+    warnings.replaceChildren(...info.warnings.map((w) => el("li", { text: w })));
+    const crosstab = info.table_kind === "crosstab";
+    root.querySelector("[data-crosstab]").hidden = !crosstab;
+    root.querySelector("[data-layout-submit]").disabled = crosstab;
+    const headerInput = root.querySelector("[data-header-input]");
+    if (!headerInput.value.trim()) headerInput.value = info.header_rows.join(",");
+    root.querySelector("[data-end-input]").placeholder = `自動（${info.data_end}行目）`;
+    setNote("layout", range);
+  }
+
+  function detectLayout() {
+    const root = page.querySelector("[data-layout-page]");
+    if (!root) return;
+    clearTimeout(detectTimer);
+    detectTimer = setTimeout(async () => {
+      const mine = ++detectSeq;
+      root.setAttribute("aria-busy", "true");
+      // 大きい表は判定に数秒かかる。古い表示のままだと「効いていない」ように見えるので、その場に出す
+      const rangeEl = root.querySelector("[data-range]");
+      if (rangeEl) rangeEl.textContent = "判定しています…";
+      try {
+        const info = await rf(urls.detect, {
+          json: { header_rows: parseRows(root.querySelector("[data-header-input]").value),
+                  data_end: parseEnd(root.querySelector("[data-end-input]").value) },
+          quiet: true });
+        if (mine === detectSeq) applyLayout(root, info);
+      } catch (e) {
+        if (rangeEl) rangeEl.textContent = "判定できませんでした";
+        toast(e.message, "err");
+      } finally {
+        root.removeAttribute("aria-busy");
+      }
+    }, 250);
+  }
+
+  function pickRow(th, shift) {
+    const root = th.closest("[data-layout-page]");
+    const n = Number(th.parentElement.dataset.row);
+    const headerInput = root.querySelector("[data-header-input]");
+    // 行番号のクリックは見出し行の指定（Shift で2段）。データの終わりは入力欄で決める
+    if (shift) {
+      const all = [...new Set([...parseRows(headerInput.value), n])].sort((a, b) => a - b);
+      headerInput.value = [all[0], all[all.length - 1]].filter((v, i, a) => a.indexOf(v) === i).join(",");
+    } else {
+      headerInput.value = String(n);
+    }
+    detectLayout();
+  }
+
+  page.addEventListener("input", (event) => {
+    if (event.target.closest("[data-header-input], [data-end-input]")) detectLayout();
+  });
+
+  // ---- 4 列の対応づけ -------------------------------------------------------------------
+  // ［変更する］: 要約を隠して表を出す。表は要約のときも DOM にあるので、保存で送る中身は変わらない
+  function openColumnsTable(editor) {
+    if (!editor) return;
+    const summary = editor.querySelector("[data-columns-summary]");
+    const table = editor.querySelector("[data-columns-table]");
+    if (summary) summary.hidden = true;
+    if (table) table.hidden = false;
+  }
+
+  function onEditorChange(tr, input) {
+    const editor = tr.closest("[data-columns-editor]");
+    const field = input.dataset.field;
+    if (field === "use") tr.classList.toggle("is-unused", !input.checked);
+    // 経過の記録（log）は1列だけ。ほかの行が選んでいたら「その他」に戻し、この行は「使う」にする
+    if (field === "role" && input.value === "log") {
+      editor.querySelectorAll("tr[data-col]").forEach((other) => {
+        if (other === tr) return;
+        const role = other.querySelector("[data-field=role]");
+        if (role && role.value === "log") role.value = "attribute";
+      });
+      tr.querySelector("[data-field=use]").checked = true;
+      tr.classList.remove("is-unused");
+    }
+  }
+
+  async function saveColumns(button) {
+    const editor = page.querySelector("[data-columns-editor]");
+    if (!editor) return;
+    const errors = editor.querySelector("[data-editor-errors]");
+    const name = editor.querySelector("[data-setting=name]")?.value || "";
+    // 送るのは「使う・役割」だけ。キー・型・単位・出し方はサーバーが見出しと値から決める
+    const columns = [...editor.querySelectorAll("tr[data-col]")].map((tr) => ({
+      index: Number(tr.dataset.index),
+      use: tr.querySelector("[data-field=use]").checked,
+      role: tr.querySelector("[data-field=role]").value,
+    }));
+    button.disabled = true;
+    errors.replaceChildren();
+    try {
+      const res = await rf(editor.dataset.saveUrl, { json: { name, columns }, quiet: true });
+      setNote("columns", name);
+      sections.done("columns", name);
+      afterAction(res);
+    } catch (e) {
+      // 問題が複数あれば全部並べる（1件だけ直して保存し直す、を繰り返さずに済む）
+      const messages = e.errors && e.errors.length ? e.errors : [e.message];
+      errors.replaceChildren(...messages.map((m) => el("li", { text: m })));
+      toast(messages.length > 1 ? `${messages.length}件の問題があります` : messages[0], "err");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  // ---- 5 AI整形 -----------------------------------------------------------------------
+  const trials = [];
+
+  const segmentList = (data) => {
+    const list = el("ol", { class: "seg-list" });
+    data.segments.forEach((s) => {
+      const meta = el("div", { class: "seg-meta" },
+        el("strong", { text: s.id }),
+        el("span", { class: s.when_estimated ? "est" : "", text: `日付: ${s.when}` }),
+        el("span", { class: s.author_estimated ? "est" : "", text: `記入者: ${s.author || "なし"}` }),
+        s.marks.length ? el("span", { class: "muted", text: `印: ${s.marks.join("・")}` }) : null,
+        s.identifiers.length ? el("span", { class: "muted", text: `識別子: ${s.identifiers.join("、")}` }) : null);
+      list.append(el("li", {}, meta, el("div", { class: "pre", text: s.body })));
+    });
+    return list;
+  };
+
+  const trialCard = (res) => {
+    const labels = { ok: "OK", flagged: "要確認", error: "エラー", rule_only: "ルールのみ", skipped: "対象外" };
+    const card = el("div", { class: "trial-card" },
+      el("div", { class: "seg-meta" }, el("strong", { text: res.row_key }),
+        el("span", { text: labels[res.status] || res.status || "" }),
+        res.reason ? el("span", { class: "muted", text: res.reason }) : null,
+        res.cached ? el("span", { class: "muted", text: "（保存済みの応答を使用）" }) : null));
+    if (res.error) card.append(el("p", { class: "warn", text: res.error }));
+    if (res.points.length) card.append(el("p", { text: "抜き出した項目:" }), el("pre", { class: "md-view", text: res.points.join("\n") }));
+    if (res.issues.length) card.append(el("ul", { class: "list-plain warn" }, ...res.issues.map((m) => el("li", { text: m }))));
+    card.append(el("details", {}, el("summary", { text: "Markdown のプレビュー" }), el("pre", { class: "md-view", text: res.markdown })));
+    return card;
+  };
+
+  const runOptions = (root) => ({
+    scope: root.querySelector("[data-run-scope]")?.value || "pending",
+    concurrency: Number(root.querySelector("[data-run-concurrency]")?.value || 1),
+  });
+
+  page.addEventListener("click", async (event) => {
+    const root = page.querySelector("[data-ai-page]");
+    if (!root) return;
+    const hit = (selector) => event.target.closest(selector);
+
+    if (hit("[data-split-run]")) {
+      const box = root.querySelector("[data-split-result]");
+      const rowKey = root.querySelector("[data-split-row]").value;
+      box.textContent = "分割しています…";
+      try {
+        const data = await rf(root.dataset.splitUrl, { json: { row_key: rowKey }, quiet: true });
+        // AI接続が未設定のときは「送る」だけだと今この操作で送ったように読めるので、送られないことを書く
+        const routeText = data.route === "ai"
+          ? (data.ai_ready === false ? "送る（AI接続の設定後。今は送っていません）" : "送る")
+          : `送らない（${data.reason}）`;
+        const parts = [
+          el("p", { class: "hint", text: `区切り ${data.segments.length}件（オレンジは推定）。AIに送るか: ${routeText}` }),
+          segmentList(data),
+        ];
+        if (data.notes.length) parts.push(el("ul", { class: "list-plain warn" }, ...data.notes.map((n) => el("li", { text: n }))));
+        parts.push(el("h4", { text: "Markdown での時系列" }), el("pre", { class: "md-view", text: data.timeline.join("\n") }));
+        if (data.sent_text) {
+          parts.push(el("details", {}, el("summary", { text: "送信内容を表示" }), el("pre", { class: "md-view", text: data.sent_text })));
+        }
+        box.replaceChildren(...parts);
+      } catch (e) {
+        box.textContent = "";
+        toast(e.message, "err");
+      }
+      return;
+    }
+
+    const trialRun = hit("[data-trial-run]");
+    if (trialRun) {
+      const external = root.querySelector("[data-trial-external]");
+      if (external && !external.checked) {
+        toast("外部に送信されることを確認して、チェックを入れてください。", "err");
+        return;
+      }
+      const keys = JSON.parse(root.dataset.trialKeys || "[]");
+      const status = root.querySelector("[data-trial-status]");
+      const result = root.querySelector("[data-trial-result]");
+      trialRun.disabled = true;
+      result.replaceChildren();
+      trials.length = 0;
+      for (let i = 0; i < keys.length; i += 1) {
+        status.textContent = `${i + 1} / ${keys.length}行目を処理しています…`;
+        try {
+          const res = await rf(root.dataset.trialUrl,
+            { json: { row_key: keys[i], confirm_external: Boolean(external?.checked) }, quiet: true });
+          trials.push(...(res.stats || []));
+          result.append(trialCard(res));
+        } catch (e) {
+          toast(e.message, "err");
+          status.textContent = `止まりました: ${e.message}`;
+          trialRun.disabled = false;
+          return;
+        }
+      }
+      status.textContent = `${keys.length}行の試し実行が終わりました。`;
+      trialRun.disabled = false;
+      return;
+    }
+
+    const estimateRun = hit("[data-estimate-run]");
+    if (estimateRun) {
+      const out = root.querySelector("[data-estimate]");
+      estimateRun.disabled = true;
+      out.textContent = "見積もっています…";
+      try {
+        const r = await rf(root.dataset.estimateUrl, { json: { ...runOptions(root), trials }, quiet: true });
+        out.textContent = `AIに送る行 ${r.ai_rows}件（呼び出し ${r.calls}回、保存済み ${r.cached}件、ルールのみ ${r.rule_only_rows}件）`
+          + `／入力 約${r.tokens_in}トークン・出力 約${r.tokens_out}トークン／${r.duration_text || `約${Math.ceil(r.minutes || 0)}分`}`
+          + (r.basis === "trial" ? "（試し実行の実測から）" : "（目安）");
+      } catch (e) {
+        out.textContent = "";
+        toast(e.message, "err");
+      } finally {
+        estimateRun.disabled = false;
+      }
+      return;
+    }
+
+    const aiRun = hit("[data-ai-run]");
+    if (aiRun) {
+      const external = root.querySelector("[data-run-external]");
+      if (external && !external.checked) {
+        toast("外部に送信されることを確認して、チェックを入れてください。", "err");
+        return;
+      }
+      aiRun.disabled = true;
+      try {
+        await rf(root.dataset.runUrl, { json: { ...runOptions(root), confirm_external: Boolean(external?.checked) }, quiet: true });
+        await loadPanel("ai", { open: true, scroll: false });
+      } catch (e) {
+        toast(e.message, "err");
+        aiRun.disabled = false;
+      }
+      return;
+    }
+
+    const control = hit("[data-ai-control]");
+    if (control) {
+      if (!confirmed(control)) return;
+      const action = control.dataset.aiControl;
+      control.disabled = true;
+      try {
+        await rf(root.dataset[`${action}Url`], { json: {}, quiet: true });
+      } catch (e) {
+        toast(e.message, "err");
+      }
+      await loadPanel("ai", { open: true, scroll: false });
+      return;
+    }
+
+    // AI接続（この段の中）
+    const panel = hit("[data-ai-connection]");
+    if (!panel) return;
+    if (hit("[data-ai-test]")) {
+      const button = hit("[data-ai-test]");
+      const list = panel.querySelector("[data-ai-test-result]");
+      button.disabled = true;
+      button.textContent = "テスト中…";
+      list.hidden = true;
+      try {
+        const result = await rf(panel.dataset.testUrl, { json: {}, quiet: true });
+        list.replaceChildren(...result.steps.map((step) => el("li", {},
+          el("div", { class: "item-main" },
+            el("span", { class: "item-title", text: `${step.ok ? "OK" : "NG"}　${step.name}` }),
+            el("span", { class: step.ok ? "muted" : "warn", text: step.detail })))));
+        list.hidden = false;
+        toast(result.ok ? "接続できました。" : "接続できませんでした。", result.ok ? "ok" : "err");
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        button.disabled = false;
+        button.textContent = "接続をテストする";
+      }
+      return;
+    }
+    if (hit("[data-ai-models]")) {
+      const button = hit("[data-ai-models]");
+      button.disabled = true;
+      try {
+        const res = await rf(panel.dataset.modelsUrl, { json: {}, quiet: true });
+        const list = panel.querySelector("[data-ai-model-list]");
+        const known = new Set([...list.querySelectorAll("[data-ai-model]")].map((i) => i.value));
+        res.models.filter((m) => !known.has(m)).forEach((m) => {
+          list.append(el("label", { class: "check" },
+            el("input", { type: "checkbox", "data-ai-model": "", value: m }),
+            el("span", { class: "mono", text: m })));
+        });
+        toast(res.message || "取得しました");
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        button.disabled = false;
+      }
+      return;
+    }
+    if (hit("[data-ai-save]")) {
+      const button = hit("[data-ai-save]");
+      const data = { models: [...panel.querySelectorAll("[data-ai-model]:checked")].map((i) => i.value) };
+      panel.querySelectorAll("[data-ai-field]").forEach((input) => {
+        data[input.dataset.aiField] = input.type === "checkbox" ? input.checked : input.value;
+      });
+      button.disabled = true;
+      try {
+        const res = await rf(panel.dataset.saveUrl, { json: data, quiet: true });
+        toast(res.message || "保存しました");
+        await loadPanel("ai", { open: true, scroll: false });
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        button.disabled = false;
+      }
+    }
+  });
+
+  // ---- 6 内容の確認: md の中身 ------------------------------------------------------------
+  async function showFile(button) {
+    const root = button.closest("[data-preview-page]");
+    const title = root.querySelector("[data-file-title]");
+    const text = root.querySelector("[data-file-text]");
+    const name = button.dataset.fileOpen;
+    root.querySelectorAll("tr[data-file]").forEach((tr) => tr.classList.toggle("is-current", tr.dataset.file === name));
+    title.textContent = `${name}（読み込み中…）`;
+    try {
+      const data = await rf(`${root.dataset.fileUrl}?name=${encodeURIComponent(name)}`, { quiet: true });
+      title.textContent = name;
+      text.textContent = data.text;
+    } catch (e) {
+      title.textContent = name;
+      toast(e.message, "err");
+    }
+  }
+})();

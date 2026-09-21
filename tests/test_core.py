@@ -2655,7 +2655,7 @@ def test_ui_macros_render(app):
                                               "label": True},
                                              {"coord": "B1", "text": "R-1", "rowspan": 1, "colspan": 1,
                                               "label": False}]}]}]
-    source = """{% import "components/_ui.html" as ui %}
+    source = """{% import "ui.html" as ui %}
     {% call ui.step("sheet", 2, "帳票の種類とシート", open=True) %}本文{% endcall %}
     {% call ui.card("見出し") %}本文{% endcall %}
     {{ ui.badge("modified") }}{{ ui.badge("active") }}
@@ -3181,10 +3181,10 @@ def test_the_section_of_a_clicked_cell_is_saved_with_the_field(app, client, tmp_
 # 元 tests/test_logproc.py
 # logproc（「経過の記録」の列のルール処理）の単体テスト。
 #
-# 実例セルは docs/research/対応内容セル分析.json の realistic_examples を使う。
+# 実例セルは docs/対応内容セル分析.json の realistic_examples を使う。
 # ====================================================================================================
 
-CELLS_JSON = Path(__file__).resolve().parents[1] / "docs" / "research" / "対応内容セル分析.json"
+CELLS_JSON = Path(__file__).resolve().parents[1] / "docs" / "対応内容セル分析.json"
 
 
 @pytest.fixture(scope="module")

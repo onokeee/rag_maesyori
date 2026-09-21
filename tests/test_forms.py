@@ -1883,7 +1883,7 @@ def test_a_modified_form_is_confirmed_again_before_the_md_download(app, client, 
     """1件だけのときも zip と同じで、直した値が .md に入らずに消えることが無いようにする。
 
     確定したあとに読み取り結果を直すと状態は「修正中」になる。このとき .md は確定済みの古い版から
-    作られるので、ダウンロードのボタンは zip と同じ data-confirm-all を持ち（review.js が先に確定し直す）、
+    作られるので、ダウンロードのボタンは zip と同じ data-confirm-all を持ち（app.js の帳票取り込みの部分が先に確定し直す）、
     確認文にもそのことを書く。
     """
     pattern_id = _pattern_forms_batch_review(client, sample_dir)
@@ -1906,7 +1906,7 @@ def test_a_modified_form_is_confirmed_again_before_the_md_download(app, client, 
     state = finish(client, [doc_id])
     assert "data-confirm-all" in state["html"] and "確定し直してから、直した値で Markdown を作ります。" in state["html"]
 
-    # review.js が先に確定し直すので、渡す .md には直した値が入る
+    # app.js（帳票取り込み）が先に確定し直すので、渡す .md には直した値が入る
     client.post(f"/forms/{doc_id}/confirm", json={"version": res.headers["X-Doc-Version"]})
     assert "直した設備名" in client.get(f"/forms/{doc_id}/download.md").get_data(as_text=True)
 
@@ -3364,10 +3364,10 @@ def test_build_panel_adds_and_deletes_fields_by_clicking(app, client, tmp_path):
     path = _book_form_types_clicks(tmp_path / "click.xlsx")
     pattern_id = _create(client, path)
     page = client.get("/form-types/").get_data(as_text=True)
-    assert "点検報告書" in page and "form_types.js" in page
+    assert "点検報告書" in page and "app.js" in page
     panel = _panel(client, pattern_id, path)
     assert 'data-cell="A1"' in panel and "まだ項目がありません" in panel
-    # クリックを送るための仕掛け（form_types.js が使う）と、明細表の印
+    # クリックを送るための仕掛け（app.js の帳票登録の部分が使う）と、明細表の印
     assert 'id="cellBuilder"' in panel and "data-click-hint" in panel
     assert 'data-table-head="1"' in panel
 
@@ -4623,7 +4623,7 @@ def test_a_new_upload_discards_the_previous_unfinished_one(sessions):
     first, first_file = _document(app, "first.xlsx", SESSION_A)
     first_import = _import(app, SESSION_A, file_name="first.csv")
 
-    # 画面（static/review.js・static/tables.js）は新しいファイルを送る前にこれを呼ぶ
+    # 画面（static/app.js（帳票取り込み）・static/app.js（表の取り込み））は新しいファイルを送る前にこれを呼ぶ
     with app.app_context():
         assert core.discard_documents([first], SESSION_A) == 1
         assert core.discard_table_imports([first_import], SESSION_A) == 1

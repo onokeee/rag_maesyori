@@ -3,7 +3,7 @@
     from scripts.samples import _t1_log
     text, meta = _t1_log.response_log(inc, prev_inc, extract_date)
 
-アプリの AI整形／ログ分割（logproc/、docs/research/対応内容AI整形設計.md 2章）の主な入力を想定した列。
+アプリの AI整形／ログ分割（logproc/、docs/research.md 4章（対応内容AI整形設計）2節）の主な入力を想定した列。
 - エントリは Incident の 発生→連絡→初動→調査→原因→処置→結果（完了日）の順に、実際の日時から作る。
   完了・経過観察は完了日時で締め、経過観察はその後の様子見を追記。保留・対応中は締めずに終わる。
 - 件数は重要度で変える（小 2〜4 / 中 3〜6 / 大 4〜9 / 重大 6〜12）。多すぎる分は近いエントリを結合する。

@@ -375,7 +375,7 @@ def keep_scenario(body: dict, server: FakeServer):
 # 表の取り込み（1画面）のテスト用ヘルパー。
 #
 # 画面は /tables の1枚だけで、段（panel）の中身と保存はすべて fetch でやりとりする
-# （views/tables.py・static/tables.js）。テストも同じ JSON のやりとりで進める。
+# （views/tables.py・static/app.js（表の取り込み））。テストも同じ JSON のやりとりで進める。
 # 取り込み設定は保存しないので、列の対応づけは取り込みごとに「使う・役割」だけを送る。
 # ====================================================================================================
 
@@ -516,7 +516,7 @@ def confirmed(app, client, name: str, table_name: str, **kwargs) -> int:
 
 
 # ---- 「列の対応づけ」の段を、画面と同じ形で読み書きする -------------------------------------
-# static/tables.js の saveColumns が集める値（表の名前と、列ごとの「使う・役割」）を段の HTML から集める。
+# static/app.js（表の取り込み） の saveColumns が集める値（表の名前と、列ごとの「使う・役割」）を段の HTML から集める。
 
 
 class _EditorParser(HTMLParser):

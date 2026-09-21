@@ -1,8 +1,8 @@
-{#- 画面共通の部品。使い方: {% import "components/_ui.html" as ui %} -#}
+{#- 画面共通の部品。使い方: {% import "ui.html" as ui %} -#}
 
 {#- 状態 → (表示語, 色)。ui.badge で出すものだけ（帳票・帳票の種類・ジョブ）。
     AI整形の行の状態は aiproc/items.STATUS_LABELS、読み取った値の出どころは
-    templates/forms/_review.html の SOURCE_LABELS と static/review.js の SOURCES が持つ。 -#}
+    templates/forms.html の part_review_block の SOURCE_LABELS と static/app.js（帳票取り込み）の SOURCES が持つ。 -#}
 {% set STATE_LABELS = {
   "unread": ("読み取り前", "gray"), "reviewing": ("確認中", "amber"), "modified": ("修正中", "violet"),
   "confirmed": ("確定済み", "green"),

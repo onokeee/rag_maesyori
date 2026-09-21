@@ -86,6 +86,14 @@ from tests.conftest import (
 from tests.test_ai import _read_import, ai_app_endpoints_ai, ai_client, fake_endpoints_ai
 
 
+def _tables_js() -> str:
+    """static/app.js のうち、表の取り込みの部分（「// ==== tables: 」の見出しから次の見出しまで）。"""
+    js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    start = js.index("// ==== tables: ")
+    nxt = js.find("\n// ==== ", start + 1)
+    return js[start:nxt if nxt >= 0 else len(js)]
+
+
 
 # ====================================================================================================
 # 元 tests/test_tables_read.py
@@ -2407,7 +2415,7 @@ def test_the_table_opens_when_a_column_has_values_that_cannot_be_read(app, clien
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node がない")
 def test_the_change_button_only_unhides_the_table():
-    js = (Path(__file__).resolve().parents[1] / "static" / "tables.js").read_text(encoding="utf-8")
+    js = _tables_js()
     start = js.index("function openColumnsTable(")
     end = js.index("function onEditorChange(")
     script = js[start:end] + """
@@ -3907,7 +3915,7 @@ def test_row_inputs_are_read_the_same_way_on_the_server():
 def test_row_inputs_are_read_the_same_way_in_the_browser():
     from views import _int_list, _row_no
 
-    js = (Path(__file__).resolve().parents[1] / "static" / "tables.js").read_text(encoding="utf-8")
+    js = _tables_js()
     start = js.index("  const parseEnd = ")
     end = js.index("  function applyLayout(")
     script = js[start:end] + f"""

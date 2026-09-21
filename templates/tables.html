@@ -1,0 +1,518 @@
+{% extends "base.html" %}
+{% import "ui.html" as ui %}
+{% block title %}表の取り込み{% endblock %}
+{% block container_class %}wide{% endblock %}
+{#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("tables.html", "part_x", ...)
+    が、この画面のマクロを1つだけ描いて返す（ページ全体は描かない）。 -#}
+
+{% macro part_source() -%}
+{#- 段2「読み取り方」の中身。変えるたびに static/app.js（表の取り込み）が保存する（画面は移らない）。 -#}
+{% if error %}<div class="flash flash-error" role="alert">{{ error }}</div>{% endif %}
+
+<div data-source-form>
+  <p class="hint">ファイル: {{ imp.file_name }}</p>
+
+  {% if src.kind == "csv" %}
+  <div class="sub-block">
+    <h3 class="sub-title">文字コード・区切り</h3>
+    <p class="hint">自動で判定しました。文字化けしている場合は変えてください。</p>
+    {% if src.sniff_warnings %}<div class="notice" role="note">{% for w in src.sniff_warnings %}{{ w }}<br>{% endfor %}</div>{% endif %}
+    <div class="grid-3">
+      <label>文字コード
+        <select name="encoding" class="input" data-source-field>
+          {% set known = encodings | map('first') | list %}
+          {% for value, label in encodings %}<option value="{{ value }}" {{ 'selected' if value == src.encoding }}>{{ label }}</option>{% endfor %}
+          {% if src.encoding not in known %}<option value="{{ src.encoding }}" selected>{{ src.encoding }}</option>{% endif %}
+        </select>
+      </label>
+      <label>区切り文字
+        <select name="delimiter" class="input" data-source-field>
+          {% for value, label in delimiters %}<option value="{{ value }}" {{ 'selected' if value == src.delimiter }}>{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <div class="field"><span>前置き行</span><span class="muted">{{ src.preamble_rows or 0 }}行（見出しより上の行。下の「表の範囲」で確認できます）</span></div>
+    </div>
+    <label class="check"><input type="checkbox" name="replace_errors" data-source-field {{ 'checked' if src.errors == 'replace' }}> 読めない文字を「〓」に置き換えて読み込む</label>
+  </div>
+  {% elif sheets %}
+  <div class="sub-block">
+    <h3 class="sub-title">シート</h3>
+    <div class="stack" role="radiogroup" aria-label="シート">
+      {% for s in sheets %}
+      <label class="check">
+        <input type="radio" name="sheet" value="{{ s.name }}" data-source-field {{ 'checked' if s.name == sheet }}>
+        <span><strong>{{ s.name }}</strong>
+          <small class="muted">{{ s.max_row }}行 × {{ s.max_col }}列{% if s.hidden %}・非表示のシート{% endif %}
+          {%- if list_like.get(s.name) == 'crosstab' %}・クロス集計らしい（対応していません）
+          {%- elif list_like.get(s.name) %}・一覧表らしい{% endif %}</small></span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{% macro part_layout() -%}
+{#- 段3「表の範囲」の中身。色分けで見出し・データ・小計・注記・除外を確かめる。 -#}
+<div data-layout-page>
+  <p class="hint">{% if imp.source.kind == 'excel' %}シート: {{ sheet }}／{% endif %}
+    行番号をクリックすると見出し行になります（Shift を押しながらで2段）。データの終わりは右の欄で指定できます。</p>
+
+  <div class="grid-2">
+    <label>見出し行（2段なら「6,7」）
+      <input type="text" name="header_rows" class="input" value="{{ layout.header_rows | join(',') }}" data-header-input>
+    </label>
+    <label>データの終わりの行（空欄＝自動）
+      <input type="text" name="data_end_row" class="input" value="{{ data_end_saved }}" placeholder="自動（{{ layout.data_end }}行目）" data-end-input>
+    </label>
+  </div>
+  <dl class="tbl-summary">
+    <div><dt>表の形</dt><dd data-kind>{{ info.table_kind_label }}</dd></div>
+    <div><dt>データの範囲</dt><dd data-range>{% if layout.data_end < layout.data_start %}データの行が見つかりません{% else %}{{ layout.data_start }}〜{{ layout.data_end }}行目{% endif %}</dd></div>
+    <div><dt>行の内訳</dt><dd data-counts style="font-size:.9rem">{% for k, v in info.counts.items() %}{{ k }} {{ v }}行{% if not loop.last %}／{% endif %}{% endfor %}</dd></div>
+  </dl>
+  <div data-crosstab class="flash flash-error" role="alert" {% if layout.table_kind != 'crosstab' %}hidden{% endif %}>月別集計のようなクロス集計の表には対応していません。1行＝1件の一覧表を選んでください。</div>
+  <ul class="list-plain warn" data-warnings>{% for w in layout.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+  <p class="hint">見出し: <span data-headers>{{ layout.headers | join('、') }}</span></p>
+
+  <div class="sub-block">
+    <h3 class="sub-title">先頭{{ rows|length }}行</h3>
+    {{ ui.grid_legend() }}
+    {{ ui.data_grid(rows, max_cols=width, caption="元の表の先頭") }}
+  </div>
+
+  <div class="form-actions">
+    <button type="button" class="btn primary" data-layout-submit {{ 'disabled' if layout.table_kind == 'crosstab' }}>この範囲で読み込む</button>
+    <button type="button" class="btn danger-outline" data-import-delete
+            data-confirm="この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
+            data-confirm-ok="削除する">この取り込みを削除</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro part_columns() -%}
+{#- 段4「列の対応づけ」の中身。決めるのは「表の名前」と、列ごとの「使う・役割」だけ。
+    キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値からサーバーが決める（利用者の指示 2026-09-20）。
+    決めることが無いとき（summary がある）は表をたたんで要約1行だけ出す。表は隠して DOM に残すので、
+    ［変更する］で開いても、開かずに保存しても、送る中身（＝できる Markdown）は変わらない。
+    表の列は「使う・見出し・役割・値の例」の4つだけ（「知らせ」の列は 2026-09-21 にやめた。ほとんどの行で
+    空のうえ、表の上の行と同じことを書いていた）。はじめから使わない設定にしている理由だけ、見出しの下に小さく出す。
+    必要な変数: rows（選べる役割 r.roles・使わない理由 r.note を含む）, name, save_url, summary, todo -#}
+<div data-columns-editor data-save-url="{{ save_url }}">
+  <label class="stack-label">表の名前
+    <input type="text" class="input" data-setting="name" value="{{ name }}" maxlength="80" required>
+    <small>Markdown のファイル名と、記録ファイルの見出しに使います。</small>
+  </label>
+
+  {% call ui.card("列の対応づけ", "この段で決めるのは「出す列」と「役割」だけです。ほかは見出しと値から決めます。"
+                                  if summary else
+                                  "Markdown に出す列にチェックを入れ、役割を選びます。キー・型・単位・出し方は値から決めます。") %}
+    {% if summary %}
+    <div data-columns-summary>
+      <p class="col-summary">{{ summary }}</p>
+      <p><button type="button" class="btn" data-columns-open>変更する</button></p>
+    </div>
+    {% elif todo %}
+    <ul class="list-plain warn" data-columns-todo>{% for t in todo %}<li>{{ t }}</li>{% endfor %}</ul>
+    {% endif %}
+    {#- 役割の説明。表と一緒に出す（要約1行のときは表ごと隠れる）。設備の記録だけでなく、
+        どんな一覧表でも読めるように、役割の名前と使いどころを書く（利用者の指示 2026-09-21）。 -#}
+    <div data-columns-table {{ 'hidden' if summary }}>
+    <ul class="list-plain hint" data-role-help>
+      <li><strong>識別番号</strong>：1件を見分ける番号（管理No、カルテNoなど）。Markdown の見出しに出します。</li>
+      <li><strong>日付</strong>：いつの記録か。記録ファイルを月ごとに分ける目印にします。</li>
+      <li><strong>対象</strong>：その記録が何についてのものかを表す列（設備・製品・顧客など）。見出しに出し、長い記録を分けたときも各かたまりに書きます。</li>
+      <li><strong>経過の記録</strong>：1つのセルに日付ごとに書き足した列（例: 対応内容、対応履歴、経過、対応メモ）。日付ごとに切り分けて時系列で出します（AIを使わなくても出ます）。1つの表で1列だけ選べます。</li>
+      <li><strong>その他</strong>：上のどれでもない列。そのまま「- 項目: 値」で出します。</li>
+    </ul>
+    <div class="table-wrap">
+    <table class="table compact col-editor">
+      <thead>
+        <tr><th>使う</th><th>見出し（そのまま項目名になります）</th><th>役割</th><th>値の例</th></tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr data-col data-index="{{ r.index }}" data-header="{{ r.header }}" class="{{ '' if r.use else 'is-unused' }}">
+          <td class="center"><input type="checkbox" data-field="use" {{ 'checked' if r.use }} aria-label="{{ r.header }} を使う"></td>
+          <td><strong>{{ r.header }}</strong>{% if r.note %}<br><span class="muted small" data-col-note>{{ r.note }}</span>{% endif %}</td>
+          <td><select data-field="role" aria-label="役割">{% for v, label in r.roles %}<option value="{{ v }}" {{ 'selected' if v == r.role }}>{{ label }}</option>{% endfor %}</select></td>
+          <td class="examples">{{ r.examples | join('\n') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    </div>
+    <ul class="list-plain warn" data-editor-errors aria-live="polite"></ul>
+  {% endcall %}
+
+  <div class="form-actions">
+    <button type="button" class="btn primary" data-editor-save>この対応づけで読み込む</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro part_ai() -%}
+{#- 段5「AI整形（任意）」の中身。mdファイルを作るときに、経過の記録の列（④で選んだ1列）の文章を
+    組み立てる部分だけ AI を使う。分けるところまではルールだけでやるので、AI が無くても Markdown は出る。 -#}
+<div data-ai-page
+     data-split-url="{{ url_for('tables.ai_split_preview', import_id=imp.id) }}"
+     data-trial-url="{{ url_for('tables.ai_trial', import_id=imp.id) }}"
+     data-estimate-url="{{ url_for('tables.ai_estimate', import_id=imp.id) }}"
+     data-run-url="{{ url_for('tables.ai_run', import_id=imp.id) }}"
+     data-pause-url="{{ url_for('tables.ai_control', import_id=imp.id, action='pause') }}"
+     data-resume-url="{{ url_for('tables.ai_control', import_id=imp.id, action='resume') }}"
+     data-cancel-url="{{ url_for('tables.ai_control', import_id=imp.id, action='cancel') }}"
+     data-trial-keys='{{ trial_keys | tojson }}'
+     data-external="{{ '1' if external else '0' }}">
+
+  <p class="hint">④で「経過の記録」にした列「{{ log_display }}」を、ルールで日付・記入者ごとに分けて時系列にします
+    （ここまでは AI なしで Markdown に出ます）。AI整形をすると、そのうえに原文と照合できた「対応の要点」と
+    記録の種別を足します。しなくても先へ進めます。</p>
+
+  <div class="sub-block">
+    <h3 class="sub-title">1. 分割プレビュー（AIなし）</h3>
+    {% if row_choices %}
+    <div class="filter-bar">
+      <label>行
+        <select class="input" data-split-row>
+          {% for key, label in row_choices %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="button" class="btn" data-split-run>分割を表示</button>
+    </div>
+    <div data-split-result aria-live="polite"></div>
+    {% else %}
+    <p class="muted">この列に文章が入っている行がありません。</p>
+    {% endif %}
+  </div>
+
+  {% if ai_ready %}
+  <div class="sub-block">
+    <h3 class="sub-title">2. 試し実行（10行）</h3>
+    <p class="hint">先頭の10行を1行ずつAIに送り、抜き出した項目と Markdown を確かめます。結果は保存され、全件実行でも使われます。<br>
+      モデル: {{ model }}{% if external %}（外部のAIサービス）{% else %}（社内のAIサーバー）{% endif %}</p>
+    {% if external %}<label class="check"><input type="checkbox" data-trial-external> 試し実行の10行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
+    <div class="btn-row"><button type="button" class="btn" data-trial-run {{ 'disabled' if not trial_keys }}>10行を試す</button></div>
+    <p class="progress-text" data-trial-status aria-live="polite"></p>
+    <div data-trial-result></div>
+  </div>
+  {% endif %}
+
+  {# AI接続が外れていても、動いているジョブがある間は進み具合と［中止］を出す（中止できないと取り込みが詰む） #}
+  {% if ai_ready or job %}
+  <div class="sub-block">
+    <h3 class="sub-title">3. 全件実行</h3>
+    {% if counts %}
+    <p class="hint">これまでの結果: {% for status, n in counts.items() %}{{ item_labels.get(status, status) }} {{ n }}件{% if not loop.last %}／{% endif %}{% endfor %}</p>
+    {% endif %}
+    {% if job %}
+      {{ ui.progress(job, url=(job_url if job_active else None), label="AI整形の進み具合") }}
+      <p class="hint" data-ai-detail>{% if job.progress %}OK {{ job.progress.ok or 0 }}／要確認 {{ job.progress.flagged or 0 }}／エラー {{ job.progress.error or 0 }}／ルールのみ {{ job.progress.rule_only or 0 }}{% endif %}</p>
+      {% if job.status == 'failed' and job.message %}<div class="flash flash-error" role="alert">{{ job.message }}</div>{% endif %}
+      {% if job_active %}
+      {% if not ai_ready %}<p class="hint">AI接続が外れているため実行・再開はできません。中止してから進んでください。</p>{% endif %}
+      <div class="btn-row">
+        {% if ai_ready %}
+        {% if job.status == 'paused' or job.pause_requested %}
+        {# 一時停止を頼んだ直後は、送信中の呼び出しを待つ間まだ「実行中」。そのときも再開を出す #}
+        <button type="button" class="btn" data-ai-control="resume">再開</button>
+        {% if job.status != 'paused' %}<span class="hint">一時停止中…（送信中の呼び出しが終わると止まります）</span>{% endif %}
+        {% else %}
+        <button type="button" class="btn" data-ai-control="pause">一時停止</button>
+        {% endif %}
+        {% endif %}
+        <button type="button" class="btn danger-outline" data-ai-control="cancel"
+                data-confirm="AI整形を中止します。保存済みの行の結果は残ります。" data-confirm-ok="中止する">中止</button>
+      </div>
+      {% endif %}
+    {% endif %}
+    {% if ai_ready and not job_active %}
+    <div class="grid-3">
+      <label>範囲
+        <select class="input" data-run-scope>
+          {% for value, label in scopes.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>同時実行数
+        <input type="number" class="input" min="1" max="16" value="{{ 4 if external else 1 }}" data-run-concurrency>
+      </label>
+      <div class="field"><span>見積もり</span><span data-estimate class="muted">[見積もる] を押すと、呼び出し回数と時間の目安を出します。</span></div>
+    </div>
+    {% if external %}<label class="check"><input type="checkbox" data-run-external> 対象の行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
+    <div class="btn-row">
+      <button type="button" class="btn" data-estimate-run>見積もる</button>
+      <button type="button" class="btn" data-ai-run>AI整形を実行する</button>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {{ part_ai_connection() }}
+
+  <div class="form-actions">
+    {% if job_active %}
+    <span class="hint">AI整形が動いている間（一時停止中を含む）は確認に進めません。再開して終わらせるか、中止してください。</span>
+    {% else %}
+    <button type="button" class="btn primary" data-ai-next>内容の確認へ</button>
+    {% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro part_ai_connection() -%}
+{#- AI接続（この段の中。設定画面は無い）。既定では閉じてある。
+    必要な変数: ai_status, ai_ready, save_url, test_url, models_url -#}
+{#- 既定では閉じてある（AIを使わない取り込みでは開かなくてよい）。 -#}
+<details class="sub-block" data-ai-connection
+         data-save-url="{{ save_url }}" data-test-url="{{ test_url }}" data-models-url="{{ models_url }}">
+  <summary class="sub-title">AI接続{% if ai_ready %}（設定済み・{{ ai_status.current }}）{% else %}（未設定。AIを使わなくても Markdown は作れます）{% endif %}</summary>
+
+  <dl class="meta">
+    <dt>APIキー</dt>
+    <dd>
+      {% if ai_status.api_key_source == 'screen' %}この画面で保存したキーを使用中です
+      {% elif ai_status.api_key_source == 'env' %}env ファイルのキーを使用中です
+      {% else %}<span class="warn">APIキーが設定されていません</span>{% endif %}
+    </dd>
+    <dt>保存先</dt><dd class="small"><code>{{ ai_status.settings_file }}</code>（env ファイルの値より優先。保存するとすぐ反映）</dd>
+  </dl>
+
+  <div class="btn-row">
+    <button type="button" class="btn" data-ai-test {{ 'disabled' if not ai_ready }}>接続をテストする</button>
+    <button type="button" class="btn" data-ai-models>APIからモデル一覧を取得</button>
+    <span class="hint">テストはモデル一覧の取得と、短いチャットを1回送ります。</span>
+  </div>
+  <ul class="list-plain list-rows" data-ai-test-result aria-live="polite" hidden></ul>
+
+  <div class="sub-block">
+    <h4 class="sub-title">選択できるモデル</h4>
+    {% if ai_status.from_env %}<p class="hint">現在は env の OPENAI_MODELS（または既定モデル）を候補にしています。保存すると画面の候補に切り替わります。</p>{% endif %}
+    <fieldset class="model-grid" style="border:0;padding:0;margin:0 0 .75rem" data-ai-model-list>
+      <legend class="sr-only">選択できるモデル</legend>
+      {% for m in ai_status.models %}
+        <label class="check">
+          <input type="checkbox" data-ai-model value="{{ m }}" checked>
+          <span class="mono">{{ m }}</span>
+        </label>
+      {% endfor %}
+    </fieldset>
+    <label class="stack-label">モデルを追加（1行に1つ）
+      <textarea rows="2" class="input mono" data-ai-field="add_models" placeholder="gpt-5.6-sol"></textarea>
+    </label>
+    <label class="stack-label">使うモデル（既定）
+      <select class="input" data-ai-field="default">
+        {% for m in ai_status.models %}<option value="{{ m }}" {{ 'selected' if m == ai_status.default }}>{{ m }}</option>{% endfor %}
+      </select>
+      <small class="muted">追加したモデルを既定にするときは、一度保存してから選び直してください。</small>
+    </label>
+  </div>
+
+  <div class="sub-block">
+    <h4 class="sub-title">接続先</h4>
+    <div class="stack">
+      <label>チャットのURL（…/chat/completions までのフルパス）
+        <input class="input mono" data-ai-field="chat_url" value="{{ ai_status.chat_url }}" placeholder="{{ ai_status.env_chat_url }}">
+        <small class="muted">{{ '画面で設定' if ai_status.chat_url_source == 'screen' else 'env の OPENAI_BASE_URL から' }}。空欄で保存すると env の値に戻ります。</small>
+      </label>
+      <label>モデル一覧のURL（…/models までのフルパス）
+        <input class="input mono" data-ai-field="models_url" value="{{ ai_status.models_url }}" placeholder="{{ ai_status.env_models_url }}">
+        <small class="muted">{{ '画面で設定' if ai_status.models_url_source == 'screen' else 'env の OPENAI_BASE_URL から' }}</small>
+      </label>
+      <label>APIキー
+        <input type="password" class="input mono" data-ai-field="api_key" autocomplete="new-password" placeholder="変更する場合だけ入力し、［AI接続を保存］で反映">
+      </label>
+      {% if ai_status.api_key_source == 'screen' %}
+        <label class="check"><input type="checkbox" data-ai-field="api_key_clear"> <span>envのキーに戻す（画面で保存したキーを削除）</span></label>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button type="button" class="btn primary" data-ai-save>AI接続を保存</button>
+  </div>
+</details>
+{%- endmacro %}
+
+{% macro part_preview() -%}
+{#- 段6「内容の確認」の中身。件数・問題・作られるファイル・データを見てから確定する。 -#}
+<div data-preview-page data-file-url="{{ url_for('tables.preview_file', import_id=imp.id) }}">
+  <p class="hint">ファイル: {{ imp.file_name }}／表の名前: {{ spec.name }}
+    {%- if confirmed %}　{{ ui.badge("confirmed") }}（確定済み）{% endif %}</p>
+
+  <dl class="tbl-summary">
+    <div><dt>記録件数</dt><dd>{{ stats.records or 0 }}件</dd></div>
+    <div><dt>読み込んだ行</dt><dd>{{ stats.rows_scanned or 0 }}行</dd></div>
+    <div><dt>継続行として連結</dt><dd>{{ stats.continuation_merged or 0 }}行</dd></div>
+    <div><dt>小計・合計の行（除外）</dt><dd>{{ stats.subtotal_rows or 0 }}行</dd></div>
+    <div><dt>エラー</dt><dd>{{ counts.error }}件</dd></div>
+    <div><dt>警告</dt><dd>{{ counts.warning }}件</dd></div>
+    <div><dt>Markdownファイル</dt><dd>{{ files|length }}件</dd></div>
+  </dl>
+  {% if stats.excluded %}
+  <p><strong>除外した行と理由:</strong>
+    {% for reason, n in stats.excluded.items() %}{{ reason }} {{ n }}行{% if not loop.last %}／{% endif %}{% endfor %}</p>
+  {% endif %}
+  {% if stats.layout_warnings %}<ul class="list-plain warn">{% for w in stats.layout_warnings %}<li>{{ w }}</li>{% endfor %}</ul>{% endif %}
+  {% if stats.date_min %}<p class="hint">日付の範囲: {{ stats.date_min }}〜{{ stats.date_max }}</p>{% endif %}
+
+  <div class="sub-block">
+    <h3 class="sub-title">問題一覧</h3>
+    <p class="hint">エラーがあると確定できません。警告は確認のうえ、そのまま進められます。
+      <a class="btn small" href="{{ url_for('tables.issues_csv', import_id=imp.id) }}">問題一覧（CSV）</a></p>
+    {% if issues %}
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>種類</th><th>行</th><th>列</th><th>内容</th></tr></thead>
+      <tbody>
+      {% for i in issues %}
+        <tr>
+          <td>{% if i.level == 'error' %}<span class="badge badge-red">エラー</span>{% else %}<span class="badge badge-amber">警告</span>{% endif %}</td>
+          <td class="num">{{ i.row or "" }}</td><td>{{ i.column or "" }}</td><td>{{ i.message }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if issue_total > issues|length %}<p class="hint">先頭の{{ issues|length }}件を表示しています（全{{ issue_total }}件は CSV で確認できます）。</p>{% endif %}
+    {% else %}
+    <p class="muted">問題はありません。</p>
+    {% endif %}
+  </div>
+
+  <div class="sub-block">
+    <h3 class="sub-title">作られる Markdown ファイル</h3>
+    <p class="hint">RAG に入れる記録ファイルだけを作ります。ファイル名をクリックすると中身を表示します。</p>
+    <div class="split">
+      <div class="table-wrap">
+        <table class="table compact file-list">
+          <thead><tr><th>ファイル名</th><th class="num">記録</th></tr></thead>
+          <tbody>
+          {% for f in files %}
+            <tr data-file="{{ f.name }}">
+              <td><button type="button" data-file-open="{{ f.name }}">{{ f.name }}</button></td>
+              <td class="num">{{ f.records if f.records is not none else "" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <p class="hint" data-file-title>ファイルを選んでください。</p>
+        <pre class="md-view" data-file-text></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="sub-block">
+    <h3 class="sub-title">データ（100行ずつ）</h3>
+    <p class="hint">正規化した値です。</p>
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>記録キー</th>{% for key, display in columns %}<th>{{ display }}</th>{% endfor %}<th>元の行</th></tr></thead>
+      <tbody>
+      {% for r in data_rows %}
+        <tr>
+          <td class="nowrap">{{ r.key }}</td>
+          {% for key, display in columns %}{% set v = r["values"].get(key) %}<td>{{ (v|string)[:120] if v is not none else "" }}</td>{% endfor %}
+          <td class="num">{{ r.source.row if r.source else "" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if total_pages > 1 %}
+    <nav class="pagination" aria-label="ページ">
+      {% if page > 1 %}<button type="button" class="btn small" data-rows-page="{{ page - 1 }}">前へ</button>{% endif %}
+      <span>{{ page }} / {{ total_pages }}ページ</span>
+      {% if page < total_pages %}<button type="button" class="btn small" data-rows-page="{{ page + 1 }}">次へ</button>{% endif %}
+    </nav>
+    {% endif %}
+  </div>
+
+  <p class="notice" role="note">{{ delete_note }}</p>
+  <div class="form-actions">
+    {% if blocking %}<span class="warn">エラーが残っているため確定できません。上の問題一覧を確認して、範囲や列の対応づけを直してください。</span>{% endif %}
+    <button type="button" class="btn primary" data-confirm-run {{ 'disabled' if blocking }}
+      {%- if confirmed %} data-confirm="この取り込みは確定済みです。Markdownを作り直しますか？（作成済みのファイルは置き換わります）" data-confirm-ok="作り直す"{% endif %}>
+      {{ "確定し直してMarkdownを作り直す" if confirmed else "確定してMarkdownを作成" }}</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro part_preview_failed() -%}
+{#- 段6「内容の確認」で、Markdown の下書きを作れなかったとき。 -#}
+<div class="flash flash-error" role="alert">{{ error }}</div>
+<p>ファイルが一時的に使えなかったときなどは［もう一度作る］で直ります。
+  同じエラーが続くときは、上の「列の対応づけ」（型・Markdownへの出し方）を見直してください。</p>
+<div class="form-actions">
+  <button type="button" class="btn primary" data-preview-retry>もう一度作る</button>
+  <button type="button" class="btn" data-reread>もう一度読み込む</button>
+</div>
+{%- endmacro %}
+
+{% macro part_done() -%}
+{#- 段7「確定してダウンロード（zip）」の中身。ダウンロードするとこの取り込みのデータは消える。 -#}
+<div data-done-page>
+  <p class="hint">{{ (stats.output or {}).records or stats.records or 0 }}件の記録から {{ files|length }}件の Markdown を作りました。</p>
+  <p class="notice" role="note">{{ delete_note }}</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('tables.download_zip', import_id=imp.id) }}"
+       data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdownをまとめてダウンロード（zip）</a>
+    <button type="button" class="btn danger-outline" data-import-delete
+            data-confirm="ダウンロードせずにこの取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
+            data-confirm-ok="削除する">ダウンロードせずに削除</button>
+  </div>
+  <p class="hint">zip の中身は、RAG に入れる Markdown（.md）だけです。フォルダ分けはしていないので、zip を開いて中身をそのまま
+    LightRAG の画面にドラッグしてください。</p>
+
+  <div class="sub-block">
+    <h3 class="sub-title">作成したファイル</h3>
+    <ul class="list-plain">
+      {% for f in files %}<li>{{ f.name }} <small class="muted">{{ (f.size / 1024) | round(1) }}KB</small></li>{% endfor %}
+    </ul>
+  </div>
+</div>
+{%- endmacro %}
+
+{% block content %}
+{#- 表の取り込みは、この1枚で全部やる（利用者の指示 2026-09-20）。
+    段の中身は /tables/imports/<id>/panel/<名前> が HTML の断片で返し、static/app.js（表の取り込み）が入れる。 -#}
+
+<div data-tables-page data-steps-open
+     data-upload-url="{{ url_for('tables.upload') }}"
+     data-discard-url="/tables/discard"
+     data-new-url="{{ url_for('tables.new') }}">
+
+  {#- 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）を先に伝える。
+      実際に捨てるのは static/app.js の ragDiscard → POST /tables/discard。 -#}
+  <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた zip はその場でダウンロードしてください。</p>
+
+  {% call ui.step("file", 1, "ファイルを置く", open=True) %}
+    <form data-upload-form class="stack">
+      {{ ui.file_drop("file", accept=".xlsx,.xlsm,.csv,.tsv,.txt", label="一覧表のファイルをここにドラッグ＆ドロップ",
+           hint=".xlsx / .xlsm / .csv / .tsv / .txt（月別集計のようなクロス集計の表には対応していません）") }}
+    </form>
+  {% endcall %}
+
+  {% call ui.step("source", 2, "読み取り方", open=True) %}
+    <p class="muted">上でファイルを置くと、ここに文字コード・区切り・シートが出ます。</p>
+  {% endcall %}
+  {% call ui.step("layout", 3, "表の範囲", open=True) %}
+    <p class="muted">見出しの行とデータの範囲を、色分けした先頭の行を見ながら決めます。</p>
+  {% endcall %}
+  {% call ui.step("columns", 4, "列の対応づけ", open=True) %}
+    <p class="muted">表の名前と、列ごとに「使うか」「役割」を決めます。ほかは見出しと値から決めます。</p>
+  {% endcall %}
+  {% call ui.step("ai", 5, "AI整形（任意）", open=True) %}
+    <p class="muted">④で「経過の記録」にした列（例: 対応内容）があるときだけ使います。AI接続の設定もここにあります。</p>
+  {% endcall %}
+  {% call ui.step("preview", 6, "内容の確認", open=True) %}
+    <p class="muted">件数・問題の一覧と、作られる Markdown の中身をここで確認します。</p>
+  {% endcall %}
+  {% call ui.step("done", 7, "確定してダウンロード（zip）", open=True) %}
+    <p class="muted">確定すると、ここから zip をダウンロードできます。ダウンロードするとサーバーからデータが消えます。</p>
+  {% endcall %}
+</div>
+{% endblock %}
