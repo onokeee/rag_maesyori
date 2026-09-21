@@ -23,7 +23,7 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from openpyxl.utils.datetime import MAC_EPOCH, WINDOWS_EPOCH, from_excel
 
-import core
+from app import core
 
 
 

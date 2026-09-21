@@ -15,14 +15,14 @@ import openpyxl
 import pytest
 from openpyxl.drawing.image import Image as XLImage
 
-import core
-import database as db
-import llm
-import tables
-from aiproc import _ensure_trial_import
-from core import JobError
-from forms import detect_images, _is_total, Cell, suggest_rows, rows_to_pattern, load_workbook_info
-from logproc import (
+from app import core
+from app import database as db
+from app import llm
+from app import tables
+from app.aiproc import _ensure_trial_import
+from app.core import JobError
+from app.forms import detect_images, _is_total, Cell, suggest_rows, rows_to_pattern, load_workbook_info
+from app.logproc import (
     PeopleIndex,
     PeopleIndex as PeopleIndex_logproc_people,
     SplitOptions,
@@ -30,7 +30,7 @@ from logproc import (
     parse_log,
     parse_log as parse_log_logproc_segment,
 )
-from tables import CsvSource, clean_text, spec_from_dict, validate_spec
+from app.tables import CsvSource, clean_text, spec_from_dict, validate_spec
 from tests.conftest import add_confirmed_document, confirmed_import
 from tests.test_core import _rewrite_merges, _xlsx_with_merge
 
@@ -229,10 +229,10 @@ def test_form_delete_reports_a_clean_removal(app, client):
 def _ctx(app, monkeypatch):
     import sqlite3
 
-    import core
+    from app import core
     monkeypatch.setattr(core, "SOFT_UPDATE_BACKOFF", 0)
     with app.app_context():
-        import database
+        from app import database
         conn = database.connect()
         conn.execute("INSERT INTO jobs (kind, status, params_json, progress_json, created_at, updated_at) "
                      "VALUES ('test', 'running', '{}', '{}', '2026-01-01', '2026-01-01')")
@@ -291,7 +291,7 @@ def test_other_db_errors_still_raise(app, monkeypatch):
 # - AI整形の［見積もる］を連打できないこと（static/app.js（表の取り込み））
 # ====================================================================================================
 
-STATIC = Path(__file__).resolve().parents[1] / "static"
+STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
 
 
 def _js_section(name: str) -> str:
@@ -709,7 +709,7 @@ def test_an_idle_import_can_be_deleted(app, client, status):
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node がない")
 def test_polling_stops_and_reloads_when_the_job_is_gone():
-    js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    js = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text(encoding="utf-8")
     start = js.index("async function getJson(")
     end = js.index("const JOB_LABELS")
     script = """

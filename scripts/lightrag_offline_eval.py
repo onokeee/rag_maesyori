@@ -59,12 +59,12 @@ def _write_variant(out: Path, variant: str, files: list[dict]) -> None:
 
 def generate_forms(out: Path) -> None:
     """帳票: 見本3件で種類を作り（evaluate_forms と同じ）、30ファイルを抽出して build_markdown する。"""
-    from forms import extract_document
-    from forms import load_workbook_info
-    from forms import build_markdown, markdown_filename
-    from forms import suggest_rows
-    from forms import rows_to_pattern
-    from forms import match_pattern
+    from app.forms import extract_document
+    from app.forms import load_workbook_info
+    from app.forms import build_markdown, markdown_filename
+    from app.forms import suggest_rows
+    from app.forms import rows_to_pattern
+    from app.forms import match_pattern
     from scripts.samples.evaluate_forms import pick_samples
 
     for folder in sorted(p for p in (SAMPLES / "forms").iterdir() if (p / "_expected.jsonl").exists()):
@@ -95,10 +95,10 @@ def generate_forms(out: Path) -> None:
 
 
 def _table_spec(code: str):
-    from tables import guess_layout, sample_data_rows
-    from tables import suggest_columns
-    from tables import open_source
-    from tables import LogStageSpec, spec_from_suggestions
+    from app.tables import guess_layout, sample_data_rows
+    from app.tables import suggest_columns
+    from app.tables import open_source
+    from app.tables import LogStageSpec, spec_from_suggestions
 
     file_name, name, log_header = TABLES[code]
     path = SAMPLES / "tables" / file_name
@@ -119,7 +119,7 @@ def _table_spec(code: str):
 
 
 def _record_meta(rec: dict | None, spec) -> dict:
-    from tables import entity_columns, entity_display
+    from app.tables import entity_columns, entity_display
 
     if rec is None:
         return {"id": "", "entities": [], "date": ""}
@@ -144,7 +144,7 @@ def _attach_table_meta(files: list[dict], recs: list[dict], spec) -> None:
 
     大きい記録は「（続きn/m）」に分かれて同じ見出しが続くので、その分は同じ記録のメタにする。
     """
-    from tables import record_title
+    from app.tables import record_title
 
     by_title: dict[str, list[dict]] = defaultdict(list)
     for r in recs:
@@ -169,9 +169,9 @@ def _attach_table_meta(files: list[dict], recs: list[dict], spec) -> None:
 
 
 def generate_tables(out: Path, codes: list[str], variants: list[str] | None = None) -> None:
-    from core import md_filename
-    from tables import _Block, join_file, people_index_for, record_block, render_all
-    from tables import read_records
+    from app.core import md_filename
+    from app.tables import _Block, join_file, people_index_for, record_block, render_all
+    from app.tables import read_records
 
     want = set(variants or ("month", "entity_month", "per_record", "single"))
 

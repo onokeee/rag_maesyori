@@ -7,17 +7,17 @@ from datetime import date
 
 import pytest
 
-import aiproc
-import core
-import database
-import llm
-import tables as tmd
-from aiproc import verify_log_result
+from app import aiproc
+from app import core
+from app import database
+from app import llm
+from app import tables as tmd
+from app.aiproc import verify_log_result
 from app import create_app
-from core import md_filename
-from logproc import PeopleIndex, parse_log
+from app.core import md_filename
+from app.logproc import PeopleIndex, parse_log
 from scripts import lightrag_offline_eval as ev
-from tables import spec_from_dict
+from app.tables import spec_from_dict
 from tests.conftest import (
     make_config,
     OPENAI_KEY,
@@ -233,7 +233,7 @@ def test_verify_done_and_no_recurrence_need_real_evidence():
 
 def test_gas_formulas_and_vacuum_units_are_not_model_numbers():
     """N2・1slm・1.2mTorr を型番として扱わない（取りこぼし・でっち上げの判定に使わない）。"""
-    from logproc import extract_identifiers, extract_quantities
+    from app.logproc import extract_identifiers, extract_quantities
 
     for text in ("1.2mTorr", "N2パージ", "He 5sccm", "1slm", "NF3を流す"):
         assert extract_identifiers(text) == [], text
@@ -774,8 +774,8 @@ def _second_import(app, rows, spec=SPEC) -> int:
 
 def test_ai_items_are_per_import_and_survive_other_import_purge(ai_app, fake):
     """同じ設定・同じ行キーの2つの取り込みは AI の結果を別々に持ち、片方をダウンロード（削除）してももう片方は残る。"""
-    import core
-    import tables
+    from app import core
+    from app import tables
 
     fake.responder = keep_scenario
     rows = {k: ROWS[k] for k in ("R1", "R6", "R9")}
@@ -1787,8 +1787,8 @@ def test_app_filenames_never_look_like_a_parser_hint():
 
 def test_split_records_keep_the_metadata_of_the_record_they_came_from():
     """「（続きn/m）」に分かれた記録の各部分も、元の記録の管理No・日付で照合する。"""
-    from tables import record_title
-    from tables import spec_from_dict
+    from app.tables import record_title
+    from app.tables import spec_from_dict
 
     spec = spec_from_dict({"name": "x", "columns": [
         {"key": "record_no", "display": "管理No", "type": "code", "role": "key"},

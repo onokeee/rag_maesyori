@@ -32,7 +32,7 @@ AI（OpenAI 互換 API）は任意で、使うのは**一覧表の「経過の�
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python app.py
+python run.py
 ```
 
 http://127.0.0.1:5000 を開きます（既定はサーバーの中からだけ開けます）。初回は `instance/app.db` を作成し、古い DB は起動時に自動で移行します。
@@ -44,7 +44,7 @@ http://127.0.0.1:5000 を開きます（既定はサーバーの中からだけ�
 ```bash
 cd ~/rag_maesyori
 source .venv/bin/activate            # Windows のサーバーなら .venv\Scripts\activate
-HOST=0.0.0.0 PORT=5000 nohup python app.py > app.log 2>&1 &
+HOST=0.0.0.0 PORT=5000 nohup python run.py > app.log 2>&1 &
 echo $!                              # 表示された番号（PID）が止めるときに要ります
 cat app.log                          # ここに、他のPCから開くアドレスが出ます
 ```
@@ -53,10 +53,10 @@ cat app.log                          # ここに、他のPCから開くアドレ
 - `PORT` … ポート番号（既定 5000）。ほかのアプリと重なるときは `PORT=5050` のように変えます。
 - `nohup … &` … ターミナルのタブを閉じても動き続けます（`&` だけだとタブを閉じたとき一緒に止まることがあります）。JupyterLab のターミナルはタブを閉じてもセッションが残るので、そのまま置いておく使い方でも構いません。
 - **開くアドレス**は `app.log` の先頭に出ます（例: `http://192.168.0.11:5000/`）。分からないときは `hostname -I`（Windows は `ipconfig`）でサーバーのアドレスを調べ、`http://<アドレス>:5000/` を開きます。
-- **止めるとき**は `kill <PID>`（PID を忘れたら `ps aux | grep app.py`）。ターミナルで直接動かしているときは `Ctrl+C`。
+- **止めるとき**は `kill <PID>`（PID を忘れたら `ps aux | grep run.py`）。ターミナルで直接動かしているときは `Ctrl+C`。
 
 ```bash
-ALLOWED_HOSTS="rag.example.local" HOST=0.0.0.0 python app.py   # 社内DNSの別名でも開くとき
+ALLOWED_HOSTS="rag.example.local" HOST=0.0.0.0 python run.py   # 社内DNSの別名でも開くとき
 ```
 
 `ALLOWED_HOSTS`（`;` か `,` 区切り）は、サーバー自身の名前・アドレス以外の宛先で開くときだけ要ります。指定しなくても、ループバックとサーバーのPC名・LANのアドレスでは開けます。
@@ -191,7 +191,7 @@ Markdown はサーバーの設定に関わらず読めるように作ります�
 
 - **ログインがありません。** 既定の待ち受け先は `127.0.0.1`（サーバーの中だけ）で、LAN に出すのは `HOST` を渡したときだけです。出したときは起動時の案内にログインが無いことを表示します。インターネットからは開けない場所（社内LAN）で使ってください。
 - 宛先の名前（Host ヘッダー）は、ループバック・サーバー自身の名前とアドレス・`ALLOWED_HOSTS` に挙げたものだけ受け付けます（別の名前でこのサーバーに誘導する攻撃＝DNSリバインディング対策）。
-- `flask run --debug` / `FLASK_DEBUG=1` では起動しません（デバッガ経由でサーバ上のコードを実行されるのを防ぐため）。`app.py` の `DEBUG = True` も、LAN のアドレスで起動するときは断ります。
+- `flask run --debug` / `FLASK_DEBUG=1` では起動しません（デバッガ経由でサーバ上のコードを実行されるのを防ぐため）。`app/__init__.py` の `DEBUG = True` も、LAN のアドレスで起動するときは断ります。
 - **署名鍵**（`FLASK_SECRET_KEY`、無ければ `.flask_secret` に自動で作ります）が変わると、全員のブラウザの「どの作業か」の印が無効になり、取り込み中のものが自分のものだと分からなくなります（そのまま置いておけば時間切れで捨てられます）。鍵のファイルは消さないでください。
 - `data/` と `env` には API キーが平文で入ります（`.gitignore` 済み）。
 - 帳票は `.xlsx` / `.xlsm` のみ（`.xls` は Excel で保存し直してください）。数式セルは Excel で保存されたときの計算結果を読みます（計算結果の無い数式セルがあるときは、Excel で開いて保存し直すよう確認画面で知らせます）。
@@ -200,26 +200,34 @@ Markdown はサーバーの設定に関わらず読めるように作ります�
 
 ## 構成
 
-ファイルの数を最小限にしてあります。Python はフォルダ（パッケージ）に分けず、領域ごとに1ファイルです。
-1ファイルの中は「# ==== 元 core/jobs.py ====」のような見出しで区切ってあり、旧パッケージの並びのまま読めます。
+フォルダは「アプリ本体（`app/`）」「テスト（`tests/`）」「サンプルデータ（`samples/`。生成物で git 管理外）と、その生成器（`scripts/`）」「設計書（`docs/`）」に分けてあります。
+ルートに置くのは起動用の `run.py` と設定ファイルだけです。Python は `app/` の中で領域ごとに1ファイルにしてあり、
+1ファイルの中は「# ==== 元 core/jobs.py ====」のような見出しで区切ってあります。
 
 ```
-app.py                 Flask アプリ（create_app）・設定（env ファイルを読み込み。旧 config.py）・起動
-core.py                共通の土台: 安全なファイル名、Markdown テキスト処理、アップロード保存と事前チェック、
+run.py                 起動（python run.py）
+env.example            AI接続の既定値の見本（コピーして env にする）
+requirements.txt / pytest.ini
+app/                   アプリ本体
+  __init__.py          Flask アプリ（create_app）・設定（env ファイルを読み込み）
+  core.py              共通の土台: 安全なファイル名、Markdown テキスト処理、アップロード保存と事前チェック、
                        帳票登録が置いた Excel の一時的な覚え（メモリだけ）、ジョブ実行、取り込んだデータの削除
-database.py            SQLite（スキーマ・マイグレーション、帳票の種類・帳票）
-forms.py               帳票: Excel のセル構造、ラベル探索による読み取り、帳票の種類の定義と候補、帳票の Markdown
-tables.py              一覧表: CSV/Excel の読み取り、表の範囲判定、列の対応づけ、正規化、チェック、記録の Markdown、zip、DB、ジョブ
-logproc.py             「経過の記録」の列の分割（日時・記入者・識別子）、伏せ字、時系列の描画（コードの中での呼び名が log）
-aiproc.py              AI整形: プロンプト、原文照合、キャッシュ、ジョブ、見積もり
-llm.py                 OpenAI 互換 API の接続と、画面から保存する AI接続の設定
-views.py               画面（帳票取り込み・表の取り込み・帳票登録の3つの blueprint と共通の小物）
-templates/             base.html（枠）・ui.html（共通の部品）・forms.html・form_types.html・tables.html（画面1つ＝1ファイル。
+  database.py          SQLite（スキーマ・マイグレーション、帳票の種類・帳票）
+  forms.py             帳票: Excel のセル構造、ラベル探索による読み取り、帳票の種類の定義と候補、帳票の Markdown
+  tables.py            一覧表: CSV/Excel の読み取り、表の範囲判定、列の対応づけ、正規化、チェック、記録の Markdown、zip、DB、ジョブ
+  logproc.py           「経過の記録」の列の分割（日時・記入者・識別子）、伏せ字、時系列の描画（コードの中での呼び名が log）
+  aiproc.py            AI整形: プロンプト、原文照合、キャッシュ、ジョブ、見積もり
+  llm.py               OpenAI 互換 API の接続と、画面から保存する AI接続の設定
+  views.py             画面（帳票取り込み・表の取り込み・帳票登録の3つの blueprint と共通の小物）
+  templates/           base.html（枠）・ui.html（共通の部品）・forms.html・form_types.html・tables.html（画面1つ＝1ファイル。
                        段の中身の断片は各ファイルの中のマクロ part_*）・error.html（エラー画面）
-static/                app.js（共通＋3画面ぶんを1ファイルに。画面ごとの見出し「// ==== 」で区切る）・style.css
-scripts/               make_samples.py（サンプルの生成。--large で大きなサンプル）・lightrag_offline_eval.py・samples/（大きなサンプルの生成器）
+  static/              app.js（共通＋3画面ぶんを1ファイルに。画面ごとの見出し「// ==== 」で区切る）・style.css
 tests/                 pytest（conftest.py に偽の OpenAI 互換サーバーと表の取り込みの操作。test_forms / test_tables / test_ai / test_core / test_cross）
+scripts/               サンプルデータの生成（make_samples.py。--large で大きなサンプル。samples/ は大きなサンプルの生成器）と
+                       LightRAG のオフライン評価（lightrag_offline_eval.py）
+samples/               生成したサンプルデータ（git 管理外。python scripts/make_samples.py --large で作る）
 docs/                  設計書（design.md）と調査資料（research.md と、その元データの json）
+instance/ data/ uploads/  実行時に作られる DB・設定・アップロード（git 管理外）
 ```
 
 ## テスト

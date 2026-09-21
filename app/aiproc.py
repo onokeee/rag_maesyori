@@ -28,10 +28,10 @@ from typing import Callable
 
 from flask import current_app
 
-import database
-import llm
-from core import JobCancelled, JobError, estimate_tokens, NO_LIVE_OWNER, request_pause
-from logproc import (
+from app import database
+from app import llm
+from app.core import JobCancelled, JobError, estimate_tokens, NO_LIVE_OWNER, request_pause
+from app.logproc import (
     LogParse,
     Segment,
     format_when,
@@ -44,7 +44,7 @@ from logproc import (
     render_timeline,
     review_notes,
 )
-from tables import base_date_from
+from app.tables import base_date_from
 
 
 
@@ -1484,7 +1484,7 @@ def load_spec(import_id: int, conn=None):
     if d is None:
         return None
     try:
-        from tables import spec_from_dict
+        from app.tables import spec_from_dict
         return spec_from_dict(d)
     except Exception:
         return d
@@ -2058,7 +2058,7 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
 def start_ai_job(import_id: int, scope: str = "pending", concurrency: int | None = None, stage_ids=None,
                  row_keys=None, model: str | None = None) -> int:
     """画面から呼ぶ：設定を固定してジョブを登録する（app_context 内）。"""
-    from core import start_job
+    from app.core import start_job
 
     settings = llm.job_client_settings(model=model)
     params = {"import_id": import_id, "scope": scope, "concurrency": concurrency, "stage_ids": stage_ids,

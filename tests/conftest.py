@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 from flask.testing import FlaskClient
 
-import core
-import tables
+from app import core
+from app import tables
 from app import create_app
-from forms import load_workbook_info
+from app.forms import load_workbook_info
 from scripts.make_samples import make_inspection, make_repair_shifted, make_repair_standard, make_repair_table
 
 
@@ -104,7 +104,7 @@ def extraction_json(value: str = "EQ-001") -> str:
 def add_confirmed_document(app, name: str, *, value: str = "EQ-001", batch_id: str = "",
                            order: int = 0) -> tuple[int, Path]:
     """確定済みの帳票を1件作る（アップロードしたファイルの実体も置く）。"""
-    import database as db
+    from app import database as db
 
     with app.app_context():
         stored = f"documents/{name}"

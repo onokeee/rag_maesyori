@@ -17,7 +17,7 @@ import yaml
 from flask import current_app
 from openai import OpenAI
 
-from core import REMOVE_RETRIES, REMOVE_RETRY_WAIT
+from app.core import REMOVE_RETRIES, REMOVE_RETRY_WAIT
 
 
 

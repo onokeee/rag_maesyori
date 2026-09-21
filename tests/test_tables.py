@@ -21,11 +21,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils.datetime import CALENDAR_MAC_1904
 
-import core
-import tables
-import views
-from core import estimate_tokens, md_filename
-from tables import (
+from app import core
+from app import tables
+from app import views
+from app.core import estimate_tokens, md_filename
+from app.tables import (
     CsvSource,
     sniff_csv,
     classify_rows,
@@ -88,7 +88,7 @@ from tests.test_ai import _read_import, ai_app_endpoints_ai, ai_client, fake_end
 
 def _tables_js() -> str:
     """static/app.js のうち、表の取り込みの部分（「// ==== tables: 」の見出しから次の見出しまで）。"""
-    js = (Path(__file__).resolve().parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    js = (Path(__file__).resolve().parents[1] / "app" / "static" / "app.js").read_text(encoding="utf-8")
     start = js.index("// ==== tables: ")
     nxt = js.find("\n// ==== ", start + 1)
     return js[start:nxt if nxt >= 0 else len(js)]
@@ -813,7 +813,7 @@ def _normal_mode(path: Path):
     from openpyxl import load_workbook
     from openpyxl.utils import column_index_from_string
 
-    from tables import CellInfo, SheetInfo, SourceRow, cell_text
+    from app.tables import CellInfo, SheetInfo, SourceRow, cell_text
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -889,8 +889,8 @@ def test_sample_excel_streaming_reader_matches_normal_mode():
 # ---- 行の分類: 集計の語・注記・縦結合のキー（R1） ----
 
 def _auto_records(source, sheet, layout):
-    from tables import read_records
-    from tables import spec_from_suggestions
+    from app.tables import read_records
+    from app.tables import spec_from_suggestions
 
     suggestions = suggest_columns(layout.headers, sample_data_rows(source, sheet, layout))
     spec = spec_from_suggestions("テスト", layout, suggestions, {})
@@ -1016,7 +1016,7 @@ def test_vertically_merged_keys_make_one_record(tmp_path):
 
 def test_unclosed_quote_is_reported_as_an_error(tmp_path):
     """" の閉じ忘れで以降の行が1つの値になったら、黙って件数を減らさず、確定を止めるエラーにする。"""
-    from tables import has_blocking, run_checks
+    from app.tables import has_blocking, run_checks
 
     lines = ["管理No,設備名,現象", "T0001,搬送機,停止", 'T0002,"研磨機,異音']
     lines += [f"T{i:04d},搬送機,停止" for i in range(3, 5003)]
@@ -1028,7 +1028,7 @@ def test_unclosed_quote_is_reported_as_an_error(tmp_path):
     layout = guess_layout(src, "q.csv")
     records, stats = _auto_records(src, "q.csv", layout)
     assert stats.unclosed_quote_row == 3
-    from tables import spec_from_suggestions
+    from app.tables import spec_from_suggestions
 
     spec = spec_from_suggestions("テスト", layout, suggest_columns(layout.headers, sample_data_rows(src, "q.csv", layout)), {})
     issues = run_checks(records, spec, stats)
@@ -1075,7 +1075,7 @@ def test_damaged_sheet_part_is_an_upload_error_not_zero_cells(tmp_path):
     """シートの圧縮データが壊れていたら、セル数の目安を 0 にせず「壊れている」と伝える。"""
     import zipfile as _zip
 
-    from tables import estimate_cell_count
+    from app.tables import estimate_cell_count
 
     wb = Workbook()
     for r in range(1, 200):
@@ -1570,7 +1570,7 @@ def test_pipeline_blocking_and_broken_file(app):
 
 
 def test_read_job_runs_in_worker(app):
-    import core
+    from app import core
 
     with app.app_context():
         _spec, import_id = _new_import(app)
@@ -1601,8 +1601,8 @@ def test_scan_memo_gives_same_layout(tmp_path):
 
 
 def test_import_source_cache_reuses_results_without_reopening(tmp_path):
-    from tables import list_kind
-    from tables import CACHE_FILE, ImportSource
+    from app.tables import list_kind
+    from app.tables import CACHE_FILE, ImportSource
 
     path = make_list_book(tmp_path / "list.xlsx")
     opened = []
@@ -1645,7 +1645,7 @@ def test_import_source_does_not_recreate_a_deleted_folder(tmp_path):
     """
     import shutil
 
-    from tables import CACHE_FILE, ImportSource
+    from app.tables import CACHE_FILE, ImportSource
 
     path = make_list_book(tmp_path / "list.xlsx")
     directory = tmp_path / "imports" / "1"
@@ -1659,7 +1659,7 @@ def test_import_source_does_not_recreate_a_deleted_folder(tmp_path):
 
 
 def test_rows_page_and_render_reuses_preview(app, monkeypatch):
-    import tables
+    from app import tables
 
     with app.app_context():
         _spec, import_id = _new_import(app)
@@ -1745,7 +1745,7 @@ def test_timeline_keeps_every_sentence_even_when_other_columns_repeat_them():
 
 def test_long_record_is_split_into_continuation_blocks_without_losing_text():
     """上限を超える記録は「（続きn/m）」に分ける。文は1つも消さず、どの部分にも管理No・設備・日付を書く。"""
-    from tables import RECORD_TOKEN_BUDGET, record_blocks
+    from app.tables import RECORD_TOKEN_BUDGET, record_blocks
 
     assert RECORD_TOKEN_BUDGET == 400
     log = "".join(f"8/3 {9 + i // 6:02d}:{(i % 6) * 10:02d} 田中：{'対応の記録です。' * 12}\n" for i in range(40))
@@ -1846,7 +1846,7 @@ def test_only_columns_set_to_not_output_are_left_out_of_the_records():
 
 def test_record_title_is_cut_at_a_readable_place():
     """見出しの切り詰めは、閉じない括弧を残さず、切ったことが分かるようにする。"""
-    from tables import TITLE_TEXT_CHARS, record_title
+    from app.tables import TITLE_TEXT_CHARS, record_title
 
     spec = spec_from_dict(list_spec_dict())
     long = "ドライポンプが過負荷停止(A-3501)、チャンバー圧力上昇(同型機CVD-205は正常なので単体の不具合)"
@@ -1862,7 +1862,7 @@ def test_record_title_is_cut_at_a_readable_place():
 
 def test_record_title_drops_a_date_only_preamble():
     """本文の1行目が「【発生】R05.04.01 11:45(休日)」なら、見出しの日付と同じものを繰り返さない。"""
-    from tables import record_title
+    from app.tables import record_title
 
     spec = spec_from_dict(list_spec_dict())
     text = "【発生】R05.04.01 11:45(休日)\n【設備】ETC-305 Polyエッチャ 5号機\n【内容】PM4のVppが範囲外"
@@ -1895,7 +1895,7 @@ def test_record_body_shows_the_split_entity_like_the_heading():
 
 def test_filenames_have_no_lightrag_hint_and_retired_settings_are_ignored():
     """ファイル名にヒント（.[...]）は付けない。保存済みの設定に残っていた項目は読み飛ばす。"""
-    from tables import TableSpec
+    from app.tables import TableSpec
 
     assert "lightrag_hint" not in TableSpec("新しい設定").markdown
     saved = list_spec_dict(lightrag_hint=True, dedupe_timeline=False, omit_person=True, max_records_per_file=3)
@@ -1963,7 +1963,7 @@ def test_split_entity_code_prefers_trailing_code_and_drops_qualifiers():
 
 def test_far_future_date_does_not_break_the_records(): 
     """「期限なし」の 9999/12/31 があっても、月末日の計算で落ちずに md を作れる。"""
-    from tables import month_last_day
+    from app.tables import month_last_day
 
     assert month_last_day("9999-12") == "9999-12-31" and month_last_day("2024-02") == "2024-02-29"
     spec = spec_from_dict(list_spec_dict())
@@ -1975,8 +1975,8 @@ def test_far_future_date_does_not_break_the_records():
 
 def test_the_file_list_counts_records_not_continuation_parts():
     """「内容の確認」のファイル一覧の「記録」は、記録の件数（「（続きn/m）」は1件の続きなので数えない）。"""
-    from tables import MdFile
-    from tables import _record_count
+    from app.tables import MdFile
+    from app.tables import _record_count
 
     text = ("# 見出し\n\n## 【A-1】長い記録（1/3）\n- a\n\n## 【A-1】長い記録（続き2/3）\n- b\n\n"
             "## 【A-1】長い記録（続き3/3）\n- c\n\n## 【A-2】短い記録\n- d\n")
@@ -2060,7 +2060,7 @@ def test_csv_import_flow(app, client, monkeypatch):
 
 def _pending_import(app, status="reading"):
     """読み込み中に見える取り込みを1件つくる（ジョブは待機中のまま）。"""
-    import database
+    from app import database
     with app.app_context():
         import_id = tables.create_import("大きい表.csv", "h" * 64, "uploads/大きい表.csv", {"encoding": "utf-8"})
         conn = database.get_db()
@@ -2094,7 +2094,7 @@ def test_cancel_read_job_puts_the_import_back(app, client):
 
 
 def test_cancel_render_job_returns_to_preview(app, client):
-    import database
+    from app import database
 
     import_id, job_id = _pending_import(app, status="confirming")
     with app.app_context():
@@ -2142,7 +2142,7 @@ def test_delete_import_removes_the_file_and_the_read_rows(app, client):
     res = client.post(f"/tables/imports/{import_id}/delete")
     assert res.status_code == 200 and res.get_json()["ok"] is True
     with app.app_context():
-        from core import upload_path
+        from app.core import upload_path
         assert tables.get_import(import_id) is None
         assert not tables.import_dir(import_id).exists()
         assert not upload_path(stored).exists()
@@ -2216,7 +2216,7 @@ def test_source_panel_marks_a_crosstab_sheet(app, client):
 # ---- 処理中の変更・削除を止める -----------------------------------------------------------
 
 def _queued_job(app, import_id, kind):
-    import database
+    from app import database
     with app.app_context():
         conn = database.get_db()
         ts = database.now()
@@ -2254,7 +2254,7 @@ def test_delete_and_confirm_are_refused_while_ai_formatting_runs(app, client, mo
     """AI整形の実行中に削除すると、動いている呼び出しが消したあとの DB に結果を書き戻すので、止める。"""
     from types import SimpleNamespace
 
-    import views as tables_view
+    from app import views as tables_view
 
     import_id = upload_csv(client, "AI中.csv")
     with app.app_context():
@@ -2275,9 +2275,9 @@ def test_trial_run_needs_the_external_confirmation(app, client, monkeypatch):
     """試し実行も、外部の AI に送るときは画面の確認のチェックがなければ送らない（サーバー側で確かめる）。"""
     from types import SimpleNamespace
 
-    import aiproc
-    import llm
-    import views as tables_view
+    from app import aiproc
+    from app import llm
+    from app import views as tables_view
 
     import_id = upload_csv(client, "試し.csv")
     monkeypatch.setattr(tables_view, "_spec_for", lambda imp: SimpleNamespace(log_stage=object()))
@@ -2310,8 +2310,8 @@ def test_workbook_without_sheets_is_rejected(app, client, tmp_path):
         assert tables.list_imports(limit=10) == []
 
 
-@pytest.mark.parametrize("url, target", [("/tables/upload", "views.open_source"),
-                                         ("/forms/upload", "views.precheck_excel")])
+@pytest.mark.parametrize("url, target", [("/tables/upload", "app.views.open_source"),
+                                         ("/forms/upload", "app.views.precheck_excel")])
 def test_unexpected_error_during_upload_leaves_no_file(app, client, monkeypatch, tmp_path, url, target):
     """読み込みの途中で思わぬエラーが出ても、アップロードしたファイルは残さない（design.md 3.3）。"""
     from pathlib import Path
@@ -2519,7 +2519,7 @@ def test_the_reason_a_column_starts_unchecked_is_under_its_name(client):
 
 def test_the_note_says_which_of_the_two_reasons_it_is():
     """理由は2つ（空欄だけ／記録に要らない管理用の列）。出す列には何も書かない。"""
-    from views import _unused_note
+    from app.views import _unused_note
 
     assert _unused_note(SimpleNamespace(md="omit", omit_reason="blank")) == \
         "空欄だけなので、はじめから使わない設定にしています"
@@ -2735,8 +2735,8 @@ def test_unlabeled_last_column_is_kept(tmp_path):
 
 def test_repeated_headers_keep_their_name_as_display():
     """同じ見出し「備考」が3つあっても、表示名が「2」「3」にならない。"""
-    from tables import _dedupe
-    from tables import _display_name
+    from app.tables import _dedupe
+    from app.tables import _display_name
 
     headers = _dedupe(["管理No", "発生日", "設備名", "備考", "備考", "備考"])
     assert headers[3:] == ["備考", "備考(2)", "備考(3)"]
@@ -2749,8 +2749,8 @@ def test_repeated_headers_keep_their_name_as_display():
 # ---- 数値の変換 --------------------------------------------------------------------------------
 
 def test_excel_number_under_an_unconvertible_unit_is_reported():
-    from tables import _convert_number
-    from tables import ColumnSpec
+    from app.tables import _convert_number
+    from app.tables import ColumnSpec
 
     col = ColumnSpec(key="downtime", display="停止時間", type="number", role="measure", unit="分")
     assert _convert_number(7200, "7200", col, None, "s") == (120, None, None)   # 秒→分
@@ -2777,8 +2777,8 @@ def test_huge_exponent_is_a_cell_issue_not_a_crash(tmp_path):
 
 
 def test_overflowing_sum_renders_without_error():
-    from tables import render_all
-    from tables import fmt_number
+    from app.tables import render_all
+    from app.tables import fmt_number
 
     assert fmt_number(float("inf")) == "inf"
     spec = spec_from_dict(list_spec_dict(group_by="entity_month"))
@@ -2789,8 +2789,8 @@ def test_overflowing_sum_renders_without_error():
 
 def test_placeholder_equipment_is_not_an_equipment():
     """対象設備が「調査中」だけの記録は、設備別のファイル分けに入れない（本文には原文のまま出す）。"""
-    from tables import render_all
-    from tables import entity_value
+    from app.tables import render_all
+    from app.tables import entity_value
 
     d = list_spec_dict(group_by="entity_month")
     d["columns"] = [c for c in d["columns"] if c["key"] != "equipment_name"]
@@ -2907,7 +2907,7 @@ def _small_book(path: Path):
 
 
 def test_format_only_far_cell_does_not_block_upload(app, client, tmp_path):
-    from tables import ExcelSource
+    from app.tables import ExcelSource
 
     wb, ws = _small_book(tmp_path)
     ws["XFD1048576"].fill = PatternFill("solid", fgColor="FFFF00")
@@ -2938,7 +2938,7 @@ def test_workbook_with_unreadable_values_is_refused_at_upload(app, client, tmp_p
 
 def test_retention_note_only_says_the_data_is_deleted():
     """渡すのは zip だけになったので、案内も「消える」ことだけにする（CSVの順番の話は残さない）。"""
-    from views import TABLES_DELETE_ON_DOWNLOAD_NOTE as DELETE_ON_DOWNLOAD_NOTE
+    from app.views import TABLES_DELETE_ON_DOWNLOAD_NOTE as DELETE_ON_DOWNLOAD_NOTE
 
     assert "より先" not in DELETE_ON_DOWNLOAD_NOTE and "CSV" not in DELETE_ON_DOWNLOAD_NOTE
     assert "管理用" not in DELETE_ON_DOWNLOAD_NOTE and "サーバーから消えます" in DELETE_ON_DOWNLOAD_NOTE
@@ -3091,7 +3091,7 @@ def test_csv_single_header_row_is_not_joined_with_first_data_row(tmp_path):
 # ---- T3-5: CP932 のファイルに UTF-8 の行が混ざる -----------------------------------------------
 
 def test_utf8_lines_appended_to_cp932_csv_are_warned(tmp_path):
-    from tables import sniff_csv
+    from app.tables import sniff_csv
 
     head = "管理No,発生日,現象\r\n" + "".join(f"TR-{i:03d},2026/08/{i % 28 + 1:02d},ポンプ停止{i}\r\n" for i in range(20))
     tail = "".join(f"TR-{i:03d},2026/08/{i % 28 + 1:02d},ポンプ停止{i}\r\n" for i in range(20, 28))
@@ -3103,7 +3103,7 @@ def test_utf8_lines_appended_to_cp932_csv_are_warned(tmp_path):
 
 
 def test_plain_cp932_csv_has_no_utf8_warning(tmp_path):
-    from tables import sniff_csv
+    from app.tables import sniff_csv
 
     text = "管理No,発生日,現象\r\n" + "".join(f"TR-{i:03d},2026/08/{i % 28 + 1:02d},ポンプ停止ｱｲｳ髙{i}\r\n" for i in range(30))
     p = tmp_path / "sjis.csv"
@@ -3117,13 +3117,13 @@ def test_csv_error_message_has_no_english_exception_text(tmp_path):
     import csv
     import re
 
-    from tables import UploadError
+    from app.tables import UploadError
 
     p = tmp_path / "unclosed.csv"
     p.write_bytes(('管理No,発生日,現象\r\nTR-001,2026/08/01,"閉じていない\r\n' + "続き,x\r\n" * 50).encode("utf-8"))
     old = csv.field_size_limit(100)
     try:
-        from tables import CsvSource
+        from app.tables import CsvSource
 
         src = CsvSource(p, "unclosed.csv", {"encoding": "utf-8", "delimiter": ","})
         with pytest.raises(UploadError) as e:
@@ -3153,8 +3153,8 @@ def test_prose_columns_similar_to_person_headers_stay_in_the_body(tmp_path):
 # ---- C3-2: 同じ設定の別の取り込みの AI の結果で、下書きを作り直さない ------------------------------
 
 def test_ai_results_of_another_import_leave_the_preview_signature_alone(app, client):
-    import aiproc as ai_items
-    import tables
+    from app import aiproc as ai_items
+    from app import tables
 
     import_id = _confirmed_import(app, client)
     with app.app_context():
@@ -3220,8 +3220,8 @@ def test_cached_formula_values_are_not_warned(tmp_path):
 # ---- F3: 打ち間違えた遠い年の日付 ----------------------------------------------------------------
 
 def test_far_off_date_is_warned():
-    from tables import render_all
-    from tables import spec_from_dict
+    from app.tables import render_all
+    from app.tables import spec_from_dict
 
     spec = spec_from_dict(list_spec_dict())
     dates = [f"2025-08-{d:02d}" for d in range(1, 11)] + ["2052-08-11"]
@@ -3238,7 +3238,7 @@ def test_far_off_date_is_warned():
 
 
 def test_short_gaps_between_months_are_not_warned():
-    from tables import spec_from_dict
+    from app.tables import spec_from_dict
 
     spec = spec_from_dict(list_spec_dict())
     records = [_rec("a", occurred_at="2025-01-10"), _rec("b", occurred_at="2025-06-10")]
@@ -3248,7 +3248,7 @@ def test_short_gaps_between_months_are_not_warned():
 def test_zero_serial_in_a_date_formatted_cell_is_a_type_error():
     from datetime import datetime
 
-    from tables import ConvertContext, _convert_date
+    from app.tables import ConvertContext, _convert_date
 
     out, error, _flag = _convert_date(datetime(1899, 12, 30), "1899-12-30", "date", ConvertContext())
     assert error and "変換できません" in error
@@ -3274,7 +3274,7 @@ def test_preview_is_not_queued_behind_a_paused_ai_job(app, client):
     """AI整形が一時停止中のまま「内容の確認」の段を開いても、下書きのジョブを後ろに並べて黙って待たせない。"""
     import time
 
-    import core
+    from app import core
     from tests.conftest import imported, panel
 
     import_id = imported(app, client, "トラブル一覧.csv", "停止中テスト", ai_role="log")
@@ -3359,7 +3359,7 @@ def _editor_body(app, client, text=None):
 
 
 def _saved(app, client, import_id, body):
-    import tables
+    from app import tables
     from tests.conftest import save_columns, wait_import_job
 
     res = save_columns(client, import_id, body)
@@ -3418,15 +3418,15 @@ def test_the_table_name_decides_the_file_names(app, client):
 # ---- T4-4 / S4-1: JSON で取り込む設定の AI整形の項目を確かめる ----------------------------------------
 
 def _log_spec(**stage):
-    from tables import spec_from_dict
+    from app.tables import spec_from_dict
 
     return spec_from_dict({"name": "x", "columns": [{"key": "log", "display": "ログ", "type": "text", "role": "log"}],
                            "log_stage": {"column": "log", **stage}})
 
 
 def test_mask_given_as_a_string_is_read_as_rules():
-    from tables import parse_log_cell
-    from tables import validate_spec
+    from app.tables import parse_log_cell
+    from app.tables import validate_spec
 
     text = "8/1 10:00 田中: 連絡先 090-1234-5678 / taro@example.com に電話"
     for mask in ("email", "phone,email", "phone、email"):
@@ -3438,7 +3438,7 @@ def test_mask_given_as_a_string_is_read_as_rules():
 
 
 def test_malformed_log_stage_and_checks_are_refused():
-    from tables import spec_from_dict, validate_spec
+    from app.tables import spec_from_dict, validate_spec
 
     assert any("伏せ字" in e for e in validate_spec(_log_spec(mask=["phone", "住所"])))
     assert any("人名一覧" in e for e in validate_spec(_log_spec(people=["田中"])))
@@ -3451,7 +3451,7 @@ def test_malformed_log_stage_and_checks_are_refused():
 
 
 def test_bad_or_slow_split_patterns_are_refused():
-    from tables import validate_spec
+    from app.tables import validate_spec
 
     assert any("正しくありません" in e for e in validate_spec(_log_spec(splitter={"extra_anchors": ["["]})))
     assert any("遅く" in e for e in validate_spec(_log_spec(splitter={"extra_anchors": ["(.+)+X"]})))
@@ -3462,7 +3462,7 @@ def test_bad_or_slow_split_patterns_are_refused():
 # ---- R4-MD-1: 「〃」「同上」は直前の行の値で補う ----------------------------------------------------
 
 def test_ditto_marks_are_filled_from_the_row_above(tmp_path):
-    from tables import render_all
+    from app.tables import render_all
 
     lines = ["管理No,発生日,設備ID,設備名,現象,停止時間(分)",
              "TR-1,2025-03-01,CMP-101,CMP研磨機1号機,異音,30",
@@ -3486,7 +3486,7 @@ def test_ditto_marks_are_filled_from_the_row_above(tmp_path):
 
 
 def test_ditto_without_a_row_above_is_not_an_equipment(tmp_path):
-    from tables import entity_value
+    from app.tables import entity_value
 
     lines = ["管理No,発生日,設備ID,現象,停止時間(分)",
              "TR-1,2025-03-01,〃,異音,30",
@@ -3515,7 +3515,7 @@ def test_date_range_ignores_unconverted_date_text(tmp_path):
 # ---- R4-MD-3: 時系列の記入者は、担当者の列から補った表記で出す ------------------------------------------
 
 def _person_spec():
-    from tables import spec_from_dict
+    from app.tables import spec_from_dict
 
     return spec_from_dict({
         "name": "x", "columns": [
@@ -3527,7 +3527,7 @@ def _person_spec():
 
 
 def _timeline(log: str) -> str:
-    from tables import people_index_for, record_block
+    from app.tables import people_index_for, record_block
 
     spec = _person_spec()
     rec = {"key": "A-1", "values": {"no": "A-1", "occurred_at": "2026-07-01", "log": log, "worker": "井上 亮"},
@@ -3548,8 +3548,8 @@ def test_the_person_column_is_written_and_fills_in_the_timeline_author():
 
 
 def test_delete_is_refused_while_an_ai_trial_is_running(ai_app_endpoints_ai, ai_client, monkeypatch):
-    import aiproc
-    import tables
+    from app import aiproc
+    from app import tables
 
     import_id = _read_import(ai_app_endpoints_ai, ai_client)
     seen = {}
@@ -3574,9 +3574,9 @@ def test_delete_is_refused_while_an_ai_trial_is_running(ai_app_endpoints_ai, ai_
 # ---- C4-1: AI整形の実行中・一時停止中は読み込み直さない ------------------------------------------------
 
 def test_reread_is_refused_while_ai_format_is_running_or_paused(ai_app_endpoints_ai, ai_client, monkeypatch):
-    import core
-    import tables
-    import views as views_tables
+    from app import core
+    from app import tables
+    from app import views as views_tables
 
     import_id = _read_import(ai_app_endpoints_ai, ai_client)
     with ai_app_endpoints_ai.app_context():
@@ -3596,7 +3596,7 @@ def test_reread_is_refused_while_ai_format_is_running_or_paused(ai_app_endpoints
 def _no_import_left(app):
     from pathlib import Path
 
-    import tables
+    from app import tables
 
     with app.app_context():
         assert tables.list_imports(limit=10) == []
@@ -3616,8 +3616,8 @@ def test_csv_with_a_huge_first_line_is_refused_at_upload(app, client):
 def test_csv_rows_over_the_column_limit_are_refused_when_read(tmp_path):
     import pytest
 
-    from core import UploadError
-    from tables import MAX_COLUMNS, CsvSource
+    from app.core import UploadError
+    from app.tables import MAX_COLUMNS, CsvSource
 
     p = tmp_path / "w.csv"
     p.write_bytes(("a,b\r\n1,2\r\n" + ",".join("x" for _ in range(MAX_COLUMNS + 5)) + "\r\n").encode("utf-8"))
@@ -3765,8 +3765,8 @@ def _far_book(path: Path, far: str, rows: int) -> Path:
 
 
 def test_far_stray_header_cell_does_not_widen_the_table(tmp_path):
-    from tables import guess_layout
-    from tables import open_source
+    from app.tables import guess_layout
+    from app.tables import open_source
 
     path = _far_book(tmp_path / "far.xlsx", "XFD1", 3000)
     started = time.monotonic()
@@ -3778,7 +3778,7 @@ def test_far_stray_header_cell_does_not_widen_the_table(tmp_path):
 
 
 def test_far_last_cell_in_a_near_column_does_not_pad_every_row(tmp_path):
-    from tables import open_source
+    from app.tables import open_source
 
     # 256列目（PAD_MAX_COLUMNS 以下）の遠いセル。行×列で埋めると100秒近くかかっていた
     path = _far_book(tmp_path / "far3.xlsx", "IV1048576", 20)
@@ -3802,7 +3802,7 @@ def test_far_last_cell_upload_finishes_and_reads_the_table(app, client, tmp_path
 # ---- R5C-1: 確定の処理の途中で渡し終えて消えた取り込みのフォルダを作り直さない ---------------------------------
 
 def test_render_does_not_recreate_a_purged_import(app, monkeypatch):
-    import core
+    from app import core
 
     with app.app_context():
         _spec, import_id = _new_import(app)
@@ -3870,8 +3870,8 @@ def _deep_book(path: Path, header_row: int, sheet: str = "一覧") -> Path:
 
 
 def test_header_row_below_the_head_rows_is_read(tmp_path):
-    from tables import guess_layout
-    from tables import ExcelSource
+    from app.tables import guess_layout
+    from app.tables import ExcelSource
 
     src = ExcelSource(_deep_book(tmp_path / "deep90.xlsx", 91))
     layout = guess_layout(src, "一覧", header_rows=[91])
@@ -3901,7 +3901,7 @@ _ROW_INPUTS = ["６,７", "3-4", "1，2", "1、2 3", "3a", "5-3", "1-20", "", "0
 
 
 def test_row_inputs_are_read_the_same_way_on_the_server():
-    from views import _int_list, _row_no
+    from app.views import _int_list, _row_no
 
     assert _int_list("６,７") == [6, 7]
     assert _int_list("3-4") == [3, 4]
@@ -3913,7 +3913,7 @@ def test_row_inputs_are_read_the_same_way_on_the_server():
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node がない")
 def test_row_inputs_are_read_the_same_way_in_the_browser():
-    from views import _int_list, _row_no
+    from app.views import _int_list, _row_no
 
     js = _tables_js()
     start = js.index("  const parseEnd = ")
@@ -3931,7 +3931,7 @@ process.stdout.write(JSON.stringify({{rows: inputs.map(parseRows), ends: inputs.
 # ---- R6T-5: 既定の候補で「経過の記録」（role=log）は1列だけ -----------------------------------------------------
 
 def test_default_suggestions_tick_only_one_log_column():
-    from tables import suggest_columns
+    from app.tables import suggest_columns
 
     log = "4/1 10:00 停止を確認。\n4/2 11:00 センサーを交換。\n4/3 復旧を確認した。"
     headers = ["管理No", "対応内容", "対応内容_2", "対応内容_3"]
@@ -4006,7 +4006,7 @@ def _code_entity_spec():
     ("0:28、搬送停止", "搬送停止"),
 ])
 def test_title_keeps_a_time_that_is_part_of_the_sentence(text, expected):
-    from tables import _title_text_line
+    from app.tables import _title_text_line
 
     assert _title_text_line(text) == expected
 
@@ -4014,7 +4014,7 @@ def test_title_keeps_a_time_that_is_part_of_the_sentence(text, expected):
 # ---- R6-1: 渡し終えた取り込みに、読み込み直しが行データ・問題一覧を書き戻さない ------------------------------------
 
 def test_reread_does_not_write_back_into_a_purged_import(app, monkeypatch):
-    import core
+    from app import core
 
     with app.app_context():
         __spec, import_id = _new_import(app)
@@ -4042,8 +4042,8 @@ def test_write_helpers_do_not_create_a_missing_folder(tmp_path):
 # ---- R6-SEC-1: 全角の ＝ ＋ － ＠ で始まるシート名・ファイル名も式にしない --------------------------------------------
 
 def test_full_width_formula_prefixes_are_guarded():
-    from tables import Issue
-    from tables import guard_formula, issues_csv
+    from app.tables import Issue
+    from app.tables import guard_formula, issues_csv
 
     for s in ("＝SUM(1,1)", "＋1", "－1", "＠SUM(1,1)"):
         assert guard_formula(s) == "'" + s
@@ -4080,7 +4080,7 @@ def _small_book_tables_fixes6(path: Path) -> Path:
 
 
 def test_huge_hidden_column_span_is_clamped(tmp_path):
-    from tables import ExcelSource
+    from app.tables import ExcelSource
 
     path = _small_book_tables_fixes6(tmp_path / "cols.xlsx")
     _rewrite_sheet(path, lambda d: d.replace(
@@ -4092,8 +4092,8 @@ def test_huge_hidden_column_span_is_clamped(tmp_path):
 
 
 def test_cell_beyond_the_excel_row_limit_is_refused_quickly(tmp_path):
-    from tables import ExcelSource
-    from tables import UploadError
+    from app.tables import ExcelSource
+    from app.tables import UploadError
 
     path = _small_book_tables_fixes6(tmp_path / "far.xlsx")
     _rewrite_sheet(path, lambda d: d.replace(
@@ -4106,9 +4106,9 @@ def test_cell_beyond_the_excel_row_limit_is_refused_quickly(tmp_path):
 
 
 def test_xlsx_with_too_many_columns_is_refused(tmp_path):
-    from tables import MAX_COLUMNS
-    from tables import ExcelSource
-    from tables import UploadError
+    from app.tables import MAX_COLUMNS
+    from app.tables import ExcelSource
+    from app.tables import UploadError
 
     wb = Workbook()
     ws = wb.active
@@ -4123,7 +4123,7 @@ def test_xlsx_with_too_many_columns_is_refused(tmp_path):
 
 
 def test_far_memo_cell_is_not_counted_as_many_columns(tmp_path):
-    from tables import ExcelSource
+    from app.tables import ExcelSource
 
     path = _small_book_tables_fixes6(tmp_path / "memo.xlsx")
     wb = Workbook()
@@ -4178,8 +4178,8 @@ def test_reread_during_hand_out_goes_back_to_the_preview(app, client, monkeypatc
 # ---- R6B-2: md のパスが Windows の上限を超えるときは分かる言葉で止める --------------------------------------------------
 
 def test_too_long_md_path_gives_a_clear_message(tmp_path, monkeypatch):
-    import core as core
-    from tables import MdFile
+    from app import core as core
+    from app.tables import MdFile
 
     monkeypatch.setattr(core, "_long_paths_enabled", lambda: False)
     target = tmp_path / "md"
@@ -4194,7 +4194,7 @@ def test_too_long_md_path_gives_a_clear_message(tmp_path, monkeypatch):
 # ---- R6-T-01: 記録番号・担当者の列の「〃」「同上」も直前の行の値で補う ------------------------------------------
 
 def test_ditto_in_the_record_number_and_person_columns_is_filled(tmp_path):
-    from tables import render_all
+    from app.tables import render_all
 
     lines = ["管理No,発生日,設備ID,現象,対応者,停止時間(分)",
              "TR-001,2025-03-01,CMP-101,異音,田中,30",
@@ -4245,7 +4245,7 @@ def test_fallback_key_columns_are_checked_when_they_are_written_by_hand():
 # ---- R6-T-03: 列の範囲は指定できないので、Excel 側で直す案内にする --------------------------------------------
 
 def test_right_hand_table_warning_tells_what_can_actually_be_done(tmp_path):
-    from tables import guess_layout
+    from app.tables import guess_layout
 
     lines = ["管理No,発生日,現象,,設備No,点検日,結果"]
     for i in range(10):
@@ -4258,7 +4258,7 @@ def test_right_hand_table_warning_tells_what_can_actually_be_done(tmp_path):
 
 
 def test_far_memo_column_warning_tells_what_can_actually_be_done(tmp_path):
-    from tables import guess_layout
+    from app.tables import guess_layout
 
     blanks = "," * 22
     lines = [f"管理No,発生日,現象{blanks},メモ"] + [f"TR-{i:03d},2025-03-{i + 1:02d},停止{blanks}," for i in range(10)]
@@ -4271,7 +4271,7 @@ def test_far_memo_column_warning_tells_what_can_actually_be_done(tmp_path):
 # ---- R6-T-04: 判定に使っていない項目は取り込み設定に持たない ----------------------------------------------------
 
 def test_settings_that_never_changed_the_reading_are_dropped():
-    from tables import spec_to_dict
+    from app.tables import spec_to_dict
 
     col = {"key": "a", "display": "a", "type": "string", "role": "attribute"}
     spec = spec_from_dict({"name": "x", "columns": [col],
@@ -4324,8 +4324,8 @@ def test_a_data_end_above_the_header_is_echoed_back_with_its_own_message(client)
 # ---- r6-c1: 成功して終わったばかりの読み込みを［中止］が巻き戻さない --------------------------------------------
 
 def test_cancel_does_not_undo_a_read_that_just_finished(app, client, monkeypatch):
-    import core
-    import database
+    from app import core
+    from app import database
 
     with app.app_context():
         __spec, import_id = _new_import(app)
@@ -4358,7 +4358,7 @@ def test_cancel_does_not_undo_a_read_that_just_finished(app, client, monkeypatch
 # ---- ux6-6: ［取り込みを削除］の確認文は取り込みのどの画面でも同じ ------------------------------------------------
 
 def test_the_delete_confirm_text_is_the_same_on_every_table_screen():
-    root = Path(__file__).resolve().parents[1] / "templates"
+    root = Path(__file__).resolve().parents[1] / "app" / "templates"
     shared = "この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
     found = [line.strip() for path in root.rglob("*.html")
              for line in path.read_text(encoding="utf-8").splitlines() if "この取り込みを削除します" in line]
@@ -4377,9 +4377,9 @@ _EMPTY_COL_CSV = "\r\n".join(
 
 def _columns_of(tmp_path, text: str, name: str = "空列.csv"):
     """CSV を読み、列の対応づけに出る候補を返す。"""
-    from tables import guess_layout, sample_data_rows
-    from tables import suggest_columns
-    from tables import open_source
+    from app.tables import guess_layout, sample_data_rows
+    from app.tables import suggest_columns
+    from app.tables import open_source
 
     path = tmp_path / name
     path.write_bytes(text.encode("cp932"))
@@ -4408,9 +4408,9 @@ def test_a_column_with_values_only_in_later_rows_stays_in_the_list(tmp_path):
 
 def test_an_excel_table_that_starts_at_c3_lists_only_its_own_columns(tmp_path):
     """表が C3 から始まる Excel でも、A・B列は一覧に出さない（Excel も CSV と同じ扱い）。"""
-    from tables import guess_layout, sample_data_rows
-    from tables import suggest_columns
-    from tables import open_source
+    from app.tables import guess_layout, sample_data_rows
+    from app.tables import suggest_columns
+    from app.tables import open_source
 
     wb = Workbook()
     ws = wb.active
@@ -4433,9 +4433,9 @@ def test_an_excel_table_that_starts_at_c3_lists_only_its_own_columns(tmp_path):
 @pytest.mark.samples
 def test_sample_t6_lists_20_columns_instead_of_22():
     """T6（表が C3 から始まる）の列の一覧は 22 列ではなく 20 列。"""
-    from tables import guess_layout, sample_data_rows
-    from tables import suggest_columns
-    from tables import open_source
+    from app.tables import guess_layout, sample_data_rows
+    from app.tables import suggest_columns
+    from app.tables import open_source
 
     path = Path(__file__).resolve().parents[1] / "samples" / "tables" / "T6_装置トラブルカルテ.xlsx"
     if not path.exists():
@@ -4589,7 +4589,7 @@ def test_the_preview_step_blocks_the_confirm_button_when_nothing_can_be_read(app
 
 def test_a_confirmed_import_with_no_markdown_does_not_offer_a_download(app, client, tmp_path):
     """記録0件のまま確定された取り込みは、⑦でダウンロードのボタンを出さない。"""
-    import tables
+    from app import tables
 
     import_id = _struck_import(app, client, tmp_path, "取り消し線2.xlsx")
     with app.app_context():
@@ -4681,7 +4681,7 @@ def test_a_completely_empty_record_still_says_which_row_it_came_from():
 
 def test_records_without_a_date_keep_the_order_of_the_source_table():
     """日付の列が無い表は、元の表の行の順に並べる（記録キーの文字くらべにしない）。"""
-    from tables import render_all
+    from app.tables import render_all
 
     spec = _code_spec()
     records = []
@@ -4698,7 +4698,7 @@ def test_records_without_a_date_keep_the_order_of_the_source_table():
 
 def test_records_with_a_date_are_still_ordered_by_date(app, client):
     """日付のある表の並びは今までどおり（同じ日付のときだけ元の行の順になる）。"""
-    from tables import render_all
+    from app.tables import render_all
 
     spec = spec_from_dict(list_spec_dict())
     early = _rec("A-2", record_no="A-2", occurred_at="2026-08-01", equipment_id="EQ-1")

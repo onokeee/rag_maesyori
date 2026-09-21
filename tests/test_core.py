@@ -24,11 +24,11 @@ from waitress.server import create_server
 from werkzeug.datastructures import FileStorage
 
 import app as app_module
-import core
-import database as db
-import tables
+from app import core
+from app import database as db
+from app import tables
 from app import create_app
-from core import (
+from app.core import (
     UploadError,
     precheck_excel,
     remove_upload,
@@ -43,8 +43,8 @@ from core import (
     safe_filename_part,
     FORM_MAX_MERGED_CELLS,
 )
-from forms import FieldDef, PatternDef, SheetDef
-from logproc import (
+from app.forms import FieldDef, PatternDef, SheetDef
+from app.logproc import (
     PeopleIndex,
     SplitOptions,
     apply_glossary,
@@ -60,7 +60,7 @@ from logproc import (
     extract_quantities,
     shadow,
 )
-from tables import get_import
+from app.tables import get_import
 from tests.conftest import (
     add_confirmed_document,
     confirmed_import,
@@ -962,8 +962,8 @@ def test_unexpected_failure_does_not_show_the_python_exception_name(core_app_cor
 
 def test_ai_and_table_errors_are_shown_to_the_user(core_app_core_jobs):
     """AI整形・一覧表の処理エラーは日本語のメッセージを持つので、そのまま出す（JobError を継承している）。"""
-    from aiproc import AIJobError
-    from tables import PipelineError
+    from app.aiproc import AIJobError
+    from app.tables import PipelineError
 
     assert issubclass(AIJobError, core.JobError) and issubclass(PipelineError, core.JobError)
     assert core.error_message(AIJobError("AI接続が設定されていません")) == "AI接続が設定されていません"
@@ -2170,7 +2170,7 @@ def test_the_ai_run_records_which_import_paid_for_each_response(ai_app, fake):
     型番違いの行は照合で引っかかって再依頼になり、ai_items は再依頼の応答のキーだけを覚える。
     1回目の応答も持ち主が分かるので、その取り込みを消せば残らない。
     """
-    import aiproc
+    from app import aiproc
 
     iid = _make_import(ai_app, rows={"R2": ROWS["R2"]})
     with ai_app.app_context():
@@ -2510,7 +2510,7 @@ def test_another_browser_cannot_see_or_delete_a_form(app, client, other_client, 
     # 番号を並べて送っても、ほかのブラウザの帳票は「確定してダウンロード」の欄に出てこない
     assert other_client.get(f"/forms/finish?ids={doc_id}").get_json()["total"] == 0
 
-    import database as db
+    from app import database as db
     with app.app_context():
         assert db.get_document(doc_id) is not None
     assert client.get(f"/forms/{doc_id}/type").status_code == 200

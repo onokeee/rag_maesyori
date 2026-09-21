@@ -1,4 +1,7 @@
-"""Flask アプリ（create_app）・設定（env ファイルを読み込む。旧 config.py）・起動。"""
+"""Flask アプリ（create_app）と設定（env ファイルを読み込む。旧 config.py）。起動は run.py。
+
+アプリ本体はこの app/ フォルダに全部ある: core.py（土台）・database.py・forms.py（帳票）・tables.py（一覧表）・
+logproc.py（経過の記録）・aiproc.py（AI整形）・llm.py（AI接続）・views.py（画面）と templates/・static/。"""
 import os
 import secrets
 import socket
@@ -11,8 +14,8 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from flask import Blueprint, Flask, abort, jsonify, redirect, render_template, request, url_for
 
-import database
-from views import form_types_bp, forms_bp, is_cross_site_write, tables_bp
+from app import database
+from app.views import form_types_bp, forms_bp, is_cross_site_write, tables_bp
 
 
 
@@ -20,7 +23,7 @@ from views import form_types_bp, forms_bp, is_cross_site_write, tables_bp
 # 設定（元 config.py）
 # ====================================================================================================
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent   # プロジェクトの根（env・instance/・data/・uploads/ の置き場所）
 
 # 接続設定は aiagent_minimal_rag_tougou と同じく、ドット無しの "env" ファイル（export KEY="..." 形式も可）から読む
 load_dotenv(BASE_DIR / "env")
@@ -41,7 +44,7 @@ def _optional_int(name: str) -> int | None:
 
 
 class Config:
-    # セッション署名鍵は app.py が FLASK_SECRET_KEY または .flask_secret ファイルから設定する
+    # セッション署名鍵は create_app が FLASK_SECRET_KEY または .flask_secret ファイルから設定する
     SECRET_KEY = None
     DATABASE = Path(os.environ.get("DATABASE", BASE_DIR / "instance" / "app.db"))
     UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", BASE_DIR / "uploads"))
@@ -119,8 +122,8 @@ _NO_DEBUG_MSG = (
     "\n[app] デバッグモードでは起動しません。\n"
     "  理由: デバッガが開くと、例外が出たときにブラウザからこのサーバの Python を実行できます。\n"
     "  断ったもの: flask run の --debug / --debugger と、環境変数 FLASK_DEBUG=1。\n"
-    "  通常の起動: python app.py\n"
-    "  詳しいエラーを見たいとき: app.py の DEBUG を True にして python app.py\n"
+    "  通常の起動: python run.py\n"
+    "  詳しいエラーを見たいとき: app/__init__.py の DEBUG を True にして python run.py\n"
 )
 
 
@@ -134,7 +137,7 @@ def _refuse_debugger() -> None:
 # --- 待ち受け先と、受け付ける宛先の名前 -------------------------------------------------
 # サーバ（JupyterLab のターミナルなど）で起動し、社内LANの他のPCから数人で開いて使う（design.md 0）。
 # 既定はこのサーバの中からだけ開ける 127.0.0.1。LAN に出すときは起動時に環境変数で渡す:
-#   HOST=0.0.0.0 PORT=5000 python app.py
+#   HOST=0.0.0.0 PORT=5000 python run.py
 _ALL_ADDRESSES = ("", "0.0.0.0", "::")
 
 
@@ -145,7 +148,7 @@ def _env_port(default: int = 5000) -> int:
     try:
         port = int(raw)
     except ValueError:
-        raise SystemExit(f"\n[app] PORT が数字ではありません: {raw!r}\n  例: PORT=5000 python app.py\n") from None
+        raise SystemExit(f"\n[app] PORT が数字ではありません: {raw!r}\n  例: PORT=5000 python run.py\n") from None
     if not 1 <= port <= 65535:
         raise SystemExit(f"\n[app] PORT が範囲外です: {port}（1〜65535）\n")
     return port
@@ -392,7 +395,7 @@ def _purge_pending(app: Flask) -> None:
     """起動時：ダウンロードしていない帳票・一覧表をすべて捨てる（作業中の一覧を持たないため）。"""
     if app.config.get("TESTING"):
         return
-    import core
+    from app import core
 
     try:
         with app.app_context():
@@ -410,7 +413,7 @@ def _start_sweeper(app: Flask) -> None:
     """動いている間：しばらくさわられていない帳票・一覧表を捨て続ける（daemon スレッド）。"""
     if app.config.get("TESTING"):
         return
-    import core
+    from app import core
 
     interval = _sweep_interval(getattr(core, "STALE_HOURS", 24))
 
@@ -436,9 +439,9 @@ def _cleanup_leftovers(app: Flask) -> None:
     データを残さない方針（design.md 3.3）でも、削除の途中で落ちたときやファイルを掴まれていたときに
     残ることがあるので、ここで片付ける。作業中のものは DB に行があるので消さない。
     """
-    import core
-    from core import remove_orphan_import_dirs, remove_orphan_uploads
-    from database import get_db
+    from app import core
+    from app.core import remove_orphan_import_dirs, remove_orphan_uploads
+    from app.database import get_db
 
     try:
         with app.app_context():
@@ -467,7 +470,7 @@ def _cleanup_leftovers(app: Flask) -> None:
 
 def _recover_jobs(app: Flask) -> None:
     """前回の終了時に動いていたジョブを「中断」にする。"""
-    from core import recover_interrupted
+    from app.core import recover_interrupted
 
     try:
         with app.app_context():
@@ -490,26 +493,3 @@ OUTBUF_HIGH_WATERMARK = 16 * 1024
 WAITRESS_OPTIONS = {"threads": THREADS, "outbuf_high_watermark": OUTBUF_HIGH_WATERMARK}
 # エラー画面に詳細を出すか。通常は False のまま。
 DEBUG = False
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        sys.exit(f"不明な引数: {sys.argv[1]}（起動は引数なしの python app.py。"
-                 f"待ち受け先は環境変数 HOST・PORT で渡します）")
-    if DEBUG and not _is_loopback(HOST):
-        # DEBUG=True の Flask はデバッガを開く。LAN に出す起動では絶対に開かせない（_NO_DEBUG_MSG と同じ理由）
-        raise SystemExit("\n[app] DEBUG = True のまま LAN のアドレス（HOST=%s）では起動しません。\n"
-                         "  理由: デバッガが開くと、例外が出たときにブラウザからこのサーバの Python を実行できます。\n"
-                         "  詳しいエラーを見たいときは HOST を外して（127.0.0.1 で）起動してください。\n" % HOST)
-
-    application = create_app()
-    print(startup_notice())
-    if DEBUG:
-        application.run(host=HOST, port=PORT, debug=True, use_reloader=False)
-    else:
-        try:
-            from waitress import serve
-        except ImportError:
-            print("[app] waitress が無いため Flask の開発サーバで起動します（pip install waitress を推奨）")
-            application.run(host=HOST, port=PORT, debug=False)
-        else:
-            serve(application, host=HOST, port=PORT, **WAITRESS_OPTIONS)

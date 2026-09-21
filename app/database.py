@@ -20,7 +20,7 @@ from flask import current_app, g
 # ====================================================================================================
 
 if TYPE_CHECKING:
-    from forms import FieldDef, PatternDef, SheetDef
+    from app.forms import FieldDef, PatternDef, SheetDef
 
 BUSY_TIMEOUT_MS = 5000
 
@@ -521,7 +521,7 @@ def create_pattern(name: str) -> int:
 
 
 def _field_def(row: dict) -> FieldDef:
-    from forms import FieldDef, PatternDef, SheetDef   # forms → core → database の順に読み込むので、ここで
+    from app.forms import FieldDef, PatternDef, SheetDef   # forms → core → database の順に読み込むので、ここで
     fd = FieldDef(
         field_name=row["field_name"],
         display_name=row["display_name"],
@@ -563,7 +563,7 @@ def _extraction_rule(f: FieldDef) -> dict:
 
 
 def load_pattern(pattern_id: int | None) -> PatternDef | None:
-    from forms import FieldDef, PatternDef, SheetDef   # forms → core → database の順に読み込むので、ここで
+    from app.forms import FieldDef, PatternDef, SheetDef   # forms → core → database の順に読み込むので、ここで
     row = _one("SELECT * FROM patterns WHERE id = ?", (pattern_id,))
     if row is None:
         return None

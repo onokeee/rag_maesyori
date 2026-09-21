@@ -14,10 +14,10 @@ import pytest
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
-import core
-import database as db
-from core import UploadError
-from forms import (
+from app import core
+from app import database as db
+from app.core import UploadError
+from app.forms import (
     extract_document,
     normalize_label,
     to_date,
@@ -54,7 +54,7 @@ from scripts.samples import (
     f5_process_abnormality as f5,
 )
 from tests.conftest import add_confirmed_document
-from views import SESSION_ID_KEY
+from app.views import SESSION_ID_KEY
 
 
 
@@ -137,7 +137,7 @@ def test_to_date_supports_1904_workbooks():
 
 
 def test_split_label_unit_and_value_unit():
-    from forms import nfkc_value, split_label_unit, value_unit
+    from app.forms import nfkc_value, split_label_unit, value_unit
 
     assert split_label_unit("作業時間(h)") == ("作業時間", "時間")
     assert split_label_unit("停止時間（分）") == ("停止時間", "分")
@@ -150,7 +150,7 @@ def test_split_label_unit_and_value_unit():
 
 def test_builder_suggests_units_and_title_fields(repair_infos, tmp_path):
     from openpyxl import Workbook
-    from forms import suggest_title_fields
+    from app.forms import suggest_title_fields
 
     sheets, fields = suggest_rows(repair_infos)
     work_hours = next(f for f in fields if f["field_name"] == "work_hours")
@@ -181,7 +181,7 @@ def _field_row(field_name, display_name, data_type="string", **extra):
 
 
 def test_rows_roundtrip_unit_rag_output_and_title_fields():
-    from forms import pattern_to_meta, pattern_to_rows
+    from app.forms import pattern_to_meta, pattern_to_rows
 
     meta = {"name": "設備修理報告書", "version": "v1",
             "title_fields": ["report_id", "equipment_id", "unknown"]}
@@ -215,7 +215,7 @@ def test_extraction_carries_unit_rag_output_and_title_fields(repair_infos):
 
 def test_table_like_sheets(repair_infos, sample_dir, tmp_path):
     from openpyxl import Workbook
-    from forms import table_like_sheets
+    from app.forms import table_like_sheets
 
     for info in repair_infos + [load_workbook_info(sample_dir / "inspection.xlsx")]:
         assert not table_like_sheets(info), info.path.name
@@ -267,7 +267,7 @@ def _book(tmp_path, name: str, sheets: dict):
 
 
 def _fields(*defs):
-    from forms import FieldDef, PatternDef
+    from app.forms import FieldDef, PatternDef
 
     fields = [FieldDef(name, labels[0], list(labels), data_type=data_type) for name, data_type, *labels in defs]
     return PatternDef(name="テスト", fields=fields)
@@ -296,7 +296,7 @@ def test_same_fill_neighbour_is_a_label_so_value_is_read_below(tmp_path):
 
 
 def test_checkbox_notation_is_read_as_the_checked_option(tmp_path):
-    from forms import pick_checked
+    from app.forms import pick_checked
 
     assert pick_checked("□重大　■大　□中") == ("大", None)
     assert pick_checked("☑同型機　□類似設備　☑他Fab") == ("同型機、他Fab", None)
@@ -311,7 +311,7 @@ def test_checkbox_notation_is_read_as_the_checked_option(tmp_path):
 
 
 def test_label_notation_section_numbers_and_parentheses(tmp_path):
-    from forms import section_stripped
+    from app.forms import section_stripped
 
     assert normalize_label("停止時間(分)") == "停止時間(分)"  # 閉じ括弧だけを消さない
     assert normalize_label("【設備NO】") == "設備no"
@@ -340,8 +340,8 @@ def test_label_in_a_table_header_is_used_only_when_there_is_no_other(tmp_path):
 
 
 def test_continuation_sheet_is_selected_with_the_main_sheet(tmp_path):
-    from forms import match_pattern
-    from forms import SheetDef
+    from app.forms import match_pattern
+    from app.forms import SheetDef
 
     first = ({"A1": "管理番号", "B1": "8D-001", "A2": "現象", "B2": "搬送停止", "A3": "原因", "B3": "摩耗"}, {}, [])
     second = ({"A1": "管理番号", "B1": "8D-001", "A2": "効果判定", "B2": "再発なし", "A3": "再発防止策", "B3": "月次点検"}, {}, [])
@@ -402,7 +402,7 @@ def test_table_with_vertical_anchor_merged_cells_and_heading_stop(tmp_path):
 
 
 def test_table_none_rows_and_column_fallback(tmp_path):
-    from forms import find_table_by_columns
+    from app.forms import find_table_by_columns
 
     info = _parts_book(tmp_path, "none.xlsx", {"B5": "なし", "C5": None, "D5": None, "A6": None, "B6": None,
                                                  "C6": None, "D6": None, "A9": None, "D9": None})
@@ -441,7 +441,7 @@ def test_builder_suggests_table_field_and_skips_column_header_fields(tmp_path):
 
 
 def test_table_columns_roundtrip_through_rows():
-    from forms import pattern_to_rows
+    from app.forms import pattern_to_rows
 
     rows = [_field_row("parts", "交換部品", "table", candidates="■ 交換部品", table_columns="品番\n品名\n数量")]
     pattern = rows_to_pattern(1, {"name": "点検報告書"}, [], rows)
@@ -452,7 +452,7 @@ def test_table_columns_roundtrip_through_rows():
 def test_manual_table_edit_is_parsed_from_json(tmp_path):
     import json
 
-    from forms import apply_manual_values
+    from app.forms import apply_manual_values
 
     info = _parts_book(tmp_path)
     extraction = extract_document(info, _fields(("parts", "table", "交換部品")), ["報告書"])
@@ -495,7 +495,7 @@ def test_evaluator_accepts_the_normalized_value_and_checkbox_booleans():
 
 
 def test_combined_label_takes_the_matching_part_of_the_value(tmp_path):
-    from forms import label_parts
+    from app.forms import label_parts
 
     assert label_parts("ライン／工程") == ("ライン", "工程") and label_parts("L/min") == ()
     info = _book(tmp_path, "combined.xlsx", {"報告書": (
@@ -535,7 +535,7 @@ def test_date_without_a_year_keeps_the_original_text_and_warns():
 
 
 def test_numeric_unit_comes_from_the_field_or_the_written_value():
-    from forms import numeric_unit
+    from app.forms import numeric_unit
 
     assert numeric_unit("390", "分") == "分" and numeric_unit("390", "h") == "時間"
     assert numeric_unit("390分") == "分" and numeric_unit("1,032分") == "分" and numeric_unit("2.5h") == "時間"
@@ -545,8 +545,8 @@ def test_numeric_unit_comes_from_the_field_or_the_written_value():
 
 def test_number_without_a_unit_is_flagged_only_when_the_unit_changes_the_meaning(tmp_path):
     """単位の無い数値は「単位不明」で要確認。ただし件数・回数のように単位が要らない項目は警告しない。"""
-    from forms import ambiguous_unit_hint
-    from forms import FieldDef, PatternDef
+    from app.forms import ambiguous_unit_hint
+    from app.forms import FieldDef, PatternDef
 
     assert ambiguous_unit_hint("downtime", "停止時間") and ambiguous_unit_hint("work_hours", "作業時間")
     assert ambiguous_unit_hint("cost", "修理費用") and ambiguous_unit_hint("f1", "部品の外径")
@@ -575,7 +575,7 @@ def test_number_without_a_unit_is_flagged_only_when_the_unit_changes_the_meaning
 
 def test_written_unit_wins_over_the_field_unit_and_is_flagged(tmp_path):
     """「停止時間（分）」の欄に「14.9h」と書かれた帳票。勝手に分として出さず、書かれたとおりにして要確認にする。"""
-    from forms import FieldDef, PatternDef
+    from app.forms import FieldDef, PatternDef
 
     info = _book(tmp_path, "unit2.xlsx", {"報告書": (
         {"A1": "停止時間", "B1": "14.9h"}, {"A1": LABEL_FILL}, [])})
@@ -589,7 +589,7 @@ def test_written_unit_wins_over_the_field_unit_and_is_flagged(tmp_path):
 # ---- 表記違いのラベル・隣の値の優先・一覧の列見出し・設備番号と設備名のまとめ欄（帳票サンプルの不一致の分析 2回目） ----
 
 def test_label_variants_are_used_when_the_exact_label_gives_no_value(tmp_path):
-    from forms import label_base, split_label_unit
+    from app.forms import label_base, split_label_unit
 
     assert split_label_unit("発生原因（推定）") == ("発生原因（推定）", "")  # 「推定」は単位でない
     assert split_label_unit("金額（千円）") == ("金額", "千円")
@@ -648,7 +648,7 @@ def test_list_column_headers_and_seq_no_are_not_single_value_labels(tmp_path):
 
 
 def test_split_code_name_and_builder_suggests_equipment_from_combined_cell(tmp_path):
-    from forms import split_code_name
+    from app.forms import split_code_name
 
     assert split_code_name("ROB-821（ウェーハソーター 1号機）") == ("ROB-821", "ウェーハソーター 1号機")
     assert split_code_name("W-CMP 3号機　CMP-103") == ("CMP-103", "W-CMP 3号機")
@@ -680,7 +680,7 @@ def test_evaluator_offset_picks_other_sample_files():
 
 def test_form_number_note_is_not_a_value_even_in_the_middle_of_a_cell(tmp_path):
     """欄外の様式番号は、先頭になくても項目の値にしない（design.md 6.1「値にしないもの」）。"""
-    from forms import is_form_number_note
+    from app.forms import is_form_number_note
 
     assert is_form_number_note("様式MT-031 Rev.1")
     assert is_form_number_note("製造部 設備保全課 様式MT-031 Rev.2(2025.04改訂)")
@@ -697,7 +697,7 @@ def test_form_number_note_is_not_a_value_even_in_the_middle_of_a_cell(tmp_path):
 
 def test_stacked_detail_table_blocks_are_all_read(tmp_path):
     """同じ形の列見出しが縦に積み重なる表（特性要因図）は、組ごとに読んで1つの明細表にまとめる。"""
-    from forms import FieldDef, PatternDef
+    from app.forms import FieldDef, PatternDef
 
     cells = {"A1": "特性要因図", "A2": "人", "B2": "機械", "A3": "教育不足", "B3": "電極の摩耗",
              "A4": "材料", "B4": "方法", "A5": "ガスの純度", "B5": "点検手順の不備",
@@ -718,7 +718,7 @@ def test_stacked_detail_table_blocks_are_all_read(tmp_path):
 
 def test_stacked_blocks_with_the_same_columns_just_add_rows(tmp_path):
     """列見出しが同じまま繰り返される様式（ページごとに見出しを書く表）は、行が増えるだけにする。"""
-    from forms import FieldDef, PatternDef
+    from app.forms import FieldDef, PatternDef
 
     cells = {"A1": "■ 交換部品", "A2": "品番", "B2": "品名", "A3": "PW48-1591", "B3": "ベアリング",
              "A4": "品番", "B4": "品名", "A5": "PW35-1577", "B5": "スピンドル"}
@@ -777,8 +777,8 @@ def test_builder_reads_prefixed_number_label_as_report_id(tmp_path):
 
 def test_empty_detail_table_keeps_columns_for_manual_entry(tmp_path):
     """明細表が読めなくても、列見出しは確認画面に残して人が行を入れられるようにする。"""
-    from forms import clean_table_value
-    from forms import FieldDef, PatternDef
+    from app.forms import clean_table_value
+    from app.forms import FieldDef, PatternDef
 
     info = _book(tmp_path, "no_table.xlsx", {"報告書": (
         {"A1": "■ 交換部品", "A2": "なし"}, {"A1": HEADING_FILL}, [])})
@@ -799,7 +799,7 @@ def test_label_that_is_also_a_column_header_keeps_the_real_header_row(tmp_path):
     同じ「実施内容」だけが当たる。そこから下に表を探すと先頭の明細が列見出しになり、1件目と
     完了日・状況の列が落ちていた。
     """
-    from forms import FieldDef, PatternDef
+    from app.forms import FieldDef, PatternDef
 
     cells = {"A1": "D6．恒久対策の実施と効果の確認",
              "A2": "No", "B2": "実施内容", "C2": "担当", "D2": "完了日", "E2": "状況",
@@ -1336,8 +1336,8 @@ def test_title_adds_the_source_file_name_when_it_has_no_identifier(standard):
 
 def test_person_columns_are_written_and_empty_total_rows_are_not():
     """明細表の人名の列（担当・氏名）も出す。数字のない合計行は記録にならないので書かない（design.md 6.1）。"""
-    from forms import table_markdown_lines
-    from forms import is_person_field, is_person_label
+    from app.forms import table_markdown_lines
+    from app.forms import is_person_field, is_person_label
 
     value = {"columns": ["日時", "対応内容", "担当"],
              "rows": [["9:10", "電極を交換", "中村"], ["合計", "", ""]]}
@@ -1418,7 +1418,7 @@ def test_a_long_detail_table_is_split_so_every_part_carries_the_identifier(stand
 
     識別子を入れる帳票（長い帳票）では、明細表を「（続き）」の見出しで分ける。
     """
-    from forms import _estimate_tokens
+    from app.forms import _estimate_tokens
 
     info, _, extraction = standard
     rows = [[f"部位{i}", "目視", "○", "異常なし。次回も同じ手順で確認すること"] for i in range(1, 41)]
@@ -1495,7 +1495,7 @@ def test_a_heading_in_the_right_half_makes_a_column_section(tmp_path, monkeypatc
     wb = load_workbook(info.path)
     wb["連絡票"]["D1"].font = Font(bold=True)  # 「【回答欄】」は太字だけ（塗りつぶしなし）
     wb.save(info.path)
-    from forms import load_workbook_info
+    from app.forms import load_workbook_info
 
     grid = load_workbook_info(info.path).grids["連絡票"]
     assert section_of(grid, grid.cells[(4, 4)]) == "回答"  # 右側の応急処置
@@ -1541,7 +1541,7 @@ def test_builder_learns_the_answer_section_from_samples(tmp_path):
     wb = load_workbook(side.path)
     wb["連絡票"]["D1"].font = Font(bold=True)
     wb.save(side.path)
-    from forms import load_workbook_info
+    from app.forms import load_workbook_info
 
     _, rows = suggest_rows([both, load_workbook_info(side.path)])
     by_name = {r["field_name"]: r for r in rows}
@@ -1577,7 +1577,7 @@ def test_section_round_trips_through_the_rows():
 
 def test_section_with_two_suffixes_is_stable_through_learning_and_saving(tmp_path):
     """「■ 処置内容欄」のように末尾の語が重なる見出し: 何度そろえても同じ名前になり、区画の中の値を読む。"""
-    from forms import section_name
+    from app.forms import section_name
 
     for text in ("■ 処置内容欄", "■ 回答内容欄（記入）", "■ 作業日時欄"):
         assert section_name(section_name(text)) == section_name(text)
@@ -1937,7 +1937,7 @@ def test_manual_number_is_judged_by_the_form_type_unit_not_the_read_unit():
 
 
 def test_manual_number_with_another_written_unit_keeps_it_and_stays_to_be_checked():
-    from views import _field_status
+    from app.views import _field_status
 
     ex = {"fields": [_number_field(value=30, unit="分", spec_unit="分")]}
     apply_manual_values(ex, {"value-downtime": "2.5h"})
@@ -1949,7 +1949,7 @@ def test_manual_number_with_another_written_unit_keeps_it_and_stays_to_be_checke
 
 def test_manual_number_takes_the_written_unit_when_the_form_type_has_none():
     """単位の無い「作業時間」に「150分」「2.5時間」と入れたら、その単位で出す（数値だけにしない）。"""
-    from views import _field_status
+    from app.views import _field_status
 
     ex = {"fields": [_number_field(field_name="work_hours", display_name="作業時間", value=2.5, spec_unit="",
                                    warning="単位が書かれていません（時間か分か）")]}
@@ -1974,9 +1974,9 @@ def test_old_extractions_without_spec_unit_fall_back_to_the_unit():
 def test_extraction_keeps_the_form_type_unit(tmp_path):
     from openpyxl import Workbook
 
-    from forms import extract_document
-    from forms import load_workbook_info
-    from forms import FieldDef, PatternDef
+    from app.forms import extract_document
+    from app.forms import load_workbook_info
+    from app.forms import FieldDef, PatternDef
 
     wb = Workbook()
     wb.active.title = "報告書"
@@ -2025,7 +2025,7 @@ def _state(app, doc_id):
 
 def _doc_version(app, doc_id) -> str:
     """いまの作業データの版（画面が読み取り結果と一緒に受け取る値）。"""
-    from views import _version
+    from app.views import _version
 
     with app.app_context():
         return _version(db.get_document(doc_id))
@@ -2033,7 +2033,7 @@ def _doc_version(app, doc_id) -> str:
 
 def _review_html(app, doc_id) -> str:
     """読み取り結果の欄のHTML（読み取りの応答が返すのと同じもの）。"""
-    from views import _review_response
+    from app.views import _review_response
 
     with app.test_request_context():
         return _review_response(doc_id).get_json()["html"]
@@ -2116,7 +2116,7 @@ def test_batch_upload_error_names_the_file_that_was_skipped(app, client, sample_
 # ---- 時刻の範囲の「作業時間」（excel/text.py） ------------------------------------------------------
 
 def test_time_range_is_not_read_as_its_start_hour():
-    from forms import numeric_unit, to_number
+    from app.forms import numeric_unit, to_number
 
     # 添えた時間数（工数）を項目の単位で使う
     value, warning = to_number(None, "09:30-12:45（3.2h）", "時間")
@@ -2151,7 +2151,7 @@ def _inspection(work_no, work_date, finding="端子の緩みを増し締めし�
 
 
 def test_reports_for_the_same_equipment_get_different_titles_and_headings():
-    from forms import build_markdown
+    from app.forms import build_markdown
 
     doc = {"id": 1, "file_name": "点検.xlsx", "file_hash": "0" * 64}
     a = build_markdown(doc, _inspection("W-0101", "2026-04-01"))
@@ -2175,9 +2175,9 @@ def test_a_person_name_used_as_a_label_is_not_written(tmp_path):
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill
 
-    from forms import load_workbook_info
-    from forms import build_markdown
-    from forms import suggest_rows
+    from app.forms import load_workbook_info
+    from app.forms import build_markdown
+    from app.forms import suggest_rows
 
     # 押印欄: 「作成｜確認」の下に人名。builder は「斎藤」を見出しの候補にしない
     wb = Workbook()
@@ -2255,7 +2255,7 @@ def test_editing_a_reread_confirmed_form_keeps_the_new_form_type_settings(app, c
 
 
 def test_confirmed_field_is_not_restored_when_its_settings_differ():
-    from views import _restore_confirmed_fields
+    from app.views import _restore_confirmed_fields
 
     old = {"field_name": "line", "display_name": "ライン", "data_type": "string",
            "value": "L4", "unit": "", "rag_output": "show"}
@@ -2271,8 +2271,8 @@ def test_confirmed_field_is_not_restored_when_its_settings_differ():
 
 
 def test_triangle_minus_sign_is_read_as_negative():
-    from forms import number_unit
-    from forms import to_number
+    from app.forms import number_unit
+    from app.forms import to_number
 
     assert to_number("▲50万円", "▲50万円", "万円")[0] == -50
     assert to_number("△0.8", "△0.8", "%") == (-0.8, None)
@@ -2287,7 +2287,7 @@ def test_triangle_minus_sign_is_read_as_negative():
 
 
 def test_dated_time_range_is_not_read_as_its_month():
-    from forms import numeric_unit, to_number
+    from app.forms import numeric_unit, to_number
 
     s = "12/24 21:53-12/25 11:09（13.3h）"
     assert to_number(s, s, "")[0] == 798 and numeric_unit(s) == "分"
@@ -2301,8 +2301,8 @@ def test_dated_time_range_is_not_read_as_its_month():
 
 
 def test_unit_written_next_to_an_annotated_number_is_kept():
-    from forms import number_unit
-    from forms import to_number
+    from app.forms import number_unit
+    from app.forms import to_number
 
     def judge(text, spec):
         value, warning = to_number(text, text, spec)
@@ -2316,7 +2316,7 @@ def test_unit_written_next_to_an_annotated_number_is_kept():
     assert value == 595 and unit == "分" and "数値の部分だけ" in warning  # 括弧書きは残っているので要確認のまま
     # 「3時間40分」は換算するので、最初の「時間」を書かれた単位として扱わない
     assert judge("3時間40分", "分")[:2] == (220, "分")
-    from forms import written_unit
+    from app.forms import written_unit
 
     assert written_unit("約2号機") == "" and written_unit("約90分ぐらいかかった") == ""
     assert written_unit("約2号機 30分") == ""  # to_number が読む最初の数値（2）の単位だけを見る  # 単位らしくない言葉は単位にしない
@@ -2325,8 +2325,8 @@ def test_unit_written_next_to_an_annotated_number_is_kept():
 def test_date_keeps_the_time_of_day():
     from datetime import datetime
 
-    from forms import to_date
-    from forms import _format_value
+    from app.forms import to_date
+    from app.forms import _format_value
 
     assert to_date(datetime(2023, 7, 10, 23, 8), "") == ("2023-07-10 23:08", None)
     assert to_date(datetime(2023, 7, 10), "") == ("2023-07-10", None)
@@ -2336,7 +2336,7 @@ def test_date_keeps_the_time_of_day():
 
 
 def test_hand_typed_date_without_a_year_stays_to_be_checked():
-    from views import _field_status
+    from app.views import _field_status
 
     ex = {"fields": [{"field_name": "d", "display_name": "発生日", "data_type": "date",
                       "value": "2/12 3時17分", "warning": "年が書かれていません。", "edited": False}]}
@@ -2462,7 +2462,7 @@ def test_leading_dot_decimal_and_h_m_notation():
 
 def test_manual_partial_number_stays_to_be_checked():
     """手で「約90分」と入れても「数値の部分だけ」の警告は要確認のまま（黙って確定できない）。"""
-    from views import _field_status
+    from app.views import _field_status
 
     ex = {"fields": [_number_field_forms_fixes3(value=30, unit="分", spec_unit="分")]}
     apply_manual_values(ex, {"value-downtime": "約90分くらい"})
@@ -2513,7 +2513,7 @@ def test_number_unit_from_the_cell_format(tmp_path):
     wb = load_workbook(path_info.path)
     wb["報告書"]["B1"].number_format = '#,##0"分"'
     wb.save(path_info.path)
-    from forms import load_workbook_info
+    from app.forms import load_workbook_info
 
     info = load_workbook_info(path_info.path)
     values, fields = _values(info, _fields(("downtime", "number", "ダウンタイム")))
@@ -2538,7 +2538,7 @@ def test_list_under_heading_with_a_row_between_is_not_a_single_value(tmp_path):
 # ---- F1: Excel のエラー値 ---------------------------------------------------------------
 
 def test_excel_error_values_are_not_taken_as_values(tmp_path):
-    from views import _field_status
+    from app.views import _field_status
 
     info = _book(tmp_path, "err.xlsx", {"報告書": (
         {"A1": "報告番号", "B1": "#REF!", "A2": "作業時間", "B2": "#DIV/0!", "A3": "設備名", "B3": "CMP 1号機"},
@@ -2554,7 +2554,7 @@ def test_excel_error_values_are_not_taken_as_values(tmp_path):
 # ---- F3-3: 空の明細表で行を足して消しただけ -------------------------------------------------------
 
 def test_empty_table_add_and_remove_row_is_not_an_edit():
-    from views import _apply_values, _field_status
+    from app.views import _apply_values, _field_status
 
     f = {"field_name": "parts", "display_name": "使用部品", "data_type": "table",
          "value": None, "table_columns": ["部品名", "数量"], "warning": "表に行がありません",
@@ -2571,7 +2571,7 @@ def test_empty_table_add_and_remove_row_is_not_an_edit():
 # ---- R3B-3: 途中保存の応答が届く前に画面を離れた（同じ画面の beacon） --------------------------------
 
 def _working_doc(app):
-    import database as db
+    from app import database as db
 
     doc_id = _confirmed_doc(app)
     with app.app_context():
@@ -2613,7 +2613,7 @@ def test_a_beacon_is_refused_after_another_page_saved(app, client):
 
 def test_draft_page_marks_are_forgotten_when_the_form_is_purged(app, client):
     """消した帳票の途中保存の目印（id）をメモリに残さない（design.md 3.3 データを残さない）。"""
-    import views
+    from app import views
 
     doc_id = _working_doc(app)
     old = _doc_version(app, doc_id)
@@ -2632,7 +2632,7 @@ def test_draft_page_marks_are_forgotten_when_the_form_is_purged(app, client):
 # ---- F4-1: 「〜計」で終わる品名（温度計・圧力計）を合計行にしない ------------------------------------
 
 def test_instrument_names_ending_in_kei_are_not_total_rows():
-    from forms import table_markdown_lines
+    from app.forms import table_markdown_lines
 
     value = {"columns": ["品名", "型式", "数量"],
              "rows": [["ベアリング", "6205ZZ", "2"], ["圧力計", "GV-50", "1"], ["温度計", "", ""],
@@ -2648,7 +2648,7 @@ def test_instrument_names_ending_in_kei_are_not_total_rows():
 # ---- F4-3: 手で入れた値を消すと、確定済みの状態に戻る -------------------------------------------------
 
 def test_clearing_a_hand_typed_value_returns_the_field_to_the_confirmed_one():
-    from views import _apply_values
+    from app.views import _apply_values
 
     confirmed = json.loads(_extraction())
     confirmed["fields"][0].update(value=None, sheet=None, value_cell=None, warning="ラベルはありますが値が空です")
@@ -2694,8 +2694,8 @@ def _cells(*texts):
 
 
 def test_ditto_marks_in_a_detail_table_take_the_value_above():
-    from forms import Table
-    from forms import table_markdown_lines
+    from app.forms import Table
+    from app.forms import table_markdown_lines
 
     table = Table(anchor=None, header=_cells("点検箇所", "点検内容", "判定"),
                   rows=[_cells("〃", "外観", "○"), _cells("ステージ", "位置偏差", "○"), _cells("〃", "振動", "×"),
@@ -2757,7 +2757,7 @@ def test_form_type_panel_explains_how_to_set_the_unit(app, client, tmp_path):
 # ---- R4-FUZZ-3: 見えない文字（ゼロ幅スペース・BOM）を消す -------------------------------------------------
 
 def test_invisible_characters_are_removed_from_labels_and_values(tmp_path):
-    from forms import cell_text, nfkc_value, normalize_label
+    from app.forms import cell_text, nfkc_value, normalize_label
 
     assert normalize_label("設備名​") == normalize_label("設備名")
     assert cell_text("﻿EQ-01⁠") == "EQ-01"
@@ -2772,8 +2772,8 @@ def test_invisible_characters_are_removed_from_labels_and_values(tmp_path):
 def test_formula_without_a_cached_value_gets_its_own_warning(tmp_path):
     from openpyxl import Workbook
 
-    from forms import UNCACHED_FORMULA_WARNING
-    from forms import load_workbook_info
+    from app.forms import UNCACHED_FORMULA_WARNING
+    from app.forms import load_workbook_info
 
     wb = Workbook()
     ws = wb.active
@@ -2810,7 +2810,7 @@ def test_enter_in_the_review_form_submits_nothing(app):
 # ---- R5-MD-5: タイトル項目が設備だけのとき、出典にもタイトルに足した番号を書く ------------------------
 
 def test_source_line_names_the_work_number_when_the_title_is_equipment_only():
-    from forms import build_markdown
+    from app.forms import build_markdown
 
     doc = {"id": 1, "file_name": "点検.xlsx", "file_hash": "0" * 64}
     md = build_markdown(doc, _inspection("W-0101", "2026-04-01"))
@@ -2880,7 +2880,7 @@ def test_a_right_hand_section_started_higher_keeps_its_columns(tmp_path):
 
 
 def test_learning_finds_the_right_hand_answer_section(tmp_path):
-    from forms import _learn_sections
+    from app.forms import _learn_sections
 
     infos = [_side_by_side_forms_fixes6(tmp_path / "both.xlsx"), _side_by_side_forms_fixes6(tmp_path / "answer.xlsx", issuer=False)]
     row = {"use": True, "data_type": "string", "field_name": "action", "display_name": "処置",
@@ -2987,7 +2987,7 @@ def test_a_batch_left_with_one_form_is_no_longer_a_batch(app, client):
 
 def test_a_date_value_under_a_non_date_label_becomes_a_date_field(tmp_path):
     """値が日付だけで書かれていれば日付型にする（文字列のままだと md の日付の書き方が混ざる）。"""
-    from forms import _guess_type
+    from app.forms import _guess_type
 
     wb = Workbook()
     ws = wb.active
@@ -3213,7 +3213,7 @@ def test_the_type_step_opens_one_workbook_at_a_time(app, client, sample_dir, tmp
     import gc
     import weakref
 
-    import views as forms_view
+    from app import views as forms_view
 
     seen: list[weakref.ref] = []
     alive_during: list[int] = []
@@ -3497,7 +3497,7 @@ def _versions(tmp_path):
 
 def test_one_cell_holding_an_equipment_number_and_name_becomes_two_fields(tmp_path):
     """「使用設備：CMP-108　STI-CMP 8号機」を1回クリックすると、設備番号と設備名の2項目になる。"""
-    from forms import split_rows
+    from app.forms import split_rows
 
     v1, _ = _versions(tmp_path)
     grid = load_workbook_info(v1).grids["報告書"]
@@ -3516,9 +3516,9 @@ def test_one_cell_holding_an_equipment_number_and_name_becomes_two_fields(tmp_pa
 
 def test_a_differently_written_version_is_read_by_the_label_not_by_the_cell_address(tmp_path):
     """見本と書き方が違う帳票でも、セル内の見出しから読む。別の欄の見出しは値にしない。"""
-    from forms import extract_document
-    from forms import split_rows
-    from forms import rows_to_pattern
+    from app.forms import extract_document
+    from app.forms import split_rows
+    from app.forms import rows_to_pattern
 
     v1, v2 = _versions(tmp_path)
     grid = load_workbook_info(v1).grids["報告書"]
@@ -3542,8 +3542,8 @@ def test_the_clicked_label_wins_over_a_dictionary_synonym_on_the_same_sheet(tmp_
     辞書は「担当者」の言い換えとして「報告者」「記入者」…も探す。その言い換えがシートの先に
     出てくると、クリックした欄ではなく言い換えの欄の値が読まれてしまっていた。
     """
-    from forms import extract_document
-    from forms import rows_to_pattern
+    from app.forms import extract_document
+    from app.forms import rows_to_pattern
 
     wb = Workbook()
     ws = wb.active
@@ -4110,7 +4110,7 @@ def test_a_click_without_the_excel_asks_for_it_again(app, client, tmp_path):
 
 def test_a_big_excel_is_refused(app, client, tmp_path, monkeypatch):
     """置く Excel には大きさの上限がある（保存せずにメモリで読むので、無制限にはできない）。"""
-    import views
+    from app import views
 
     monkeypatch.setattr(views, "BOOK_MAX_BYTES", 1000)
     path = _report(tmp_path / "大きい.xlsx")
@@ -4162,7 +4162,7 @@ def test_the_sheet_can_be_asked_for_by_the_hash_of_the_book(app, client, tmp_pat
 
 def test_another_browser_cannot_use_the_book_of_the_first_one(app, tmp_path):
     """覚えているブックはその作業場所（ブラウザ）のもの。ほかの人の合図では出てこない。"""
-    from views import SESSION_ID_KEY
+    from app.views import SESSION_ID_KEY
 
     path = _report(tmp_path / "点検表.xlsx")
     first, second = app.test_client(), app.test_client()
@@ -4221,7 +4221,7 @@ def test_the_same_book_read_twice_is_only_parsed_once(app, client, tmp_path, mon
     path = _report(tmp_path / "点検表.xlsx")
     pattern_id = create_type(client, path, "点検表")
 
-    import views
+    from app import views
 
     opened = []
     real = views.load_workbook_info

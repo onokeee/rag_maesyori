@@ -48,7 +48,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from forms import (  # noqa: E402
+from app.forms import (  # noqa: E402
     extract_document, load_workbook_info, match_pattern, normalize_label, rows_to_pattern, suggest_rows,
     to_date, to_number,
 )
@@ -386,7 +386,7 @@ def click_rows(sample_infos: list, name: str) -> tuple[list[dict], list[dict]]:
     クリックしたことにする。見本ごとに見出しの書き方が違う欄は、見本の数だけクリックする（画面と同じで、
     辞書で同じ項目と分かる欄はその項目の見出しに足され、分からない欄は別の項目になる）。
     """
-    from forms import (DICTIONARY_NORMS, click_field, locate_table, locate_value, merge_labels, merge_target,
+    from app.forms import (DICTIONARY_NORMS, click_field, locate_table, locate_value, merge_labels, merge_target,
                        same_sheet_field, separate_names, split_rows)
 
     meta = {"name": name, "version": "eval"}

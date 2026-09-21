@@ -5,7 +5,7 @@
       "name": "rag-maesyori",
       "runtimeExecutable": ".venv\\Scripts\\python.exe",
       "runtimeArgs": [
-        "app.py"
+        "run.py"
       ],
       "port": 5000
     }

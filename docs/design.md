@@ -5,7 +5,7 @@
 ## 0. 前提と範囲
 
 - **社内LANのサーバーで動かし、数人が同時に使う**（2026-09-20 の運用変更。それまでは1人・`127.0.0.1` のみ）。
-  運用者はサーバーの JupyterLab のターミナルから `HOST=0.0.0.0 PORT=5000 python app.py` のように起動し、
+  運用者はサーバーの JupyterLab のターミナルから `HOST=0.0.0.0 PORT=5000 python run.py` のように起動し、
   利用者は自分のPCのブラウザで `http://<サーバーのアドレス>:5000/` を開く（README「社内LANのサーバーで動かす」）。
 - **ログインなし**（社内LANなので制限しない、という利用者の判断）。**アドレスを知っている人は誰でも使え、
   いま取り込み中のデータも開かれれば見える**。起動時にこの2点を必ず案内する（`app.startup_notice`）。
@@ -14,7 +14,7 @@
   挙げたものだけ（`app.allowed_hosts`。DNSリバインディング対策。`*` ですべて受け付ける）。
   デバッガ（`FLASK_DEBUG=1` / `--debug`、LAN のアドレスでの `DEBUG = True`）では起動しない。
 - **誰の作業かはブラウザのクッキーで分ける**（`views.current_session_id()`。3.3「誰の作業か」）。
-  そのため署名鍵 `SECRET_KEY` が必須（`app.py` が `FLASK_SECRET_KEY` か `.flask_secret` から入れる）。
+  そのため署名鍵 `SECRET_KEY` が必須（`app/__init__.py` の `create_app` が `FLASK_SECRET_KEY` か `.flask_secret` から入れる）。
   鍵が変わると全員のクッキーが無効になり、取り込み中のものが自分のものだと分からなくなる（時間切れで捨てられる）。
 - **同時に動かす処理の本数**は `JOB_WORKERS`（既定 3・1〜8）。1本だと誰かの長い読み込みで全員が待たされる（5.1 `core/jobs.py`）。
 - 目的：Excel/CSV を読み取り、**LightRAG に自分で投げ込みやすい Markdown(.md) を作ってダウンロードする**まで。LightRAG への送信・アプリ内検索・SQL と解析は作らない。
@@ -369,7 +369,8 @@ AI整形の控え（`ai_items`）と `core/purge.py` がこの番号で取り込
 
 > **2026-09-21 ファイル数の最小化**：Python のパッケージは領域ごとに1ファイルにまとめた（`core/*` → `core.py`、`models/database.py` → `database.py`、
 > `excel/*`・`pattern/*`・`export/formats.py` → `forms.py`、`tables/*` → `tables.py`、`logproc/*` → `logproc.py`、`aiproc/*` → `aiproc.py`、
-> `services/*` → `llm.py`、`views/*` → `views.py`、`config.py` → `app.py`）。1ファイルの中は「元 core/jobs.py」の見出しで旧モジュールごとに区切ってあり、
+> `services/*` → `llm.py`、`views/*` → `views.py`、`config.py` → `app.py`）。アプリ本体はさらに `app/` フォルダにまとめ（`app.py` は `app/__init__.py`、
+> `templates/`・`static/` も `app/` の中）、ルートは起動用の `run.py`・テスト（`tests/`）・サンプルの生成器（`scripts/`）・設計書（`docs/`）だけにした。1ファイルの中は「元 core/jobs.py」の見出しで旧モジュールごとに区切ってあり、
 > 以下の表と 5 章の `core/jobs.py` のような名前は、その見出し（ファイルの中の節）を指す。画面は `templates/<画面>.html` の1ファイル
 > （段の中身の断片はその中のマクロ `part_*`。`views.render_part` が描く）、JS は `static/app.js` の1ファイル（画面ごとに「// ==== 」で区切る）、
 > テストは `tests/test_forms.py`・`test_tables.py`・`test_ai.py`・`test_core.py`・`test_cross.py` と `conftest.py`（偽サーバー・表の操作を含む）。

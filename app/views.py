@@ -32,8 +32,8 @@ from flask import (
     flash,
 )
 
-import database as db
-from core import (
+from app import database as db
+from app.core import (
     FORM_MAX_MERGED_CELLS,
     UploadError,
     original_name,
@@ -61,7 +61,7 @@ from core import (
     request_pause,
     request_resume,
 )
-from forms import (
+from app.forms import (
     apply_manual_values,
     extract_document,
     is_blank_value,
@@ -91,7 +91,7 @@ from forms import (
     match_pattern,
     PatternDef,
 )
-from tables import (
+from app.tables import (
     count_levels,
     has_blocking,
     suggest_columns,
@@ -2244,7 +2244,7 @@ def _ai_job(import_id: int) -> dict | None:
 
 def _ai_connection_ctx() -> dict:
     """AI接続の状態（段の中の「AI接続」パネル）。"""
-    import llm
+    from app import llm
 
     status = llm.admin_status()
     ready = llm.is_configured()
@@ -2272,7 +2272,7 @@ def _panel_ai(imp: dict):
     reason = _not_ready_reason(imp, spec)
     if reason:
         return _locked(reason)
-    import aiproc as ai_items
+    from app import aiproc as ai_items
 
     log_key = spec.log_stage.column
     col = spec.column(log_key)
@@ -2296,10 +2296,10 @@ def _panel_ai(imp: dict):
 
 @tables_bp.post("/imports/<int:import_id>/ai/split-preview")
 def ai_split_preview(import_id: int):
-    import aiproc
-    from logproc import format_author, format_when, review_notes
-    from logproc import render_timeline
-    import llm
+    from app import aiproc
+    from app.logproc import format_author, format_when, review_notes
+    from app.logproc import render_timeline
+    from app import llm
 
     _load_import(import_id)
     row_key = str(_tables_payload().get("row_key") or "")
@@ -2328,8 +2328,8 @@ def ai_split_preview(import_id: int):
 
 @tables_bp.post("/imports/<int:import_id>/ai/trial")
 def ai_trial(import_id: int):
-    import aiproc
-    import llm
+    from app import aiproc
+    from app import llm
 
     imp = _load_import(import_id)
     spec = _spec_for(imp)
@@ -2380,9 +2380,9 @@ def ai_trial(import_id: int):
 
 @tables_bp.post("/imports/<int:import_id>/ai/estimate")
 def ai_estimate(import_id: int):
-    import aiproc as ai_estimate_mod
-    import aiproc
-    import llm
+    from app import aiproc as ai_estimate_mod
+    from app import aiproc
+    from app import llm
 
     _load_import(import_id)
     data = _tables_payload()
@@ -2401,8 +2401,8 @@ def ai_estimate(import_id: int):
 
 @tables_bp.post("/imports/<int:import_id>/ai/run")
 def ai_run(import_id: int):
-    import aiproc
-    import llm
+    from app import aiproc
+    from app import llm
 
     imp = _load_import(import_id)
     data = _tables_payload()
@@ -2440,7 +2440,7 @@ def ai_control(import_id: int, action: str):
 
 @tables_bp.post("/ai-connection")
 def save_ai_connection():
-    import llm
+    from app import llm
 
     data = _tables_payload()
     models = [str(m).strip() for m in (data.get("models") or []) if str(m).strip()]
@@ -2465,7 +2465,7 @@ def save_ai_connection():
 @tables_bp.post("/ai-connection/models")
 def refresh_ai_models():
     """APIからモデル一覧を取得する。"""
-    import llm
+    from app import llm
 
     try:
         catalog = llm.model_catalog(refresh=True)
@@ -2477,7 +2477,7 @@ def refresh_ai_models():
 @tables_bp.post("/ai-connection/test")
 def test_ai_connection():
     """接続テスト: モデル一覧の取得と、1回の短いチャット。"""
-    import llm
+    from app import llm
 
     if not llm.is_configured():
         return jsonify({"ok": False, "steps": [{"name": "設定", "ok": False,

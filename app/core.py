@@ -29,7 +29,7 @@ from uuid import uuid4
 
 from flask import current_app, g, has_app_context
 
-import database
+from app import database
 
 
 
