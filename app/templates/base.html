@@ -11,6 +11,9 @@
   "failed": ("失敗", "red"), "cancelled": ("中止", "gray"), "interrupted": ("中断", "red"),
 } %}
 
+{#- 画面の題。render_template("base.html", screen="forms") のように screen で切り替える -#}
+{%- set SCREEN_TITLES = {"forms": "帳票取り込み", "tables": "表の取り込み", "form_types": "帳票登録", "guide": "解説"} -%}
+
 {#- エラー画面（1枚）の題。app/__init__.py が code（400/403/404/413/500）と、必要なら
     host_refused・home_url・limit を渡す。枠（カード・題・戻るボタン）は共通で、題と本文だけが code で変わる。
     本文は下の {% block content %} の既定値。 -#}
@@ -22,7 +25,7 @@
       {% call ui_step("sheet", 2, "どのシートを使うか", open=false) %}…中身…{% endcall %}
     開け閉て（済みの印・要約・開く／閉じる）は static/app.js の window.ragSections が行う。
     id は ragSections.open("sheet") のように呼ぶときの名前。 -#}
-{% macro ui_step(id, no, title, open=False) -%}
+{%- macro ui_step(id, no, title, open=False) -%}
 <section class="step{{ ' is-open' if open }}" data-step="{{ id }}" id="step-{{ id }}">
   <div class="step-head">
     <span class="step-no" aria-hidden="true"><span class="step-no-text">{{ no }}</span></span>
@@ -37,7 +40,7 @@
 {%- endmacro %}
 
 {#- カード。{% call ui_card("見出し", "説明") %}本文{% endcall %}。level は見出しの深さ -#}
-{% macro ui_card(title=None, subtitle=None, level=2) -%}
+{%- macro ui_card(title=None, subtitle=None, level=2) -%}
 <section class="card">
   {%- if title %}
   <div class="card-head">
@@ -52,13 +55,13 @@
 {%- endmacro %}
 
 {#- 状態タグ -#}
-{% macro ui_badge(state) -%}
+{%- macro ui_badge(state) -%}
 {%- set info = STATE_LABELS.get(state, (state, "gray")) -%}
 <span class="badge badge-{{ info[1] }} badge-{{ state }}">{{ info[0] }}</span>
 {%- endmacro %}
 
 {#- ジョブの進捗。job: {"id","status","progress" or "progress_json", "message"}、url を渡すと app.js が自動で更新 -#}
-{% macro ui_progress(job, url=None, label="進み具合") -%}
+{%- macro ui_progress(job, url=None, label="進み具合") -%}
 {%- set prog = job.progress if job.progress is defined and job.progress is mapping else (job.progress_json if job.progress_json is mapping else {}) -%}
 {%- set done = prog.get("done", 0) or 0 -%}
 {%- set total = prog.get("total", 0) or 0 -%}
@@ -78,7 +81,7 @@
 {#- セルグリッド（元のシートのプレビュー）。
     rows: [{"index": 行番号, "cells": [文字列...], "kind": "header|data|subtotal|note|continuation|excluded|title|blank",
             "hidden": bool, "strike": bool, "reason": str}] または 文字列の二重配列 -#}
-{% macro ui_data_grid(rows, max_cols=None, caption=None) -%}
+{%- macro ui_data_grid(rows, max_cols=None, caption=None) -%}
 {%- set ncols = max_cols or (rows | map(attribute="cells") | map("length") | max if rows and rows[0] is mapping else (rows | map("length") | max if rows else 0)) -%}
 <div class="grid-wrap" tabindex="0" {% if caption %}aria-label="{{ caption }}"{% endif %}>
   <table class="data-grid">
@@ -103,13 +106,13 @@
 {%- endmacro %}
 
 {#- 段の中に出す「処理中…」の1行（中身は static/app.js を通さず各画面の JS が書く） -#}
-{% macro ui_work_line(name) -%}
+{%- macro ui_work_line(name) -%}
 <p class="work-line" data-work="{{ name }}" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
 {%- endmacro %}
 
 {#- 元のシート・見本のシートの表示（views の _sheet_grids が作る grids）。
     click_cells=True にすると、1回のクリックで表ごと項目にできるセルに目印を付ける（帳票登録）。 -#}
-{% macro ui_sheet_grid(grids, click_cells=False) -%}
+{%- macro ui_sheet_grid(grids, click_cells=False) -%}
 {%- for g in grids %}
 <div class="sheet-grid" data-sheet="{{ g.name }}" {% if not loop.first %}hidden{% endif %}>
   {% if g.truncated %}<p class="hint">大きいシートのため、先頭の一部だけ表示しています。</p>{% endif %}
@@ -131,7 +134,7 @@
 {%- endmacro %}
 
 {#- 行の色の凡例（一覧表の範囲確認） -#}
-{% macro ui_grid_legend() -%}
+{%- macro ui_grid_legend() -%}
 <ul class="grid-legend" aria-label="色の意味">
   <li><span class="swatch row-header"></span>見出し</li>
   <li><span class="swatch row-data"></span>データ</li>
@@ -144,13 +147,13 @@
 {%- endmacro %}
 
 {#- 列番号 → A, B, …, AA -#}
-{% macro ui_col_letter(n) -%}
+{%- macro ui_col_letter(n) -%}
 {%- set letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" -%}
 {%- if n > 26 %}{{ letters[((n - 1) // 26) - 1] }}{{ letters[(n - 1) % 26] }}{% else %}{{ letters[n - 1] }}{% endif -%}
 {%- endmacro %}
 
 {#- ファイル選択（ドラッグ＆ドロップ可）。accept: ".xlsx,.xlsm" -#}
-{% macro ui_file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False, fid=None) -%}
+{%- macro ui_file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False, fid=None) -%}
 {#- fid: 同じ name の置き場が1画面に2つあるとき（帳票登録の「新しく登録する」と「項目を直す」）に id を分ける -#}
 {%- set fid = fid or ("drop-" ~ name) -%}
 <div class="file-drop" data-file-drop>
@@ -163,12 +166,921 @@
     <span class="file-drop-name" data-file-name aria-live="polite"></span>
   </label>
 </div>
-{%- endmacro -%}<!doctype html>
+{%- endmacro -%}
+
+{#- ========================================================================================
+    元 forms.html — 段の断片のマクロ（views.render_part が1つずつ描く）
+    ======================================================================================== -#}
+{#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("base.html", "part_x", ...)
+    が、この画面のマクロを1つだけ描いて返す（ページ全体は描かない）。 -#}
+
+{%- macro part_type() -%}
+{#- 帳票の種類とシートの欄（HTML の断片。fetch でこの中身だけ入れ替える）。
+    まとめて置いた帳票は同じフォームなので、ここで決める種類とシートは置かれた全部に使う。 -#}
+
+{% if duplicate %}
+<div class="notice" role="note">同じ内容のファイルをこの画面でもう一度置いています（先に確定した分は、ダウンロードするまでサーバーに残っています）。</div>
+{% endif %}
+
+{% if table_sheets %}
+<div class="notice info" role="note">
+  <strong>一覧表のようです。</strong>
+  シート「{{ table_sheets | join('」「') }}」は、見出し行の下に同じ形の行が10行以上続いています。1行＝1件の表なら
+  <a href="{{ url_for('tables.new') }}">表の取り込み</a>へ進むと、行ごとの Markdown を作れます。
+</div>
+{% endif %}
+
+{% if not matches %}
+  <p class="muted">使用中の帳票の種類がありません。<a href="{{ form_types_url }}">帳票登録</a>でこの帳票の Excel を置いて読み取る欄を決め、
+    ［使用開始］を押すと、ここに出ます。</p>
+{% else %}
+<form data-type-form data-doc="{{ doc.id }}" data-read-url="{{ url_for('forms.read_all') }}"
+      data-suggested='{{ suggested | tojson }}' data-file-counts='{{ file_counts | tojson }}'>
+  <input type="hidden" name="ids" value="{{ files | map(attribute='id') | join(',') }}">
+
+  {% if files | length > 1 %}
+  <p>置かれた<strong>{{ files | length }}件</strong>すべてに、下で選んだ帳票の種類とシートを使います
+    （同じフォームの帳票をまとめて読み取ります）。合わないファイルは［このファイルは外す］で外してください。</p>
+  <ul class="file-chips" aria-label="まとめて読み取るファイル">
+    {% for f in files %}
+    <li class="file-chip" data-file-row="{{ f.id }}">
+      <span class="file-chip-name">{{ loop.index }}. {{ f.file_name }}</span>
+      <span class="file-chip-count"><span data-file-count="{{ f.id }}">{{ f.found }}</span>項目</span>
+      <button type="button" class="file-chip-drop" data-drop-doc="{{ f.id }}"
+              title="このファイルは外す" aria-label="{{ f.file_name }} は外す"
+              data-confirm="{{ f.file_name }} の取り込みをやめ、元のファイルと読み取り結果をサーバーから消します。元に戻せません。"
+              data-confirm-ok="このファイルを外す">✕</button>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  <div class="type-sheet-grid">
+    <fieldset class="plain">
+      <legend>帳票の種類</legend>
+      <div class="stack" role="radiogroup" aria-label="帳票の種類">
+        {% for m in matches %}
+        <label class="check">
+          <input type="radio" name="pattern_id" value="{{ m.pattern.id }}" {{ 'checked' if m.pattern.id == selected_id }} required>
+          <span><strong>{{ m.pattern.name }}</strong></span>
+          <small>{{ m.found_label }}{% if m.sheet_names %}（シート: {{ m.sheet_names | join('、') }}）{% endif %}</small>
+        </label>
+        {% endfor %}
+      </div>
+      {% if matches[0].total_fields and matches[0].found_fields * 2 < matches[0].total_fields %}
+        <p class="hint">どの種類とも見つかった項目が少なめです。別の帳票かもしれません。
+          <a href="{{ form_types_url }}">帳票登録</a>で新しい種類を作ることもできます。</p>
+      {% endif %}
+    </fieldset>
+
+    <fieldset class="plain">
+      <legend>読み取るシート</legend>
+      <div class="sheet-list">
+        {% for s in sheets %}
+        <label class="check">
+          <input type="checkbox" name="sheets" value="{{ s.name }}" {{ 'checked' if s.name in selected_sheets }}>
+          <span>{{ s.name }}{% if s.hidden %} <small class="muted">（非表示のシート）</small>{% endif %}</span>
+          <small>値のあるセル {{ s.cells }}個{% if s.images %} / 画像 {{ s.images }}件{% endif %}{% if s.name in table_sheets %} / 一覧表らしい{% endif %}{% if files | length > 1 and s.files < files | length %} / {{ files | length }}件中{{ s.files }}件のファイルにあります{% endif %}</small>
+        </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+  </div>
+
+  <p class="hint">帳票の種類を選び直すと、その種類で見つかったシートにチェックが付け直されます。
+    下の読み取り結果は、［読み取る］を押すたびに作り直されます（手で直した値は元に戻ります）。</p>
+
+  {% if lost_work %}
+  <div class="notice" role="alert">
+    <p>{% if files | length > 1 %}確定済み・修正中の帳票があります{% else %}この帳票は{{ '確定済み' if doc.state == 'confirmed' else '修正中' }}です{% endif %}。読み取り直すと、手で修正した値は失われます。</p>
+    <label class="check"><input type="checkbox" name="acknowledge"> 手で修正した値が失われることを確認しました</label>
+  </div>
+  {% endif %}
+
+  <div class="form-actions">
+    <button type="submit" class="btn primary">{% if lost_work %}読み取り直す{% elif files | length > 1 %}{{ files | length }}件をまとめて読み取る{% else %}読み取る{% endif %}</button>
+    {% if files | length == 1 %}
+    <button type="button" class="btn ghost" data-drop-doc="{{ doc.id }}"
+            data-confirm="この帳票の取り込みをやめ、元のファイルと読み取り結果をサーバーから消します。元に戻せません。"
+            data-confirm-ok="取り込みをやめる">この帳票はやめる</button>
+    {% endif %}
+  </div>
+</form>
+{% endif %}
+{%- endmacro %}
+
+{%- macro part_review() -%}
+{#- 読み取り結果の欄（HTML の断片）。置かれた帳票を縦に全部並べ、スクロールして確かめていく
+    （利用者の指示 2026-09-20「②タブで切り替えるのではなく、全部まとめて表示する」）。 -#}
+
+{% if items | length > 1 %}
+<div class="batch-bar" data-batch-bar>
+  <p class="batch-bar-text" data-batch-text>{{ items | length }}件中1件目を表示中</p>
+  <span class="spacer"></span>
+  <button type="button" class="btn small" data-next-doc>次の帳票へ</button>
+</div>
+{% endif %}
+
+<div class="review-stack{{ ' is-batch' if items | length > 1 }}" data-review-stack>
+  {% for item in items %}{{ part_review_block(item) }}{% endfor %}
+</div>
+{%- endmacro %}
+
+{%- macro part_review_block(item) -%}
+{#- 読み取り結果の1件分（帳票1つ）。左に元のシート、右に読み取った値（その場で直せる）。
+    まとめて置いたときは、この塊が帳票の数だけ縦に並ぶ（タブで切り替えない）。 -#}
+{% set doc = item.doc %}
+{% set extraction = item.extraction %}
+{% set summary = item.summary %}
+{% set SOURCE_LABELS = {"auto": ("自動で読み取り", "blue"), "manual": ("手で修正", "teal"), "blank": ("空欄", "gray")} %}
+
+<section class="review-doc" id="doc-{{ doc.id }}" data-doc="{{ doc.id }}" data-state="{{ doc.state }}"
+         data-file-name="{{ doc.file_name }}"
+         data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}"
+         data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}"
+         data-grid-url="{{ url_for('forms.grid_fragment', doc_id=doc.id) }}"
+         data-version="{{ item.version }}">
+
+  <div class="review-doc-head">
+    <span class="review-doc-no" aria-hidden="true">{{ item.no }}</span>
+    <strong class="review-doc-name">{{ doc.file_name }}</strong>
+    <span class="badge badge-{{ item.state_color }}" data-doc-state>{{ item.state_label }}</span>
+    <span class="spacer"></span>
+    <span class="muted small" data-doc-save aria-live="polite"></span>
+  </div>
+
+  <div class="review-toolbar cluster">
+    <ul class="chips" aria-label="項目の状態">
+      <li><button type="button" class="chip chip-warn{{ ' is-zero' if not summary.counts.issue }}" data-next-issue title="押すと次の要確認の項目へ移動します">要確認 <strong data-count="issue">{{ summary.counts.issue }}</strong></button></li>
+      <li><span class="chip chip-manual{{ ' is-zero' if not summary.counts.manual }}">手で修正 <strong data-count="manual">{{ summary.counts.manual }}</strong></span></li>
+      <li><span class="chip chip-plain{{ ' is-zero' if not summary.counts.blank }}">空欄 <strong data-count="blank">{{ summary.counts.blank }}</strong></span></li>
+    </ul>
+    <span class="muted small">帳票の種類: {{ extraction.pattern.name }} ／ シート: {{ extraction.sheets | join('、') }}</span>
+    <span class="spacer"></span>
+    <a class="btn small ghost" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード（消えません）</a>
+  </div>
+
+  <div class="split">
+    <section class="split-pane sticky" aria-label="元のシート">
+      <div class="split-pane-head">
+        <h3>元のシート</h3>
+        {% if extraction.sheets | length > 1 %}
+        <div class="tabs" role="tablist">
+          {% for name in extraction.sheets %}<button type="button" role="tab" data-sheet-tab="{{ name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ name }}</button>{% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="split-pane-body" data-grid-slot>
+        {% if item.grids is not none %}
+          {{ part_grid(item.grids, item.info_missing) }}
+        {% else %}
+          <p class="muted" data-grid-wait>この帳票までスクロールすると、元のシートを表示します。</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="split-pane" aria-label="読み取った値">
+      <div class="split-pane-head">
+        <div class="tabs" role="tablist">
+          <button type="button" role="tab" data-pane-tab="fields" aria-selected="true">読み取った値</button>
+          <button type="button" role="tab" data-pane-tab="markdown" aria-selected="false">Markdownの下書き</button>
+        </div>
+      </div>
+      <div class="split-pane-body">
+        <form id="reviewForm-{{ doc.id }}" data-review-form onsubmit="return false">
+          <input type="hidden" name="version" value="{{ item.version }}" data-version-input>
+          <div data-pane="fields">
+            {% for f in extraction.fields %}
+            {% set st = summary.fields[f.field_name] %}
+            {% set src = SOURCE_LABELS[st.source] %}
+            {% set fid = "value-" ~ doc.id ~ "-" ~ f.field_name %}
+            <div class="field review-field{{ ' is-issue' if st.issue }}" data-field="{{ f.field_name }}" data-issue="{{ 1 if st.issue else 0 }}"
+                 data-sheet="{{ f.sheet or '' }}" data-label-cell="{{ f.label_cell or '' }}" data-value-cell="{{ f.value_cell or '' }}">
+              <div class="cluster">
+                <label class="field-label" for="{{ fid }}">{{ f.display_name }}{% if f.unit %} <small class="muted">（{{ f.unit }}）</small>{% endif %}</label>
+                <span class="badge badge-{{ src[1] }}" data-source-badge>{{ src[0] }}</span>
+                {% if f.value_cell %}<small class="muted">{{ f.sheet }}!{{ f.value_cell }}</small>{% endif %}
+              </div>
+              {% set text = '' if f.value is none else f.value %}
+              {% if f.data_type == 'table' %}
+                {% set tcolumns = f.value.columns if f.value else (f.table_columns or []) %}
+                {% set trows = f.value.rows if f.value else [] %}
+                <input type="hidden" id="{{ fid }}" name="value-{{ f.field_name }}" value="{{ f.value | table_json }}" data-table-value>
+                {% if tcolumns %}
+                <p class="hint">1行＝1明細として Markdown に出します。余分な行は［行を削除］で外してください。{% if not trows %}元のファイルから読み取れなかったので、［行を追加］で入力してください。{% endif %}</p>
+                {% if f.table_blocks and f.table_blocks > 1 %}
+                <p class="hint">同じ形の列見出しが{{ f.table_blocks }}組、縦に積み重なっていました。すべての組を1つの表にまとめています。</p>
+                {% endif %}
+                <div class="table-wrap">
+                  <table class="table compact table-editor" data-table-editor aria-label="{{ f.display_name }}（1行＝1明細）">
+                    <thead><tr>{% for c in tcolumns %}<th scope="col">{{ c }}</th>{% endfor %}<th class="center"><span class="sr-only">行の操作</span></th></tr></thead>
+                    <tbody>
+                    {% for row in trows %}
+                      <tr>{% for cell in row %}<td><textarea class="cell-input" rows="1" aria-label="{{ tcolumns[loop.index0] if loop.index0 < tcolumns | length else '' }}">{{ cell }}</textarea></td>{% endfor %}
+                        <td class="center"><button type="button" class="btn small ghost" data-remove-table-row>行を削除</button></td></tr>
+                    {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                <button type="button" class="btn small" data-add-table-row>行を追加</button>
+                {% else %}
+                <p class="muted small">明細表が見つかりませんでした。元のファイルを確かめ、見つからないときは上で帳票の種類・シートを選び直してください。</p>
+                {% endif %}
+              {% elif f.data_type == 'text' or (text is string and '\n' in text) %}
+                <textarea class="input" rows="{{ [3, (text | string).count('\n') + 2] | max }}" id="{{ fid }}" name="value-{{ f.field_name }}">{{ text }}</textarea>
+              {% else %}
+                <input class="input" id="{{ fid }}" name="value-{{ f.field_name }}" value="{{ text }}" {% if f.data_type == 'date' %}placeholder="例: 2026-09-14"{% elif f.data_type == 'number' %}inputmode="decimal"{% endif %}>
+              {% endif %}
+              <p class="warn" data-warning {% if not st.warning %}hidden{% endif %}>{{ st.warning }}</p>
+            </div>
+            {% endfor %}
+            {% if extraction.attachments %}
+            <p class="hint">添付画像: {{ extraction.attachments | length }}枚（Markdownには枚数だけ書きます）</p>
+            {% endif %}
+          </div>
+
+          <div data-pane="markdown" hidden>
+            <p class="hint">入力中の値から作った Markdown です（ファイル名: <code data-md-name>{{ summary.file_name }}</code>）。</p>
+            <pre class="code md-preview" data-md-preview>{{ summary.markdown }}</pre>
+          </div>
+        </form>
+      </div>
+    </section>
+  </div>
+</section>
+{%- endmacro %}
+
+{%- macro part_grid(grids, info_missing) -%}
+{#- 1件の帳票の「元のシート」。読み取り結果の欄が画面に入った時点で読み込む（重くしないため）。 -#}
+{% if info_missing %}
+  <p class="muted">元のファイルを読み込めませんでした。値の確認は右の項目だけで行ってください。</p>
+{% endif %}
+<p class="hint">項目の入力欄を選ぶと、見出しのセル（橙）と値のセル（青）が光ります。入力欄を選んだ状態でセルをクリックすると、そのセルの値を入れます。</p>
+{{ ui_sheet_grid(grids) }}
+{%- endmacro %}
+
+{%- macro part_finish() -%}
+{#- 確定してダウンロードの欄（HTML の断片） -#}
+{% set done = current.state in confirmed_states %}
+{% set batch = docs | length > 1 %}
+
+{% if batch and read_yet %}
+<p>確定済み <strong>{{ confirmed | length }}</strong> / {{ ready | length }} 件。下のボタンで、まだ確定していない帳票も確定してから zip にまとめます。</p>
+<ul class="list-plain list-rows">
+  {% for d in ready %}
+  <li>
+    <div class="item-main">
+      <span class="item-title">{{ loop.index }}. {{ d.title or d.file_name }}</span>
+      <span class="item-sub">{{ d.file_name }}</span>
+    </div>
+    <div class="cluster">
+      {{ ui_badge(d.state) }}
+      <button type="button" class="btn small" data-goto-doc="{{ d.id }}">読み取り結果を見る</button>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% if unread %}
+<p class="warn">まだ読み取れていない{{ unread | length }}件（zip には入りません）:
+  {{ unread | map(attribute="file_name") | join("、") }}</p>
+<p class="hint">ダウンロードのあと、この{{ unread | length }}件だけ②に戻って読み取るシートを選び直してください。</p>
+{% endif %}
+{% endif %}
+
+{% if not read_yet %}
+  <p class="muted">上で帳票の種類とシートを選び、［読み取る］を押してください。読み取った値を確かめてから、ここで確定します。</p>
+{% elif batch %}
+  <p class="notice" role="note">{{ batch_confirm }} zip には帳票1件につき1つの .md が入っています。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.download_batch', batch_id=batch_id) }}"
+       data-confirm-all data-download data-confirm="{{ batch_confirm }}" data-confirm-ok="確定してダウンロード">
+      {% if to_confirm %}残り{{ to_confirm | length }}件も確定して、まとめてダウンロード（zip）{% else %}まとめて Markdown をダウンロード（zip）{% endif %}
+    </a>
+  </div>
+  <p class="hint">要確認の項目が残っていても確定できます（要確認は「ここを見てください」という目印です）。</p>
+{% elif not done %}
+  <div class="form-actions">
+    <button type="button" class="btn primary" data-confirm-doc="{{ current.id }}">確定して Markdown を作る</button>
+  </div>
+  <p class="hint">確定すると、入力中の値で Markdown が作られます。確定したあとでも、上の読み取り結果を直して確定し直せます。</p>
+{% else %}
+  <p>ファイル名: <code>{{ file_name }}</code></p>
+  <p class="notice" role="note">{{ delete_note }}</p>
+  <div class="btn-row">
+    {#- 直したまま確定していない（修正中）ときは、zip と同じように確定し直してから渡す -#}
+    <a class="btn primary" href="{{ url_for('forms.download_md', doc_id=current.id) }}"
+       data-confirm-all data-download data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdown をダウンロード（.md）</a>
+    <button type="button" class="btn" data-copy="#mdText">Markdownをコピー</button>
+  </div>
+  <details class="fold">
+    <summary>Markdownの内容を見る</summary>
+    <pre class="code md-preview" id="mdText">{{ markdown }}</pre>
+  </details>
+  <p class="hint">ダウンロードした .md は、LightRAG の画面にそのままドラッグして入れてください。</p>
+{% endif %}
+{%- endmacro %}
+
+{#- ========================================================================================
+    元 tables.html — 段の断片のマクロ（views.render_part が1つずつ描く）
+    ======================================================================================== -#}
+{#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("base.html", "part_x", ...)
+    が、この画面のマクロを1つだけ描いて返す（ページ全体は描かない）。 -#}
+
+{%- macro part_source() -%}
+{#- 段2「読み取り方」の中身。変えるたびに static/app.js（表の取り込み）が保存する（画面は移らない）。 -#}
+{% if error %}<div class="flash flash-error" role="alert">{{ error }}</div>{% endif %}
+
+<div data-source-form>
+  <p class="hint">ファイル: {{ imp.file_name }}</p>
+
+  {% if src.kind == "csv" %}
+  <div class="sub-block">
+    <h3 class="sub-title">文字コード・区切り</h3>
+    <p class="hint">自動で判定しました。文字化けしている場合は変えてください。</p>
+    {% if src.sniff_warnings %}<div class="notice" role="note">{% for w in src.sniff_warnings %}{{ w }}<br>{% endfor %}</div>{% endif %}
+    <div class="grid-3">
+      <label>文字コード
+        <select name="encoding" class="input" data-source-field>
+          {% set known = encodings | map('first') | list %}
+          {% for value, label in encodings %}<option value="{{ value }}" {{ 'selected' if value == src.encoding }}>{{ label }}</option>{% endfor %}
+          {% if src.encoding not in known %}<option value="{{ src.encoding }}" selected>{{ src.encoding }}</option>{% endif %}
+        </select>
+      </label>
+      <label>区切り文字
+        <select name="delimiter" class="input" data-source-field>
+          {% for value, label in delimiters %}<option value="{{ value }}" {{ 'selected' if value == src.delimiter }}>{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <div class="field"><span>前置き行</span><span class="muted">{{ src.preamble_rows or 0 }}行（見出しより上の行。下の「表の範囲」で確認できます）</span></div>
+    </div>
+    <label class="check"><input type="checkbox" name="replace_errors" data-source-field {{ 'checked' if src.errors == 'replace' }}> 読めない文字を「〓」に置き換えて読み込む</label>
+  </div>
+  {% elif sheets %}
+  <div class="sub-block">
+    <h3 class="sub-title">シート</h3>
+    <div class="stack" role="radiogroup" aria-label="シート">
+      {% for s in sheets %}
+      <label class="check">
+        <input type="radio" name="sheet" value="{{ s.name }}" data-source-field {{ 'checked' if s.name == sheet }}>
+        <span><strong>{{ s.name }}</strong>
+          <small class="muted">{{ s.max_row }}行 × {{ s.max_col }}列{% if s.hidden %}・非表示のシート{% endif %}
+          {%- if list_like.get(s.name) == 'crosstab' %}・クロス集計らしい（対応していません）
+          {%- elif list_like.get(s.name) %}・一覧表らしい{% endif %}</small></span>
+      </label>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{%- macro part_layout() -%}
+{#- 段3「表の範囲」の中身。色分けで見出し・データ・小計・注記・除外を確かめる。 -#}
+<div data-layout-page>
+  <p class="hint">{% if imp.source.kind == 'excel' %}シート: {{ sheet }}／{% endif %}
+    行番号をクリックすると見出し行になります（Shift を押しながらで2段）。データの終わりは右の欄で指定できます。</p>
+
+  <div class="grid-2">
+    <label>見出し行（2段なら「6,7」）
+      <input type="text" name="header_rows" class="input" value="{{ layout.header_rows | join(',') }}" data-header-input>
+    </label>
+    <label>データの終わりの行（空欄＝自動）
+      <input type="text" name="data_end_row" class="input" value="{{ data_end_saved }}" placeholder="自動（{{ layout.data_end }}行目）" data-end-input>
+    </label>
+  </div>
+  <dl class="tbl-summary">
+    <div><dt>表の形</dt><dd data-kind>{{ info.table_kind_label }}</dd></div>
+    <div><dt>データの範囲</dt><dd data-range>{% if layout.data_end < layout.data_start %}データの行が見つかりません{% else %}{{ layout.data_start }}〜{{ layout.data_end }}行目{% endif %}</dd></div>
+    <div><dt>行の内訳</dt><dd data-counts style="font-size:.9rem">{% for k, v in info.counts.items() %}{{ k }} {{ v }}行{% if not loop.last %}／{% endif %}{% endfor %}</dd></div>
+  </dl>
+  <div data-crosstab class="flash flash-error" role="alert" {% if layout.table_kind != 'crosstab' %}hidden{% endif %}>月別集計のようなクロス集計の表には対応していません。1行＝1件の一覧表を選んでください。</div>
+  <ul class="list-plain warn" data-warnings>{% for w in layout.warnings %}<li>{{ w }}</li>{% endfor %}</ul>
+  <p class="hint">見出し: <span data-headers>{{ layout.headers | join('、') }}</span></p>
+
+  <div class="sub-block">
+    <h3 class="sub-title">先頭{{ rows|length }}行</h3>
+    {{ ui_grid_legend() }}
+    {{ ui_data_grid(rows, max_cols=width, caption="元の表の先頭") }}
+  </div>
+
+  <div class="form-actions">
+    <button type="button" class="btn primary" data-layout-submit {{ 'disabled' if layout.table_kind == 'crosstab' }}>この範囲で読み込む</button>
+    <button type="button" class="btn danger-outline" data-import-delete
+            data-confirm="この取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
+            data-confirm-ok="削除する">この取り込みを削除</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{%- macro part_columns() -%}
+{#- 段4「列の対応づけ」の中身。決めるのは「表の名前」と、列ごとの「使う・役割」だけ。
+    キー・型・単位・md での扱い・空欄＝上と同じは、見出しと値からサーバーが決める（利用者の指示 2026-09-20）。
+    決めることが無いとき（summary がある）は表をたたんで要約1行だけ出す。表は隠して DOM に残すので、
+    ［変更する］で開いても、開かずに保存しても、送る中身（＝できる Markdown）は変わらない。
+    表の列は「使う・見出し・役割・値の例」の4つだけ（「知らせ」の列は 2026-09-21 にやめた。ほとんどの行で
+    空のうえ、表の上の行と同じことを書いていた）。はじめから使わない設定にしている理由だけ、見出しの下に小さく出す。
+    必要な変数: rows（選べる役割 r.roles・使わない理由 r.note を含む）, name, save_url, summary, todo -#}
+<div data-columns-editor data-save-url="{{ save_url }}">
+  <label class="stack-label">表の名前
+    <input type="text" class="input" data-setting="name" value="{{ name }}" maxlength="80" required>
+    <small>Markdown のファイル名と、記録ファイルの見出しに使います。</small>
+  </label>
+
+  {% call ui_card("列の対応づけ", "この段で決めるのは「出す列」と「役割」だけです。ほかは見出しと値から決めます。"
+                                  if summary else
+                                  "Markdown に出す列にチェックを入れ、役割を選びます。キー・型・単位・出し方は値から決めます。") %}
+    {% if summary %}
+    <div data-columns-summary>
+      <p class="col-summary">{{ summary }}</p>
+      <p><button type="button" class="btn" data-columns-open>変更する</button></p>
+    </div>
+    {% elif todo %}
+    <ul class="list-plain warn" data-columns-todo>{% for t in todo %}<li>{{ t }}</li>{% endfor %}</ul>
+    {% endif %}
+    {#- 役割の説明。表と一緒に出す（要約1行のときは表ごと隠れる）。設備の記録だけでなく、
+        どんな一覧表でも読めるように、役割の名前と使いどころを書く（利用者の指示 2026-09-21）。 -#}
+    <div data-columns-table {{ 'hidden' if summary }}>
+    <ul class="list-plain hint" data-role-help>
+      <li><strong>識別番号</strong>：1件を見分ける番号（管理No、カルテNoなど）。Markdown の見出しに出します。</li>
+      <li><strong>日付</strong>：いつの記録か。記録ファイルを月ごとに分ける目印にします。</li>
+      <li><strong>対象</strong>：その記録が何についてのものかを表す列（設備・製品・顧客など）。見出しに出し、長い記録を分けたときも各かたまりに書きます。</li>
+      <li><strong>経過の記録</strong>：1つのセルに日付ごとに書き足した列（例: 対応内容、対応履歴、経過、対応メモ）。日付ごとに切り分けて時系列で出します（AIを使わなくても出ます）。1つの表で1列だけ選べます。</li>
+      <li><strong>その他</strong>：上のどれでもない列。そのまま「- 項目: 値」で出します。</li>
+    </ul>
+    <div class="table-wrap">
+    <table class="table compact col-editor">
+      <thead>
+        <tr><th>使う</th><th>見出し（そのまま項目名になります）</th><th>役割</th><th>値の例</th></tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr data-col data-index="{{ r.index }}" data-header="{{ r.header }}" class="{{ '' if r.use else 'is-unused' }}">
+          <td class="center"><input type="checkbox" data-field="use" {{ 'checked' if r.use }} aria-label="{{ r.header }} を使う"></td>
+          <td><strong>{{ r.header }}</strong>{% if r.note %}<br><span class="muted small" data-col-note>{{ r.note }}</span>{% endif %}</td>
+          <td><select data-field="role" aria-label="役割">{% for v, label in r.roles %}<option value="{{ v }}" {{ 'selected' if v == r.role }}>{{ label }}</option>{% endfor %}</select></td>
+          <td class="examples">{{ r.examples | join('\n') }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    </div>
+    <ul class="list-plain warn" data-editor-errors aria-live="polite"></ul>
+  {% endcall %}
+
+  <div class="form-actions">
+    <button type="button" class="btn primary" data-editor-save>この対応づけで読み込む</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{%- macro part_ai() -%}
+{#- 段5「AI整形（任意）」の中身。mdファイルを作るときに、経過の記録の列（④で選んだ1列）の文章を
+    組み立てる部分だけ AI を使う。分けるところまではルールだけでやるので、AI が無くても Markdown は出る。 -#}
+<div data-ai-page
+     data-split-url="{{ url_for('tables.ai_split_preview', import_id=imp.id) }}"
+     data-trial-url="{{ url_for('tables.ai_trial', import_id=imp.id) }}"
+     data-estimate-url="{{ url_for('tables.ai_estimate', import_id=imp.id) }}"
+     data-run-url="{{ url_for('tables.ai_run', import_id=imp.id) }}"
+     data-pause-url="{{ url_for('tables.ai_control', import_id=imp.id, action='pause') }}"
+     data-resume-url="{{ url_for('tables.ai_control', import_id=imp.id, action='resume') }}"
+     data-cancel-url="{{ url_for('tables.ai_control', import_id=imp.id, action='cancel') }}"
+     data-trial-keys='{{ trial_keys | tojson }}'
+     data-external="{{ '1' if external else '0' }}">
+
+  <p class="hint">④で「経過の記録」にした列「{{ log_display }}」を、ルールで日付・記入者ごとに分けて時系列にします
+    （ここまでは AI なしで Markdown に出ます）。AI整形をすると、そのうえに原文と照合できた「対応の要点」と
+    記録の種別を足します。しなくても先へ進めます。</p>
+
+  <div class="sub-block">
+    <h3 class="sub-title">1. 分割プレビュー（AIなし）</h3>
+    {#- 左に原文（セルのまま）、右に「順番1、順番2…」のかたまり。同じ色が対応し、クリックで行き来する
+        （利用者の指示 2026-09-21「順番1、順番2の表示にしてほしい。また、原文と並べて見れるようにしたい」）。
+        描くのは static/app.js（表の取り込み）の splitCompare。 -#}
+    {% if row_choices %}
+    <div class="filter-bar">
+      <label>行
+        <select class="input" data-split-row>
+          {% for key, label in row_choices %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="button" class="btn" data-split-run>分割を表示</button>
+    </div>
+    <div data-split-result aria-live="polite"></div>
+    {% else %}
+    <p class="muted">この列に文章が入っている行がありません。</p>
+    {% endif %}
+  </div>
+
+  {% if ai_ready %}
+  <div class="sub-block">
+    <h3 class="sub-title">2. 試し実行（10行）</h3>
+    <p class="hint">先頭の10行を1行ずつAIに送り、抜き出した項目と Markdown を確かめます。結果は保存され、全件実行でも使われます。<br>
+      モデル: {{ model }}{% if external %}（外部のAIサービス）{% else %}（社内のAIサーバー）{% endif %}</p>
+    {% if external %}<label class="check"><input type="checkbox" data-trial-external> 試し実行の10行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
+    <div class="btn-row"><button type="button" class="btn" data-trial-run {{ 'disabled' if not trial_keys }}>10行を試す</button></div>
+    <p class="progress-text" data-trial-status aria-live="polite"></p>
+    <div data-trial-result></div>
+  </div>
+  {% endif %}
+
+  {# AI接続が外れていても、動いているジョブがある間は進み具合と［中止］を出す（中止できないと取り込みが詰む） #}
+  {% if ai_ready or job %}
+  <div class="sub-block">
+    <h3 class="sub-title">3. 全件実行</h3>
+    {% if counts %}
+    <p class="hint">これまでの結果: {% for status, n in counts.items() %}{{ item_labels.get(status, status) }} {{ n }}件{% if not loop.last %}／{% endif %}{% endfor %}</p>
+    {% endif %}
+    {% if job %}
+      {{ ui_progress(job, url=(job_url if job_active else None), label="AI整形の進み具合") }}
+      <p class="hint" data-ai-detail>{% if job.progress %}OK {{ job.progress.ok or 0 }}／要確認 {{ job.progress.flagged or 0 }}／エラー {{ job.progress.error or 0 }}／ルールのみ {{ job.progress.rule_only or 0 }}{% endif %}</p>
+      {% if job.status == 'failed' and job.message %}<div class="flash flash-error" role="alert">{{ job.message }}</div>{% endif %}
+      {% if job_active %}
+      {% if not ai_ready %}<p class="hint">AI接続が外れているため実行・再開はできません。中止してから進んでください。</p>{% endif %}
+      <div class="btn-row">
+        {% if ai_ready %}
+        {% if job.status == 'paused' or job.pause_requested %}
+        {# 一時停止を頼んだ直後は、送信中の呼び出しを待つ間まだ「実行中」。そのときも再開を出す #}
+        <button type="button" class="btn" data-ai-control="resume">再開</button>
+        {% if job.status != 'paused' %}<span class="hint">一時停止中…（送信中の呼び出しが終わると止まります）</span>{% endif %}
+        {% else %}
+        <button type="button" class="btn" data-ai-control="pause">一時停止</button>
+        {% endif %}
+        {% endif %}
+        <button type="button" class="btn danger-outline" data-ai-control="cancel"
+                data-confirm="AI整形を中止します。保存済みの行の結果は残ります。" data-confirm-ok="中止する">中止</button>
+      </div>
+      {% endif %}
+    {% endif %}
+    {% if ai_ready and not job_active %}
+    <div class="grid-3">
+      <label>範囲
+        <select class="input" data-run-scope>
+          {% for value, label in scopes.items() %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <label>同時実行数
+        <input type="number" class="input" min="1" max="16" value="{{ 4 if external else 1 }}" data-run-concurrency>
+      </label>
+      <div class="field"><span>見積もり</span><span data-estimate class="muted">[見積もる] を押すと、呼び出し回数と時間の目安を出します。</span></div>
+    </div>
+    {% if external %}<label class="check"><input type="checkbox" data-run-external> 対象の行の内容が外部のAIサービスに送信されることを確認しました</label>{% endif %}
+    <div class="btn-row">
+      <button type="button" class="btn" data-estimate-run>見積もる</button>
+      <button type="button" class="btn" data-ai-run>AI整形を実行する</button>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {#- AI接続の設定そのものはここには無い。ヘッダー右上の「AI接続」（base.html の #aiDialog）に移した
+      （利用者の指示 2026-09-21）。ここでは状態と行き先だけ書く。 -#}
+  <div class="sub-block">
+    <p class="hint" data-ai-where>
+      {%- if ai_ready %}AI接続: <strong>{{ ai_state.state_label }}</strong>{% if ai_state.checked_text %}（最終確認 {{ ai_state.checked_text }}）{% endif %}。
+      {%- else %}AI接続は未設定です（APIキーか接続先が入っていません）。{% endif %}
+      設定と接続の確認は、画面右上の［AI接続］で行います（AIを使わなくても Markdown は作れます）。</p>
+  </div>
+
+  <div class="form-actions">
+    {% if job_active %}
+    <span class="hint">AI整形が動いている間（一時停止中を含む）は確認に進めません。再開して終わらせるか、中止してください。</span>
+    {% else %}
+    <button type="button" class="btn primary" data-ai-next>内容の確認へ</button>
+    {% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+{%- macro part_preview() -%}
+{#- 段6「内容の確認」の中身。件数・問題・作られるファイル・データを見てから確定する。 -#}
+<div data-preview-page data-file-url="{{ url_for('tables.preview_file', import_id=imp.id) }}">
+  <p class="hint">ファイル: {{ imp.file_name }}／表の名前: {{ spec.name }}
+    {%- if confirmed %}　{{ ui_badge("confirmed") }}（確定済み）{% endif %}</p>
+
+  <dl class="tbl-summary">
+    <div><dt>記録件数</dt><dd>{{ stats.records or 0 }}件</dd></div>
+    <div><dt>読み込んだ行</dt><dd>{{ stats.rows_scanned or 0 }}行</dd></div>
+    <div><dt>継続行として連結</dt><dd>{{ stats.continuation_merged or 0 }}行</dd></div>
+    <div><dt>小計・合計の行（除外）</dt><dd>{{ stats.subtotal_rows or 0 }}行</dd></div>
+    <div><dt>エラー</dt><dd>{{ counts.error }}件</dd></div>
+    <div><dt>警告</dt><dd>{{ counts.warning }}件</dd></div>
+    <div><dt>Markdownファイル</dt><dd>{{ files|length }}件</dd></div>
+  </dl>
+  {% if stats.excluded %}
+  <p><strong>除外した行と理由:</strong>
+    {% for reason, n in stats.excluded.items() %}{{ reason }} {{ n }}行{% if not loop.last %}／{% endif %}{% endfor %}</p>
+  {% endif %}
+  {% if stats.layout_warnings %}<ul class="list-plain warn">{% for w in stats.layout_warnings %}<li>{{ w }}</li>{% endfor %}</ul>{% endif %}
+  {% if stats.date_min %}<p class="hint">日付の範囲: {{ stats.date_min }}〜{{ stats.date_max }}</p>{% endif %}
+
+  <div class="sub-block">
+    <h3 class="sub-title">問題一覧</h3>
+    <p class="hint">エラーがあると確定できません。警告は確認のうえ、そのまま進められます。
+      <a class="btn small" href="{{ url_for('tables.issues_csv', import_id=imp.id) }}">問題一覧（CSV）</a></p>
+    {% if issues %}
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>種類</th><th>行</th><th>列</th><th>内容</th></tr></thead>
+      <tbody>
+      {% for i in issues %}
+        <tr>
+          <td>{% if i.level == 'error' %}<span class="badge badge-red">エラー</span>{% else %}<span class="badge badge-amber">警告</span>{% endif %}</td>
+          <td class="num">{{ i.row or "" }}</td><td>{{ i.column or "" }}</td><td>{{ i.message }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if issue_total > issues|length %}<p class="hint">先頭の{{ issues|length }}件を表示しています（全{{ issue_total }}件は CSV で確認できます）。</p>{% endif %}
+    {% else %}
+    <p class="muted">問題はありません。</p>
+    {% endif %}
+  </div>
+
+  <div class="sub-block">
+    <h3 class="sub-title">作られる Markdown ファイル</h3>
+    <p class="hint">RAG に入れる記録ファイルだけを作ります。ファイル名をクリックすると中身を表示します。</p>
+    <div class="split">
+      <div class="table-wrap">
+        <table class="table compact file-list">
+          <thead><tr><th>ファイル名</th><th class="num">記録</th></tr></thead>
+          <tbody>
+          {% for f in files %}
+            <tr data-file="{{ f.name }}">
+              <td><button type="button" data-file-open="{{ f.name }}">{{ f.name }}</button></td>
+              <td class="num">{{ f.records if f.records is not none else "" }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <p class="hint" data-file-title>ファイルを選んでください。</p>
+        <pre class="md-view" data-file-text></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="sub-block">
+    <h3 class="sub-title">データ（100行ずつ）</h3>
+    <p class="hint">正規化した値です。</p>
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>記録キー</th>{% for key, display in columns %}<th>{{ display }}</th>{% endfor %}<th>元の行</th></tr></thead>
+      <tbody>
+      {% for r in data_rows %}
+        <tr>
+          <td class="nowrap">{{ r.key }}</td>
+          {% for key, display in columns %}{% set v = r["values"].get(key) %}<td>{{ (v|string)[:120] if v is not none else "" }}</td>{% endfor %}
+          <td class="num">{{ r.source.row if r.source else "" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% if total_pages > 1 %}
+    <nav class="pagination" aria-label="ページ">
+      {% if page > 1 %}<button type="button" class="btn small" data-rows-page="{{ page - 1 }}">前へ</button>{% endif %}
+      <span>{{ page }} / {{ total_pages }}ページ</span>
+      {% if page < total_pages %}<button type="button" class="btn small" data-rows-page="{{ page + 1 }}">次へ</button>{% endif %}
+    </nav>
+    {% endif %}
+  </div>
+
+  <p class="notice" role="note">{{ delete_note }}</p>
+  <div class="form-actions">
+    {% if blocking %}<span class="warn">エラーが残っているため確定できません。上の問題一覧を確認して、範囲や列の対応づけを直してください。</span>{% endif %}
+    <button type="button" class="btn primary" data-confirm-run {{ 'disabled' if blocking }}
+      {%- if confirmed %} data-confirm="この取り込みは確定済みです。Markdownを作り直しますか？（作成済みのファイルは置き換わります）" data-confirm-ok="作り直す"{% endif %}>
+      {{ "確定し直してMarkdownを作り直す" if confirmed else "確定してMarkdownを作成" }}</button>
+  </div>
+</div>
+{%- endmacro %}
+
+{%- macro part_preview_failed() -%}
+{#- 段6「内容の確認」で、Markdown の下書きを作れなかったとき。 -#}
+<div class="flash flash-error" role="alert">{{ error }}</div>
+<p>ファイルが一時的に使えなかったときなどは［もう一度作る］で直ります。
+  同じエラーが続くときは、上の「列の対応づけ」（型・Markdownへの出し方）を見直してください。</p>
+<div class="form-actions">
+  <button type="button" class="btn primary" data-preview-retry>もう一度作る</button>
+  <button type="button" class="btn" data-reread>もう一度読み込む</button>
+</div>
+{%- endmacro %}
+
+{%- macro part_done() -%}
+{#- 段7「確定してダウンロード（zip）」の中身。ダウンロードするとこの取り込みのデータは消える。 -#}
+<div data-done-page>
+  <p class="hint">{{ (stats.output or {}).records or stats.records or 0 }}件の記録から {{ files|length }}件の Markdown を作りました。</p>
+  <p class="notice" role="note">{{ delete_note }}</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('tables.download_zip', import_id=imp.id) }}"
+       data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdownをまとめてダウンロード（zip）</a>
+    <button type="button" class="btn danger-outline" data-import-delete
+            data-confirm="ダウンロードせずにこの取り込みを削除します。読み込んだ内容と作成した Markdown も消えます。元に戻せません。"
+            data-confirm-ok="削除する">ダウンロードせずに削除</button>
+  </div>
+  <p class="hint">zip の中身は、RAG に入れる Markdown（.md）だけです。フォルダ分けはしていないので、zip を開いて中身をそのまま
+    LightRAG の画面にドラッグしてください。</p>
+
+  <div class="sub-block">
+    <h3 class="sub-title">作成したファイル</h3>
+    <ul class="list-plain">
+      {% for f in files %}<li>{{ f.name }} <small class="muted">{{ (f.size / 1024) | round(1) }}KB</small></li>{% endfor %}
+    </ul>
+  </div>
+</div>
+{%- endmacro %}
+
+{#- ========================================================================================
+    元 form_types.html — 段の断片のマクロ（views.render_part が1つずつ描く）
+    ======================================================================================== -#}
+{#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("base.html", "part_x", ...)
+    が、この画面のマクロを1つだけ描いて返す（ページ全体は描かない）。 -#}
+
+{%- macro part_list() -%}
+{#- 登録済みの帳票の種類（HTML の断片） -#}
+{% if not patterns %}
+  <p class="muted">まだありません。下で、この種類の帳票の Excel を置いてください。</p>
+{% else %}
+<div class="table-wrap">
+<table class="table">
+  <thead><tr><th>名前</th><th>状態</th><th>読み取る項目</th><th>操作</th></tr></thead>
+  <tbody>
+  {% for p in patterns %}
+    <tr data-pattern="{{ p.id }}">
+      <td><strong>{{ p.name }}</strong></td>
+      <td>{{ ui_badge(p.status) }}</td>
+      <td>{{ p.field_count }}</td>
+      <td>
+        <div class="btn-row">
+          <button type="button" class="btn small" data-open-type="{{ p.id }}">項目を見る・直す</button>
+          {% if p.status != 'active' %}
+          <button type="button" class="btn small" data-set-status="active" data-pattern="{{ p.id }}">使用開始</button>
+          {% endif %}
+          <button type="button" class="btn danger-outline small" data-delete-type="{{ p.id }}"
+                  data-confirm="帳票の種類「{{ p.name }}」（読み取りの設定）を削除します。元に戻せません。"
+                  data-confirm-ok="削除">削除</button>
+        </div>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{%- endmacro %}
+
+{%- macro part_build() -%}
+{#- 読み取る欄をクリックする欄（HTML の断片）。Excel のファイルはサーバーに残さないが、登録したときの
+    シートの中身（セルの番地と文字）は種類と一緒に覚えている（views._stored_book）ので、開き直しても
+    シートは出る。出ないのは、覚える前に登録した種類だけ（そのときは置き場を出す）。 -#}
+<div id="cellBuilder" data-pattern="{{ pattern.id }}"
+     data-add-url="{{ url_for('form_types.add_field', pattern_id=pattern.id) }}"
+     {#- いま画面に出ているブックの合図（sha256）。ブラウザがファイルを持っていないとき、
+         これを送れば「さっき読んだブック」を指せる（無ければサーバーは覚えたシートを使う） -#}
+     data-book="{{ book.file_hash if book }}">
+
+  {% for note in notes %}<p class="warn">{{ note }}</p>{% endfor %}
+
+  <div class="cluster build-top">
+    <label class="field"><span>帳票の種類の名前</span>
+      <input class="input" value="{{ pattern.name }}" data-rename="{{ url_for('form_types.rename', pattern_id=pattern.id) }}"></label>
+    <span>{{ ui_badge(pattern.status) }}</span>
+    {#- 直した内容はその場で保存される（確定の操作は無い）。それが分かるように、保存のたびにここを書き換える
+        （トーストは消えるので残る表示にする。利用者の指摘 2026-09-22「変更した内容を確定させるボタンがない」） -#}
+    <span class="muted small" data-save-line aria-live="polite">変更はその場で保存されます（確定の操作はありません）</span>
+    <span class="spacer"></span>
+    {% if pattern.status != 'active' %}
+      <button type="button" class="btn primary" data-set-status="active" data-pattern="{{ pattern.id }}">使用開始</button>
+    {% endif %}
+    <button type="button" class="btn" data-close-build title="この欄を閉じて一覧に戻ります（直した内容は保存済みです）">編集を終える</button>
+    <button type="button" class="btn danger-outline" data-delete-type="{{ pattern.id }}"
+            data-confirm="帳票の種類「{{ pattern.name }}」を削除します。元に戻せません。&#10;確定済みの帳票{{ confirmed_count }}件は削除されずに残ります。"
+            data-confirm-ok="削除">この種類を削除</button>
+  </div>
+
+  <p class="page-lead">左のシートで<strong>見出しのセル</strong>、次に<strong>値のセル</strong>をクリックすると、その欄が読み取る項目になります。
+    「設備番号：EQ-001」のように1つのセルに見出しと値が入っているときは、同じセルを2回クリックしてください。
+    表（1行＝1明細）は、列見出しのセルを1回クリックすると表ごと項目になります。</p>
+
+  <div class="split">
+    <section class="split-pane sticky" aria-label="置いた帳票のシート">
+      <div class="split-pane-head">
+        <h3>置いた帳票のシート{% if book %} <small class="muted">{{ book.file_name }}</small>{% endif %}
+          {% if grids %}
+          {#- 書き方の違う同じ帳票（「設備No」と「設備番号」など）に替えて同じ欄をクリックすると、どちらでも読めるようになる。
+              置き替えると、覚えているシートもその Excel のものに入れ替わる -#}
+          <form class="inline" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
+            <label class="link-like small" title="書き方の違う同じ帳票に替えて同じ欄をクリックすると、どちらの書き方でも読めるようになります。置き替えると、覚えておくシートもその Excel のものに入れ替わります（ファイルは保存しません）">別のExcelに替える<input type="file" name="book" accept=".xlsx,.xlsm" hidden></label>
+          </form>
+          {% endif %}
+        </h3>
+        {% if remembered %}
+        {#- 覚えたシートで出している（Excel は要らない）。いつ置いたものかを書く -#}
+        <p class="hint" data-remembered-book>登録したときに覚えたシートです（{{ remembered.file_name }}、{{ remembered.saved_at[:16] | replace('T', ' ') }} に置いたもの）。
+          Excel のファイルは保存していません。セルの番地と文字だけを覚えています（セルの色は覚えません）。</p>
+        {% endif %}
+        {% if grids | length > 1 %}
+        <div class="tabs" role="tablist">
+          {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
+        </div>
+        {% endif %}
+      </div>
+      <div class="split-pane-body">
+        {% if not grids %}
+          {#- 覚えたシートが無い種類（シートを覚えるようになる前に登録したもの）だけ、ここに置き場を出す。
+              置くとシートを覚え、登録のときと同じ画面（左にシート・右に項目）になり、次からは置かずに開ける -#}
+          <p class="hint">この種類は、シートを覚えるようになる前に登録したものです。同じ帳票の Excel を一度置くと、
+            そのシートの中身（セルの番地と文字）を覚えて、次からは置かずにこの画面が出ます。</p>
+          <form class="stack" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
+            {{ ui_file_drop("book", fid="drop-book-edit", accept=".xlsx,.xlsm", label="この帳票のExcelをここにドラッグ＆ドロップ",
+                            hint="置くとすぐシートが出て、登録のときと同じようにセルをクリックして直せます。" ~ snapshot_note) }}
+          </form>
+        {% else %}
+        <p class="hint" data-click-hint aria-live="polite">見出しのセルをクリックしてください。</p>
+        <div class="btn-row" data-click-actions hidden>
+          <button type="button" class="btn small" data-click-empty>値が空のまま項目にする</button>
+          <button type="button" class="btn small ghost" data-click-cancel>選び直す</button>
+        </div>
+        {{ ui_sheet_grid(grids, click_cells=True) }}
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="split-pane" aria-label="読み取る項目">
+      <div class="split-pane-head"><h3>読み取る項目（{{ rows | length }}）</h3></div>
+      <div class="split-pane-body">
+        {% if not rows %}
+          <p class="muted">まだ項目がありません。左のシートで、読み取りたい欄の見出しと値をクリックしてください。</p>
+        {% else %}
+        <p class="hint">見出しはクリックすると手で直せます。直るのはMarkdownに書く名前だけで、シートの読み取る場所は変わりません。</p>
+        <div class="table-wrap">
+        <table class="table compact">
+          <thead><tr><th>見出し</th><th>置いた帳票での値</th><th></th></tr></thead>
+          <tbody>
+          {% for r in rows %}
+            <tr data-field="{{ r.field.field_name }}" data-sheet="{{ r.sheet or '' }}"
+                data-label-cell="{{ r.label_cell or '' }}" data-value-cell="{{ r.value_cell or '' }}">
+              <th scope="row">
+                <input class="name-edit" value="{{ r.field.display_name }}" data-saved="{{ r.field.display_name }}"
+                       aria-label="見出し（Markdownに書く名前）"
+                       data-field-label="{{ url_for('form_types.rename_field', pattern_id=pattern.id, field_name=r.field.field_name) }}">
+                {% if r.label != r.field.display_name %}<small class="muted">探す見出し: {{ r.label }}</small>{% endif %}
+                {% if r.field.data_type == 'table' %}<small class="muted">表（1行＝1明細）</small>{% endif %}</th>
+              <td>
+                {% if not book %}<span class="muted">—（左にExcelを置くと、この設定で読んだ値が出ます。シートを覚える前に登録した種類です）</span>
+                {% elif r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
+                {% else %}<span class="pre">{{ r.value | field_text | truncate(120) }}</span>{% if r.field.unit %} {{ r.field.unit }}{% endif %}{% endif %}
+                {% if r.warning %}<div class="warn">{{ r.warning }}</div>{% endif %}
+              </td>
+              <td class="center">
+                <button type="button" class="btn small ghost"
+                        data-delete-field="{{ url_for('form_types.delete_field', pattern_id=pattern.id, field_name=r.field.field_name) }}">削除</button>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        </div>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+
+  {# ---- 読み取りテスト ---- #}
+  {% call ui_card("読み取りテスト", ("いまの設定で、" ~ ("登録したときに覚えたシート" if remembered else "置いた帳票") ~ "を実際に読み取った結果です。") if book else none, level=3) %}
+    {% if not rows %}
+      <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
+    {% elif not test %}
+      <p class="muted">この種類はシートを覚える前に登録したもので、いま Excel も置いていないので、読み取りテストはできません。
+        設定は残っています。確かめたいときは、左の欄に同じ帳票の Excel を置いてください（置くとシートを覚えます）。</p>
+    {% else %}
+      <p>{{ test.total }}項目中 <strong>{{ test.found }}</strong>項目が見つかりました（シート: {{ test.sheets | join('、') }}）。</p>
+      <details class="fold" {% if test.found < test.total %}open{% endif %}>
+        <summary>できる Markdown を見る（ファイル名: {{ test.file_name }}）</summary>
+        <pre class="code md-preview">{{ test.markdown }}</pre>
+      </details>
+      <p class="hint">思ったとおりに読めていれば、上の［使用開始］を押してください。帳票取り込みの候補に出ます。</p>
+    {% endif %}
+  {% endcall %}
+
+</div>
+{%- endmacro %}
+
+{#- ========================================================================================
+    元 guide.html — 段の断片のマクロ（views.render_part が1つずつ描く）
+    ======================================================================================== -#}
+{#- 解説: 帳票の Markdown がどう作られるか（裏側の決まり）。利用者の求め 2026-09-22
+    「帳票関係のマークダウン作成の裏側のロジックを書いた文書を解説ページを上部タブに追加して作成して」。
+    中身は app/extract.py の build_markdown・_guess_type・_basic_lines・table_markdown_lines と docs/design.md 6.1 のとおり。
+    コードを変えたらここも直す（数字はコードの定数と同じにしておく）。 -#}<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=1280">
-  <title>{% block title %}{{ TITLES.get(code, TITLES[500]) if code else "帳票取り込み" }}{% endblock %}｜RAG用Markdown作成</title>
+  <title>{% block title %}{% if screen %}{{ SCREEN_TITLES[screen] }}{% elif code %}{{ TITLES.get(code, TITLES[500]) }}{% else %}帳票取り込み{% endif %}{% endblock %}｜RAG用Markdown作成</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -205,7 +1117,7 @@
   </header>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-  <main id="main" class="container {% block container_class %}{% endblock %}">
+  <main id="main" class="container {% block container_class %}{% if screen in ("forms", "tables", "form_types") %}wide{% endif %}{% endblock %}">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
       <div class="flash-area">
@@ -218,7 +1130,389 @@
       </div>
       {% endif %}
     {% endwith %}
-    {% block content %}{% if code %}
+    {% block content %}{% if screen == "forms" %}
+
+<div id="formsPage" data-steps-open
+     data-upload-url="{{ url_for('forms.upload') }}"
+     data-discard-url="/forms/discard"
+     data-type-url="{{ url_for('forms.type_all') }}"
+     data-finish-url="{{ url_for('forms.finish') }}">
+
+  {#- 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）を先に伝える。
+      実際に捨てるのは static/app.js の ragDiscard → POST /forms/discard。 -#}
+  <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた Markdown はその場でダウンロードしてください。</p>
+
+  {% call ui_step("file", 1, "ファイルを置く", open=True) %}
+      {% if active_pattern_count == 0 %}
+      <div class="notice" role="note">
+        {% if pattern_count == 0 %}
+          帳票の種類がまだありません。先に<a href="{{ url_for('form_types.index') }}">帳票登録</a>で、
+          この帳票の Excel を置いて読み取る欄を決めてください（置いた Excel はサーバーに残りません）。
+        {% else %}
+          使用中の帳票の種類がありません。<a href="{{ url_for('form_types.index') }}">帳票登録</a>で［使用開始］を押してください。
+        {% endif %}
+      </div>
+      {% endif %}
+      <form id="uploadForm" class="stack" enctype="multipart/form-data">
+        {{ ui_file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
+                        hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて置くと、この画面で1件ずつ読み取って最後に zip にまとめます（" ~ max_files ~ "ファイル・合計" ~ max_mb ~ "MBまで）", multiple=True) }}
+        <p class="hint">取り込んだデータはサーバーに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
+      </form>
+      {{ ui_work_line("upload") }}
+  {% endcall %}
+
+  {% call ui_step("type", 2, "帳票の種類とシート", open=True) %}
+      <div data-type-body><p class="muted">上で Excel を置くと、ここに帳票の種類と読み取るシートが出ます。まとめて置いた帳票には、同じ帳票の種類とシートを使います。</p></div>
+      {{ ui_work_line("read") }}
+  {% endcall %}
+
+  {% call ui_step("review", 3, "読み取り結果", open=True) %}
+      <div data-review-body><p class="muted">読み取ると、ここに元のシートと読み取った値が並びます（まとめて置いた帳票は縦に全部並びます）。値はその場で直せます。</p></div>
+  {% endcall %}
+
+  {% call ui_step("finish", 4, "確定してダウンロード", open=True) %}
+      <div data-finish-body><p class="muted">読み取り結果を確定すると、ここから Markdown をダウンロードできます。</p></div>
+      {{ ui_work_line("confirm") }}
+  {% endcall %}
+</div>
+{% elif screen == "tables" %}
+{#- 表の取り込みは、この1枚で全部やる（利用者の指示 2026-09-20）。
+    段の中身は /tables/imports/<id>/panel/<名前> が HTML の断片で返し、static/app.js（表の取り込み）が入れる。 -#}
+
+<div data-tables-page data-steps-open
+     data-upload-url="{{ url_for('tables.upload') }}"
+     data-discard-url="/tables/discard"
+     data-new-url="{{ url_for('tables.new') }}">
+
+  {#- 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）を先に伝える。
+      実際に捨てるのは static/app.js の ragDiscard → POST /tables/discard。 -#}
+  <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた zip はその場でダウンロードしてください。</p>
+
+  {% call ui_step("file", 1, "ファイルを置く", open=True) %}
+    <form data-upload-form class="stack">
+      {{ ui_file_drop("file", accept=".xlsx,.xlsm,.csv,.tsv,.txt", label="一覧表のファイルをここにドラッグ＆ドロップ",
+           hint=".xlsx / .xlsm / .csv / .tsv / .txt（月別集計のようなクロス集計の表には対応していません）") }}
+    </form>
+  {% endcall %}
+
+  {% call ui_step("source", 2, "読み取り方", open=True) %}
+    <p class="muted">上でファイルを置くと、ここに文字コード・区切り・シートが出ます。</p>
+  {% endcall %}
+  {% call ui_step("layout", 3, "表の範囲", open=True) %}
+    <p class="muted">見出しの行とデータの範囲を、色分けした先頭の行を見ながら決めます。</p>
+  {% endcall %}
+  {% call ui_step("columns", 4, "列の対応づけ", open=True) %}
+    <p class="muted">表の名前と、列ごとに「使うか」「役割」を決めます。ほかは見出しと値から決めます。</p>
+  {% endcall %}
+  {% call ui_step("ai", 5, "AI整形（任意）", open=True) %}
+    <p class="muted">④で「経過の記録」にした列（例: 対応内容）があるときだけ使います。AI接続の設定は画面右上の［AI接続］にあります。</p>
+  {% endcall %}
+  {% call ui_step("preview", 6, "内容の確認", open=True) %}
+    <p class="muted">件数・問題の一覧と、作られる Markdown の中身をここで確認します。</p>
+  {% endcall %}
+  {% call ui_step("done", 7, "確定してダウンロード（zip）", open=True) %}
+    <p class="muted">確定すると、ここから zip をダウンロードできます。ダウンロードするとサーバーからデータが消えます。</p>
+  {% endcall %}
+</div>
+{% elif screen == "form_types" %}
+
+<div id="typesPage" data-steps-open data-create-url="{{ url_for('form_types.create') }}">
+
+  {#- 帳票登録は Excel のファイルを預からない（利用者の指示 2026-09-21）。読み取ってすぐ捨て、設定と
+      シートの中身（セルの番地と文字。色は無し）だけを覚える（利用者の指示 2026-09-22）。「何も残さない」とは言わない。 -#}
+  <p class="notice" role="note"><strong>Excel のファイルは保存しません。</strong>登録したときのシートの中身（セルの番地と文字）だけを覚えておき、あとから開いたときにその画面を出します。
+    セルの色は覚えません（塗りの有る無しだけを、見出しの判定のために覚えます）。残るのは登録した帳票の種類（読み取りの設定と覚えたシート）だけです。</p>
+
+  {% call ui_step("list", 1, "登録済みの帳票の種類", open=True) %}
+      <div data-list-body>{{ list_html | safe }}</div>
+  {% endcall %}
+
+  {% call ui_step("new", 2, "新しく登録する", open=True) %}
+      <form id="newTypeForm" class="stack" enctype="multipart/form-data">
+        {{ ui_file_drop("book", accept=".xlsx,.xlsm", label="この種類の帳票のExcelをここにドラッグ＆ドロップ",
+                        hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。1ファイル" ~ max_mb ~ "MBまで", multiple=False) }}
+        <label class="field"><span>帳票の種類の名前<span class="req">*</span></span>
+          <input name="name" class="input" placeholder="置いたファイルの名前が入ります" data-type-name required>
+          <span class="hint">置くとすぐにシートが開きます。名前は下の画面で直せます。</span></label>
+        <p class="hint" role="note">{{ snapshot_note }}</p>
+      </form>
+      {{ ui_work_line("create") }}
+  {% endcall %}
+
+  {% call ui_step("build", 3, "読み取る欄をクリックする", open=True) %}
+      <div data-build-body>
+        <div class="split">
+          <section class="split-pane" aria-label="置いた帳票のシート">
+            <div class="split-pane-head"><h3>置いた帳票のシート</h3></div>
+            <div class="split-pane-body"><p class="muted">上で Excel を置くと、ここにシートが出ます。
+              見出しのセル、次に値のセルをクリックすると項目になります。</p></div>
+          </section>
+          <section class="split-pane" aria-label="読み取る項目">
+            <div class="split-pane-head"><h3>読み取る項目(0)</h3></div>
+            <div class="split-pane-body"><p class="muted">まだ項目がありません。</p></div>
+          </section>
+        </div>
+      </div>
+  {% endcall %}
+</div>
+{% elif screen == "guide" %}
+<div class="stack guide">
+
+  <div class="card">
+    <div class="card-head"><h1 class="card-title">帳票の Markdown ができるまで</h1></div>
+    <p>帳票取り込みで作る Markdown は、<strong>1帳票＝1ファイル</strong>で、登録した「帳票の種類」の項目を上から順に書きます。
+      形は次の3つだけです。</p>
+    <ul class="list-plain">
+      <li><code># </code> … ファイルの先頭に1つ。帳票の種類の名前と、その帳票を見分ける値（報告番号・設備・日付）</li>
+      <li><code>- 見出し: 値</code> … 短い値の項目（文字列・日付・数値）</li>
+      <li><code>## 見出し</code> … 文章の項目と明細表。その下に本文を書く</li>
+    </ul>
+<pre class="code md-preview"># 設備修理報告書 R2026-00123｜CMP研磨装置1号機（CMP-101）｜2026-09-14
+
+- 帳票の種類: 設備修理報告書
+- 報告番号: R2026-00123
+- 設備: CMP研磨装置1号機（CMP-101）
+- 発生日: 2026-09-14（2026年9月）
+- 作業時間: 2.5時間
+
+## 故障内容
+ウェーハ搬送時に搬送アームが停止した。
+装置画面に「Robot Position Error」が表示された。
+
+## 使用部品
+- 品番: PW48-1591／品名: ベアリング／数量: 2
+
+- 添付画像: 2枚
+- 出典: 修理報告書_標準.xlsx（報告番号 R2026-00123）</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">「- 見出し: 値」と「## 見出し」はどう分けているか</h2></div>
+    <p>項目ごとの<strong>型</strong>で決めています。型は帳票登録でセルをクリックしたときに、置いた帳票の値を見て自動で決めます（画面には出しません）。</p>
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>型</th><th>こう決める（クリックした値のセルを見る）</th><th>Markdown での形</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">日付</th><td>セルが日付型。または見出しが日付らしい（発生日・報告日 など）か、値が日付だけで書かれている（「令和5年12月5日」「2025/12/19(金)」）</td><td><code>- 発生日: 2026-09-14（2026年9月）</code></td></tr>
+        <tr><th scope="row">数値</th><td>セルが数値型</td><td><code>- 停止時間: 95分</code>（単位付き）</td></tr>
+        <tr><th scope="row">文章</th><td>値に<strong>改行がある</strong>、または<strong>40文字を超える</strong></td><td><code>## 故障内容</code> の節。本文は改行ごとに1行</td></tr>
+        <tr><th scope="row">文字列</th><td>上のどれでもない</td><td><code>- 報告者: 藤原</code></td></tr>
+        <tr><th scope="row">明細表</th><td>表の列見出しを1回クリックして登録した項目（1行＝1明細）</td><td><code>## 使用部品</code> の節。1行1明細</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="hint">つまり「文章」と「明細表」だけが <code>##</code> の節になり、それ以外はすべて <code>- 見出し: 値</code> です。
+      短い値の項目でも値が複数行のときは <code>- 見出し:</code> の下に2文字下げで続けます。値が空の項目は書きません。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">帳票登録でのクリックのしかた（欄の形ごと）</h2></div>
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>帳票の欄の形</th><th>クリック</th><th>できる項目</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">見出しのセルと、その右か下に値のセル<br><small class="muted">例：「報告番号」｜「R2026-00123」</small></th>
+            <td>見出しのセル → 値のセル の<strong>2回</strong></td><td>1つの値の項目（<code>- 報告番号: R2026-00123</code>）</td></tr>
+        <tr><th scope="row">1つのセルに見出しと値<br><small class="muted">例：「設備番号：EQ-001」</small></th>
+            <td>同じセルを<strong>2回</strong></td><td>1つの値の項目。「：」の右側が値</td></tr>
+        <tr><th scope="row">設備の番号と名前が1つのセル<br><small class="muted">例：「使用設備：CMP-108　STI-CMP 8号機」</small></th>
+            <td>同じセルを2回</td><td>設備番号・設備名の<strong>2項目</strong>に分かれる</td></tr>
+        <tr><th scope="row">明細表（列見出しの行＋1行1明細）<br><small class="muted">例：No.｜品番｜品名｜数量｜金額(円) の表</small></th>
+            <td>列見出しのセルを<strong>どれか1つ、1回</strong>（値のセルは押さない）</td><td>表ごと1つの<strong>明細表</strong>の項目（右の一覧に「表（1行＝1明細）」の印）</td></tr>
+        <tr><th scope="row">見出しはあるが、値の欄がまだ空</th>
+            <td>見出しのセル → ［値が空のまま項目にする］</td><td>1つの値の項目（取り込む帳票では値を読む）</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="hint">明細表について：同じ塗りで横に並ぶ見出し（No.｜品番｜品名…）を1行の見出しとみなし、その下の行を空行か「合計」の行まで表として読みます。
+      項目名は表の上にある見出し（「使用部品」など）を使います。取り込む帳票ごとに行数が違っても全部読み、読み取り結果の画面で行の追加・削除ができます。
+      Markdown では <code>## 使用部品</code> の下に <code>- 品番: PI77-1713／品名: クライオポンプ（OH品）／数量: 1／金額(円): 1,650,000</code> のように1行1明細で書きます（下の「明細表の節」）。</p>
+    <p class="hint">項目の見出し（Markdown に書く名前）は、右の一覧でクリックして手で直せます。直しても、シートのどこを読むかは変わりません。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">先頭の見出し（#）とファイル名</h2></div>
+    <ul class="list-plain">
+      <li><code># 種類名 値1｜値2｜値3</code>。値は<strong>報告番号 → 設備（番号と名前）→ 発生日</strong>の順で、その帳票に値があるものだけ</li>
+      <li>設備しか無い帳票は、同じ設備の帳票が何十件もあって見分けられないので、番号らしい項目（作業No. など）か日付を足します</li>
+      <li>報告番号も設備も無いときは、元の Excel のファイル名（拡張子なし）を末尾に足します</li>
+      <li>ファイル名は <code>{種類名}_{タイトルの値…}.md</code>。報告番号が入らないときは、同じ名前が重ならないよう末尾にファイルの指紋（8文字）を足します</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">基本情報の箇条書き（- ）</h2></div>
+    <ul class="list-plain">
+      <li>先頭は必ず <code>- 帳票の種類: …</code></li>
+      <li>設備番号と設備名の2項目は <code>- 設備: 名前（番号）</code> の1行にまとめます</li>
+      <li>日付は <code>2026-09-14（2026年9月）</code> と ISO 形式に年月の注記を付けます（「令和6年7月29日」「R6.7.29」も同じ形にそろえます。時刻があれば残します）</li>
+      <li>数値は単位付きで書きます。単位は「帳票の種類の設定」→「値に書かれた単位（390分・2.5h）」の順に決め、勝手に換算はしません</li>
+      <li>年の無い日付（「2/12」）は年を補わず、書かれたまま残して要確認にします</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">文章の節（##）</h2></div>
+    <ul class="list-plain">
+      <li>本文はセルの改行ごとに1行。空行は入れません（文字は1つも削りません）</li>
+      <li>行頭が「1.」「-」「#」「&gt;」「---」「```」で始まる行は、<code>\</code> を付けて <code>1\.</code> のように無効化します。
+        付けないと Markdown として番号を振り直されたり見出しに化けたりして、書かれた内容が変わってしまうためです（表示上の印で、文字そのものは残ります）</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">明細表の節（##）</h2></div>
+    <ul class="list-plain">
+      <li><code>## 見出し</code> の下に <strong>1行1明細</strong>：<code>- 品番: PW48-1591／品名: ベアリング／数量: 2</code></li>
+      <li>空のセルは書かず、連番だけの「No」列も書きません。合計の行は <code>- 合計: …</code></li>
+      <li>パイプ表（<code>| 品番 | 品名 |</code>）は使いません。1行が「どの見出しの、どの値か」を自分の中に持つので、途中で切られても意味が通ります</li>
+      <li>見出しの組が縦に積み重なる表（特性要因図など）は1つの表にまとめ、各行にはその行の空でない列だけを書きます</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">大きい帳票の工夫（LightRAG に切られても身元が分かるように）</h2></div>
+    <p>LightRAG は文書を一定の長さの断片に切って扱います。切り方の設定はこのアプリからは分からないので、どの断片にも「どの帳票の話か」が残る形にしています。</p>
+    <ul class="list-plain">
+      <li>帳票全体が推定 <strong>1,200トークン</strong>を超えるときは、すべての <code>##</code> に識別子を付けます：<code>## 原因（R2026-00123／CMP-101 CMP研磨装置1号機／2026-09-14）</code></li>
+      <li>明細表の節が推定 <strong>800トークン</strong>を超えるときは <code>## 使用部品（続き）（識別子）</code> に分けます（分けないと、明細の行だけで埋まった断片に報告番号も設備名も残らないため）</li>
+      <li>小さい帳票（大半）は、上の例のとおり <code>## 故障内容</code> のままです</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">末尾と、書かないもの</h2></div>
+    <ul class="list-plain">
+      <li>末尾に <code>- 添付画像: n枚</code>（画像があるとき）と <code>- 出典: 元ファイル名（報告番号 …）</code></li>
+      <li>値が別の欄の見出し語そのもの（「- 品名: 品番」のような読み取り誤り）は書きません</li>
+      <li>画像のセル番地・帳票の種類の版・DB の番号は書きません（読み取り結果の JSON には残ります）</li>
+      <li>人名の項目も書きます（読み取った内容は削らない、が決まりです）。帳票の種類で「出さない」にした項目だけ外れます</li>
+      <li>ブロックの間は空行1つ、ファイルの末尾は改行1つ、改行コードは LF。同じ帳票からは何度作っても同じ Markdown になります</li>
+    </ul>
+  </div>
+
+  {# ================= 表の取り込み ================= #}
+  <div class="card">
+    <div class="card-head"><h1 class="card-title">表の取り込み（一覧表）の Markdown ができるまで</h1></div>
+    <p>一覧表は<strong>1行＝1件</strong>です。ファイルを置いてから zip ができるまでに、次の6つの判断を順に行います。どれも「見出しと値を見て決め、決められないところだけ人に聞く」作りです。</p>
+    <ol class="list-plain">
+      <li>① 読み取り方（文字コード・区切り・シート）</li>
+      <li>② 表の範囲（見出し行はどれか、どの行がデータか）</li>
+      <li>③ 列の対応づけ（どの列を出すか、四つの役割）</li>
+      <li>④ 値の正規化（日付・数値・空欄）</li>
+      <li>⑤ Markdown（月ごとのファイル、1件の書き方、長い記録の分け方）</li>
+      <li>⑥ 経過の記録の切り分け（1つのセルに書き足された文章を時系列に）</li>
+    </ol>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">① 読み取り方</h2></div>
+    <ul class="list-plain">
+      <li><strong>CSV の文字コード</strong>：BOM があれば UTF-8／UTF-16（BOM の無い UTF-16 もバイトの並びで見分けます）。それ以外は UTF-8 → CP932（Windows の日本語）→ Shift_JIS-2004 の順にファイル全体を厳密に読めるか試し、最初に通ったものを使います。どれも通らなければ、いちばん先まで読めたもので読み、読めない行の位置を知らせます（Shift_JIS 系のファイルに UTF-8 の行が混ざっているときも知らせます）</li>
+      <li><strong>区切り文字</strong>：カンマ・タブ・セミコロンなどで試し、「最も多い列数に一致する行の割合」が高いものを選びます</li>
+      <li><strong>Excel</strong>：計算結果の値を読みます（数式そのものは読みません。結果が保存されていない数式は空欄として警告）。結合セルは左上の値、非表示の行と取り消し線の行は<strong>除外して警告</strong>します</li>
+      <li>読み取り方を変えるたびに、下の「表の範囲」を作り直します（②③の判断は①の結果で変わるため）</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">② 表の範囲（見出し行とデータの行）</h2></div>
+    <ul class="list-plain">
+      <li><strong>見出し行</strong>：先頭40行の中から「2列以上に文字が並ぶ行」を候補にし、その下に同じ形の行が続くか・文字の並びが見出しらしいか・辞書の語が入っているか・太字か、で点をつけて選びます。見出しが2段のときは「上_下」につないで1つの見出しにします。自動で外れたときは、画面で行をクリックして直せます（Shift で2段）</li>
+      <li><strong>行の種類</strong>：見出しの下の各行を、データ／継続行／小計・合計／注記／空行／除外 に分けて色で示します
+        <ul class="list-plain">
+          <li>小計・合計：左のほうの短いラベルが「合計」「総計」「累計」「小計」「平均」「○月計」「○○計」で終わり、その行に番号や日付が無い行 → 記録にしません（合計の値は行の足し算と突き合わせ、合わなければ警告します）</li>
+          <li>注記：「※」「（注）」「注1」などで始まる行 → 記録にしません</li>
+          <li>継続行：管理No などの<strong>鍵になる列が空</strong>で、ほかの列に文章だけがある行（数値や日付があれば別の記録にします） → 文章の列の値を直前の記録に<strong>くっつけます</strong>（1件の文章がセルの都合で2行に割れている表のため）。鍵の列が上の行から縦に結合されている行も同じです</li>
+          <li>除外：非表示の行・取り消し線の行 → 記録にせず、件数を警告に出します</li>
+        </ul></li>
+      <li><strong>データの終わり</strong>：空行が3行続く・合計行が出る（その行まで）・注記や表題の行、見出しの再出現が出る（その手前まで）、で決めます（画面で終了行を直せます）</li>
+      <li><strong>表の形</strong>：見出しに「4月」「2024/05」のような月が3つ以上並べばクロス集計（このアプリの対象外として知らせます）。見出しの下に同じ形の行が3行未満なら「一覧表の形に見えません」と知らせます（帳票ならそちらの画面へ）</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">③ 列の対応づけ</h2></div>
+    <ul class="list-plain">
+      <li><strong>標準の辞書</strong>と見出しを照合します。辞書には「管理No＝管理番号・トラブルNo・カルテNo・受付番号…」「発生日時＝発生日・日付・年月日・作業日…」「設備番号＝装置No・機番・号機…」のように、50あまりの項目それぞれに言い換えが入っています。照合の前に、全角半角・大文字小文字・空白・括弧などの記号の違いをそろえます</li>
+      <li>照合の順：<strong>完全一致</strong> → <strong>似た語</strong>（見出しに辞書の語が含まれる、または8割以上似ている）→ <strong>当たらない</strong>（値の並びから型だけ決める）。「対応」が「対応者」に似ていても、値が文章なら人名の列にはしません</li>
+      <li>型（日付・日時・数値・文字・長文・選択肢）は先頭のデータ行の値から決めます。見出しの「(分)」「(円)」は単位として取ります</li>
+      <li><strong>四つの役割</strong>：識別番号（記録を見分ける番号）／日付（月ごとのファイル分けと時系列の基準）／対象（何についての記録か。設備・製品・顧客など）／経過の記録（1つのセルに日付ごとに書き足した列。1表に1列だけ）。辞書に当たった列には自動で付き、当たらなければ「その他」です（辞書に無くても、日付で始まる行が並ぶ長文の列は「経過の記録」になります）</li>
+      <li>見出しも値も無い列は一覧に出しません。値が空欄だけの列は、はじめから「使わない」にして理由を見出しの下に書きます（入れ直せます）</li>
+      <li><strong>要約1行だけになる条件</strong>：識別番号と日付の列がそれぞれ1つずつ完全一致で見つかり（日付として読める列が1つも無い表では、日付は求めません）、対象と経過の記録も（あるなら）完全一致で、出す列に読み取れない値（型エラー）やほとんど空欄（9割以上）の列が無いとき。それ以外は列の表を開き、決めてもらうことを上に1行ずつ並べます</li>
+      <li>ここで決めるのは「出す／出さない」と役割だけです。項目名は見出しのまま、型・単位・出し方は値から決まります</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">④ 値の正規化</h2></div>
+    <ul class="list-plain">
+      <li><strong>日付</strong>：和暦（令和・平成・昭和、R6.7.29）、8桁（20240729）、「2024年7月29日」「2024/7/29(月)」を <code>2024-07-29</code> にそろえます。時刻があれば残します。<strong>年の無い「7/29」</strong>は、表のタイトル行 → シート名 → ファイル名の順に「2024年度」「FY2024」「2024年5月」「2024年」のような年の手がかりを探して補い、年度（4月始まり）で年をまたぐ月も正しく置きます。手がかりが無ければ年は補わず、原文のまま残して「年を補えなかった」と警告します（画面で年度を指定する欄はありません。タイトル行・シート名・ファイル名のどれかに年度を入れてください）</li>
+      <li><strong>数値</strong>：桁区切り（1,650,000）、全角数字、△▲・末尾のマイナス（負数）、%、「1:30」「1時間30分」のような時間（単位のある列で、分に換算）を数値にします。見出しの「(分)」「(円)」を列の単位にし、値に別の単位が書いてあるとき（時間の列に「90分」など）だけ、時間⇄分・円⇄千円のような決まった換算をします。それ以外の勝手な換算はしません</li>
+      <li><strong>空欄</strong>：「-」「－」「―」「N/A」「NA」「#N/A」「該当なし」は空欄として扱います。「〃」「同上」は直前の行の値にします。「対象」の役割の列（設備番号・設備名）で、値のあとに空欄が続く形なら、その空欄を上の値で埋めます（結合セルはもともと左上の値で埋まります）</li>
+      <li><strong>Excel のエラー値</strong>（#REF! など）は空欄にして警告します</li>
+    </ul>
+    <p class="hint">読み取れない値の割合が列で <strong>2%</strong> 以上だと警告、<strong>10%</strong> を超えると確定できません（列を「使わない」にするか、元の表を直します）。記録が0件になったときも止めて、除外した行数を出します。記録の年の中央値から5年より離れた日付（「2052年」のような打ち間違い）は行番号つきで知らせます。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">⑤ Markdown（記録ファイル）</h2></div>
+<pre class="code md-preview"># トラブル対応一覧 2026年8月の記録
+
+- データ種別: トラブル対応一覧（1行＝1件）の記録
+- 対象期間: 2026-08-01〜2026-08-31
+- このファイルの記録: 342件（2026年8月の全件）
+
+## 【TR-2026-00831】CMP研磨装置1号機（CMP-101）スラリー流量低下アラームで研磨停止｜2026-08-03
+- 管理No: TR-2026-00831
+- 発生日時: 2026-08-03 14:20（2026年8月）
+- 設備: CMP研磨装置1号機（CMP-101）
+- 現象: スラリー流量低下アラーム（ALM-2031）で研磨停止
+- 処置:
+  フィルター交換
+  流量再校正
+- 停止時間: 95分
+- 対応の時系列:
+  1. 2026-08-03 14:20［連絡・初動］田中｜CMP研磨装置1号機: ライン停止の連絡あり。…
+  2. 2026-08-03 14:40 田中（推定）｜CMP研磨装置1号機: 原点復帰→再起動で復旧。経過観察。
+- 出典: T1_トラブル対応一覧_2023-2026.xlsx（管理No TR-2026-00831）</pre>
+    <ul class="list-plain">
+      <li><strong>ファイルは「日付」の列の月ごと</strong>に1つ（<code>表の名前_2026-08.md</code>）。件数では分けません（LightRAG は1ファイルを丸ごと読んでから切るので、分けても切られ方は変わりません）。日付が空の記録は <code>_日付なし.md</code></li>
+      <li><strong>1件の見出し</strong>は <code>## 【識別番号】対象 現象の先頭40字｜日付</code>。その下はすべて <code>- 見出し: 値</code> で、値が複数行なら2文字下げで続けます。空欄の列は書きません。人名の列も書きます（内容は削らない、が決まり）</li>
+      <li><strong>対象</strong>の番号と名前が別の列なら <code>- 設備: 名前（番号）</code> に1行化します。1つの列に「ETC-302(OXIDEエッチャ 2号機)」のように入っていれば、番号と名前に分けてから使います</li>
+      <li>記録の順は<strong>日付 → 元の表の行番号</strong>。日付の無い表は元の順のままです</li>
+      <li><strong>1件が推定 400トークンを超えたら</strong>「（続きn/m）」に分けます。1つ目の見出しは <code>## …（1/3）</code>、2つ目以降は <code>## …（続き2/3）</code> で、その直後に<strong>識別番号・対象・日付の行を書き直します</strong>。切れ目は箇条書きの切れ目。1つの箇条書きが長すぎるときは「。」の後ろで切って <code>- 項目（続き）:</code> にします。文字は1つも消しません</li>
+      <li>400 という数は、LightRAG の切り方が分からない前提で、狭い設定（600トークン窓）でも記録が途中で切られないよう、サンプル3種類×切り方3通りの実測で決めました</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">⑥ 経過の記録（1つのセルに書き足された文章）の切り分け</h2></div>
+    <p>「対応内容」のように、複数の人が日付ごとに書き足していく列は、そのままだと1つの長い文章です。これをルールで1回分ずつに分け、「対応の時系列」として並べます（AI は使いません。AI整形を使うと、そのうえに「対応の要点」と記録の種別が足されます）。</p>
+    <ul class="list-plain">
+      <li><strong>切れ目</strong>：<strong>行頭</strong>（または【 】の中）の日付・「翌日」「3日後」のような表現・「8時25分」のような時刻・「夜勤」「午前」のような勤務帯・「本日」で始まる行のほか、「・」「①」の箇条書き、【現象】のような見出し、空行、「／」「→」の直後の日付、で切ります。文の途中の「5/12に交換予定」や、行頭でも「納期 6/20」では切りません。「1.5mm」「0.03MPa」「24.0V」のように日付に見える単位付きの数字も除外します</li>
+      <li><strong>記入者</strong>：行頭の「木村：」「保全 田中」「福田（製造）」や、行末の「（田中）」を記入者として取ります。名前かどうかは、担当者などの「人」の役割の列に出てくる名前・組み込みのよくある姓の一覧・部署名で確かめます（「木村：」のように「：」が付いていれば、一覧に無い2〜4字の名前も取ります）。1回分に記入者が無ければ直前の人を引き継ぎ、「推定」の印（オレンジ）を付けます</li>
+      <li><strong>年の無い日付</strong>：直前の記録の年で日付が進むならその年。60日以内の戻りは同じ年（警告付き）、それより戻れば翌年。直前が無ければ、その行の「日付」の列に最も近い年（前後1年）。どちらも無ければ<strong>年を決めず</strong>、原文のまま残して警告します</li>
+      <li><strong>記入順</strong>：日付つきの記録どうしで「進んだ／戻った」を数え、多い方を古い順／新しい順とします。両方あれば「記入順が一部前後している」と警告します。新しい順のセルは、日付を持つ記録から始まる<strong>塊ごとに並びを逆</strong>にして古い順にします（塊の中の順は変えません。日付でソートはしません）</li>
+      <li>「昨日」「本日」「連休明け」は基準の日が分からないので日付にせず、警告します</li>
+      <li>1回分の中の型番・アラームコード・ロット（PV55-1270 など）を拾って、AI整形の「分割プレビュー」に「識別子」として出します（数量や予定の句も拾いますが、画面には出しません。Markdown の本文はそのままです）</li>
+      <li>時系列の文は1つも省きません。ほかの列と同じ文でも、件数が多くても、書かれたまま出します</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">帳票と一覧表の共通の決まり</h2></div>
+    <ul class="list-plain">
+      <li>同じ入力から何度作っても同じ Markdown（作成日時・取込IDは書きません）</li>
+      <li>読み取った文字は1つも削らず、勝手に換算・補完しません（補うのは年の手がかりからの年・「〃」「同上」・対象の列の空欄だけで、年を補ったときは知らせます。決められないものは空欄にして知らせます）</li>
+      <li>パイプ表を使わず、1行が「どの見出しの、どの値か」を自分の中に持ちます</li>
+      <li>大きい記録は分け、どの断片にも識別番号・対象・日付を書きます（LightRAG 側の設定が分からない前提）</li>
+      <li>ダウンロードした時点で、元のファイルも読み取り結果もサーバーから消えます</li>
+    </ul>
+  </div>
+
+</div>
+{% elif code %}
 <div class="card narrow">
   <div class="card-head">
     <h1 class="card-title">{{ TITLES.get(code, TITLES[500]) }}</h1>

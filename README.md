@@ -59,9 +59,13 @@ export OPENAI_MODEL="gpt-5.6-sol"
 ## 構成
 
 ```
-app/__init__.py        create_app・設定・エラー画面・起動コマンド（serve）
-app/                   アプリ本体（views・forms・tables・ai・core）
-app/templates/         画面（HTML）
-app/static/            app.js・style.css
+app/__init__.py        設定・土台（DBを含む）・画面・create_app・起動コマンド（serve）
+app/extract.py         Excel/CSV の読み取り（帳票と一覧表）
+app/ai.py              AI整形・AI接続・経過の記録（起動時には読み込まない）
+app/templates/base.html  画面5枚・共通部品のマクロ・エラー画面
+app/static/app.js      画面の動き
+app/static/style.css   見た目
 requirements.txt       必要なパッケージ
 ```
+
+1ファイルの中は `# ==== 元 core.py ====` のような見出しで、前の構成のモジュールごとに区切ってあります。

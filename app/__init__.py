@@ -132,7 +132,7 @@ def guide():
     （利用者の求め 2026-09-22）。中身は templates/guide.html。"""
     from flask import render_template
 
-    return render_template("guide.html")
+    return render_template("base.html", screen="guide")
 
 
 def _secret_key() -> str:
@@ -3660,7 +3660,7 @@ def _is_stale(doc: dict) -> bool:
 def forms_page():
     """帳票取り込みの1枚の画面。ここから先はすべて fetch で欄が増えていく。"""
     current_session_id()   # 画面を開いた時点で作業場所（クッキー）を決めておく（同時に置かれても取り違えない）
-    return render_template("forms.html",
+    return render_template("base.html", screen="forms",
                            active_pattern_count=count_active_patterns(),
                            pattern_count=len(list_patterns()),
                            max_files=MAX_BATCH_FILES,
@@ -3833,7 +3833,7 @@ def _type_response(docs: list[dict]):
     # 種類を選び直したときにファイルごとの項目数を出し直すための表（画面の JS が使う）
     file_counts = {str(pid): {str(d["id"]): ranked[i][pid].found_fields for i, d in enumerate(docs)}
                    for pid in (ranked[0] if ranked else {})}
-    html = render_part("forms.html", "part_type", doc=first,
+    html = render_part("base.html", "part_type", doc=first,
         docs=docs,
         files=files,
         file_counts=file_counts,
@@ -3944,7 +3944,7 @@ def _review_response(doc_ids, errors=None):
                      "version": _version(doc), "summary": summary, "state_label": label})
     if not items:
         return jsonify(error="まだ読み取りをしていません"), 409
-    html = render_part("forms.html", "part_review", items=items,
+    html = render_part("base.html", "part_review", items=items,
         confirmed=sum(1 for d in docs if d["state"] in CONFIRMED_STATES),
     )
     first = items[0]
@@ -3960,7 +3960,7 @@ def grid_fragment(doc_id: int):
     if extraction is None:
         return jsonify(error="まだ読み取りをしていません"), 409
     info = _load_info(doc)
-    html = render_part("forms.html", "part_grid", grids=_sheet_grids(info, extraction["sheets"]),
+    html = render_part("base.html", "part_grid", grids=_sheet_grids(info, extraction["sheets"]),
                            info_missing=info is None)
     return jsonify(html=html, doc_id=doc_id)
 
@@ -4071,7 +4071,7 @@ def finish_fragment():
     working = _data(current)
     read_yet = working is not None or any(_data(d) is not None for d in docs)
     extraction = _data(current, "confirmed_json") or working
-    html = render_part("forms.html", "part_finish", docs=docs,
+    html = render_part("base.html", "part_finish", docs=docs,
         ready=ready,
         unread=unread,
         current=current,
@@ -4384,12 +4384,12 @@ def form_types_page():
     # 帳票の種類は「設定」なのでみんなで使う（ブラウザごとに分けない）。
     # 作業場所のクッキーだけは、ここで開いたときにも決めておく（ほかの画面での取り違えを防ぐ）
     current_session_id()
-    return render_template("form_types.html", list_html=_list_html(),
+    return render_template("base.html", screen="form_types", list_html=_list_html(),
                            max_mb=BOOK_MAX_BYTES // (1024 * 1024), snapshot_note=SNAPSHOT_NOTE)
 
 
 def _list_html() -> str:
-    return render_part("form_types.html", "part_list", patterns=list_patterns())
+    return render_part("base.html", "part_list", patterns=list_patterns())
 
 
 # 画面を作り直す前の URL（お気に入り・古いリンク）は1枚の画面へ送る
@@ -4444,7 +4444,7 @@ def _build_html(pattern_id: int, book: Book | None = None, notes: list[str] | No
     remembered = pattern_book_meta(pattern_id)
     if remembered is not None and (book is None or book.file_hash != remembered["file_hash"]):
         remembered = None   # 覚えたシートとは別の Excel を見ている（置き替えの途中）
-    return render_part("form_types.html", "part_build", pattern=pattern,
+    return render_part("base.html", "part_build", pattern=pattern,
         book=book,
         grids=grids,
         remembered=remembered,
@@ -4936,7 +4936,7 @@ def _locked(reason: str, **extra):
 def new():
     """表の取り込みの画面（1枚）。段の中身はここでは出さず、ファイルを置いたあとに取りに来る。"""
     current_session_id()   # 画面を開いた時点で作業場所（クッキー）を決めておく（同時に置かれても取り違えない）
-    return render_template("tables.html")
+    return render_template("base.html", screen="tables")
 
 
 @tables_bp.get("/imports/<int:import_id>/panel/<name>")
@@ -5040,7 +5040,7 @@ def _panel_source(imp: dict):
             list_like = {s.name: source_obj.list_kind(s.name) for s in sheets if not s.hidden}
     except UploadError as exc:
         error = str(exc)
-    html = render_part("tables.html", "part_source", imp=imp, src=src, error=error, sheets=sheets, sheet=sheet, list_like=list_like,
+    html = render_part("base.html", "part_source", imp=imp, src=src, error=error, sheets=sheets, sheet=sheet, list_like=list_like,
         encodings=ENCODING_CHOICES, delimiters=DELIMITER_CHOICES)
     note = _source_note(imp, {**src, "sheet": sheet or src.get("sheet")})
     return _panel(html, note=note, error=error, import_id=import_id)
@@ -5119,7 +5119,7 @@ def _panel_layout(imp: dict):
     except UploadError as exc:
         return _locked(str(exc))
     src = imp.get("source") or {}
-    html = render_part("tables.html", "part_layout", imp=imp, layout=guess, info=_layout_json(guess), rows=rows,
+    html = render_part("base.html", "part_layout", imp=imp, layout=guess, info=_layout_json(guess), rows=rows,
                            width=width, sheet=sheet, data_end_saved=src.get("data_end_row") or "")
     return _panel(html, note=f"{guess.data_start}〜{guess.data_end}行目" if guess.data_end >= guess.data_start else "")
 
@@ -5372,7 +5372,7 @@ def _panel_columns(imp: dict):
     # 決めることが無ければ表をたたんで要約1行にする（表は隠すだけで残すので、保存で送る中身は同じ）
     pairs = list(zip(rows, suggestions))
     todo = _columns_todo(pairs)
-    html = render_part("tables.html", "part_columns", rows=rows, todo=todo,
+    html = render_part("base.html", "part_columns", rows=rows, todo=todo,
         summary="" if todo else _columns_summary(pairs),
         name=spec.name if spec is not None else _default_table_name(imp),
         save_url=url_for("tables.save_columns", import_id=import_id))
@@ -5514,7 +5514,7 @@ def _panel_ai(imp: dict):
             if len(row_choices) >= 200:
                 break
     ai_job = _ai_job(import_id)
-    html = render_part("tables.html", "part_ai", imp=imp, log_display=col.display if col else log_key, row_choices=row_choices,
+    html = render_part("base.html", "part_ai", imp=imp, log_display=col.display if col else log_key, row_choices=row_choices,
         trial_keys=[k for k, _ in row_choices[:10]], job=ai_job, job_active=bool(ai_job and not ai_job.get("finished")),
         job_url=url_for("tables.api_job", job_id=ai_job["id"]) if ai_job else None,
         counts=ai.counts(imp["template_id"], "log", import_id=import_id),
@@ -5800,7 +5800,7 @@ def _panel_preview(imp: dict, page: int = 1):
         # 件数分の md を作るのに時間がかかるので、ジョブにして同じ画面に進み具合を出す
         draft = _preview_job(import_id, imp, spec)
         if draft.get("finished") and draft["status"] != "done":
-            return _panel(render_part("tables.html", "part_preview_failed", error=draft.get("message") or "Markdownの下書きを作れませんでした"),
+            return _panel(render_part("base.html", "part_preview_failed", error=draft.get("message") or "Markdownの下書きを作れませんでした"),
                           failed=True)
         return _panel("", job=_job_info(draft, import_id), building=True)
     stats = imp.get("stats") or {}
@@ -5812,7 +5812,7 @@ def _panel_preview(imp: dict, page: int = 1):
         page = total_pages
         data_rows, _total = load_rows_page(import_id, (page - 1) * DATA_PAGE, DATA_PAGE)
     blocking = has_blocking(issues)
-    html = render_part("tables.html", "part_preview", imp=imp, spec=spec, stats=stats, issues=issues[:ISSUES_SHOWN],
+    html = render_part("base.html", "part_preview", imp=imp, spec=spec, stats=stats, issues=issues[:ISSUES_SHOWN],
         issue_total=len(issues), counts=count_levels(issues), blocking=blocking, files=files, data_rows=data_rows,
         page=page, total_pages=total_pages, columns=[(c.key, _display_with_unit(c)) for c in spec.columns],
         confirmed=imp["status"] == "confirmed", delete_note=TABLES_DELETE_ON_DOWNLOAD_NOTE)
@@ -5884,7 +5884,7 @@ def _panel_done(imp: dict):
         # 記録0件のまま確定された取り込み（渡せるものが無いので、ダウンロードのボタンは出さない）
         return _locked("この取り込みから作られた Markdown はありません（取り込める行がありませんでした）。"
                        "表の範囲か元のファイルを見直してください")
-    html = render_part("tables.html", "part_done", imp=imp, files=files, stats=imp.get("stats") or {},
+    html = render_part("base.html", "part_done", imp=imp, files=files, stats=imp.get("stats") or {},
                            delete_note=TABLES_DELETE_ON_DOWNLOAD_NOTE, delete_confirm=TABLES_DELETE_ON_DOWNLOAD_CONFIRM)
     return _panel(html, note=f"{len(files)}ファイル")
 
