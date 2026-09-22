@@ -158,7 +158,7 @@ def clean_text(text: str) -> str:
     return s.strip()
 
 
-def cell_text(value) -> str:
+def table_cell_text(value) -> str:
     """セル値を表示用の文字列にする。"""
     if value is None:
         return ""
@@ -187,10 +187,10 @@ def cell_text(value) -> str:
 # ---- 値の種類の判定（見出しらしさ・型推定で共用） ----
 
 NA_TOKENS = {"-", "－", "―", "‐", "ー", "N/A", "n/a", "NA", "#N/A"}
-_NUM_RE = re.compile(r"^[△▲+\-]?[¥]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?[%]?-?$")
-_DATE_RE = re.compile(r"^(\d{4})[/\-.年](\d{1,2})[/\-.月](\d{1,2})日?(\s*\(?[月火水木金土日]?\)?)?"
+_TABLE_NUM_RE = re.compile(r"^[△▲+\-]?[¥]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?[%]?-?$")
+_TABLE_DATE_RE = re.compile(r"^(\d{4})[/\-.年](\d{1,2})[/\-.月](\d{1,2})日?(\s*\(?[月火水木金土日]?\)?)?"
                       r"((?:\s+|T)\d{1,2}:\d{2}(:\d{2}(\.\d{1,7})?)?(\s*(Z|[+\-]\d{2}:?\d{2}))?)?$")
-_ERA_RE = re.compile(r"^(R|H|S|令和|平成|昭和)\s*(\d{1,2}|元)[./年](\d{1,2})[./月](\d{1,2})日?(\s+\d{1,2}:\d{2}(:\d{2})?)?$")
+_TABLE_ERA_RE = re.compile(r"^(R|H|S|令和|平成|昭和)\s*(\d{1,2}|元)[./年](\d{1,2})[./月](\d{1,2})日?(\s+\d{1,2}:\d{2}(:\d{2})?)?$")
 _MD_RE = re.compile(r"^(\d{1,2})/(\d{1,2})$")
 _YMD8_RE = re.compile(r"^(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])$")
 _TIME_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
@@ -218,14 +218,14 @@ def value_kind(value, text: str) -> str:
         return "text"
     if _YMD8_RE.match(s):
         return "date"
-    m = _DATE_RE.match(s) or _ERA_RE.match(s)
+    m = _TABLE_DATE_RE.match(s) or _TABLE_ERA_RE.match(s)
     if m:
         return "datetime" if ":" in s else "date"
     if _MD_RE.match(s):
         return "date"
     if _TIME_RE.match(s):
         return "time"
-    if _NUM_RE.match(s) and not (len(s) > 1 and s[0] == "0" and s[1].isdigit()):
+    if _TABLE_NUM_RE.match(s) and not (len(s) > 1 and s[0] == "0" and s[1].isdigit()):
         return "number"
     if _CODE_RE.match(s) and any(ch.isdigit() for ch in s):
         return "code"
@@ -1226,7 +1226,7 @@ class ExcelSource:
                         else:
                             row_cells.append(CellInfo(value=None, text="", merged_anchor=anchor))
                             continue
-                        row_cells.append(CellInfo(value=value, text=cell_text(value), number_format=number_format,
+                        row_cells.append(CellInfo(value=value, text=table_cell_text(value), number_format=number_format,
                                                   bold=bold, strike=strike, fill=fill, merged_anchor=anchor))
                     done = r
                     yield SourceRow(index=r, cells=row_cells, hidden=_row_hidden(attrs))
@@ -3218,7 +3218,7 @@ _CODE_NAME_SPACE = re.compile(r"^([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]+(\S.*
 _NAME_CODE_PAREN = re.compile(r"^(.+?)[ 　]*[（(][ 　]*([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]*[)）]$")
 _HAS_DIGIT = re.compile(r"\d")
 _HAS_ALPHA = re.compile(r"[A-Za-z]")
-_CODE_ONLY = re.compile(r"^[0-9A-Za-z][0-9A-Za-z\-_/.]*$")
+_TABLE_CODE_ONLY = re.compile(r"^[0-9A-Za-z][0-9A-Za-z\-_/.]*$")
 # 番号の後ろの括弧が名前ではなく但し書きのとき（「IMP-602（推定）」）。番号だけを残す
 _QUALIFIERS = {"推定", "仮", "予定", "調査中", "不明", "未定", "確認中", "暫定", "候補", "要確認", "代替", "予備", "旧", "新"}
 # 設備の列の値がこれだけなら、設備が決まっていない（設備ごとのファイル分けに入れない）
@@ -3246,7 +3246,7 @@ def split_entity_code(text) -> tuple[str, str]:
             continue
         if pattern is _CODE_NAME_PAREN and name in _QUALIFIERS:
             return code, ""  # 番号は残し、但し書きは設備名にしない
-        if all(_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
+        if all(_TABLE_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
             continue  # 名前の側も番号だけ（「CMP-101 / CMP-102」）なら分けない
         return code, name
     return s, ""
@@ -3400,7 +3400,7 @@ def _row_values(row) -> list[tuple[object, str]]:
             (_MERGED, "") if (not c.text and c.merged_anchor and c.merged_anchor != (index, i + 1)) else (c.value, c.text)
             for i, c in enumerate(cells)
         ]
-    return [(v, cell_text(v)) for v in row]
+    return [(v, table_cell_text(v)) for v in row]
 
 
 def _is_empty_column(header: str, values: list[tuple[object, str]]) -> bool:
@@ -3415,10 +3415,10 @@ def _is_empty_column(header: str, values: list[tuple[object, str]]) -> bool:
     h = str(header or "").strip()
     if h and not (h.startswith("列") and h[1:].isdigit()):
         return False
-    return all(_is_blank(value, text) for value, text in values)
+    return all(_table_is_blank(value, text) for value, text in values)
 
 
-def _is_blank(value, text: str) -> bool:
+def _table_is_blank(value, text: str) -> bool:
     if value is _MERGED:
         return False
     return not text or text.strip() in NA_TOKENS
@@ -3428,13 +3428,13 @@ def _looks_like_prose(values: list[tuple[object, str]], stats: dict) -> bool:
     """値が人名ではなく文章か（長文、または平均で人名より明らかに長い）。"""
     if stats["type"] == "text":
         return True
-    texts = [t for v, t in values if not _is_blank(v, t) and v is not _MERGED]
+    texts = [t for v, t in values if not _table_is_blank(v, t) and v is not _MERGED]
     return bool(texts) and sum(len(t) for t in texts) / len(texts) > 15
 
 
 def _column_stats(values: list[tuple[object, str]]) -> dict:
     total = len(values)
-    filled = [(v, t) for v, t in values if not _is_blank(v, t)]
+    filled = [(v, t) for v, t in values if not _table_is_blank(v, t)]
     nonblank = [(v, t) for v, t in filled if v is not _MERGED]
     kinds = Counter(value_kind(v, t) for v, t in nonblank)
     examples: list[str] = []
@@ -3476,7 +3476,7 @@ def _infer_type(kinds: Counter, nonblank: list[tuple[object, str]]) -> str:
 
 
 def _type_error_rate(values: list[tuple[object, str]], type_: str) -> float:
-    nonblank = [(v, t) for v, t in values if v is not _MERGED and not _is_blank(v, t)]
+    nonblank = [(v, t) for v, t in values if v is not _MERGED and not _table_is_blank(v, t)]
     if not nonblank:
         return 0.0
     if type_ == "number":
@@ -3732,7 +3732,7 @@ _TIME_DIGITS = re.compile(r"^(\d{2})(\d{2})(\d{2})?$")
 _NUMBER = re.compile(
     r"^(?P<sign>[△▲\-−+])?\s*[¥￥]?\s*(?P<int>\d{1,3}(?:,\d{3})+|\d+)?(?P<dec>\.\d+)?(?:[eE](?P<exp>[+\-]?\d+))?"
     r"\s*(?P<tail>-)?\s*(?P<unit>[^\d\s,.\-+]{1,6})?$")
-_ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988, "昭和": 1925, "S": 1925}
+_TABLE_ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988, "昭和": 1925, "S": 1925}
 
 # 単位の換算表（列の単位ごと。値は「元の単位1つが列の単位でいくつか」）
 _UNIT_ALIASES = {"h": "時間", "hr": "時間", "hrs": "時間", "hour": "時間", "hours": "時間", "H": "時間",
@@ -3842,7 +3842,7 @@ def _year4(text: str) -> int:
 
 
 def _era_year(era: str, num: str) -> int:
-    base = _ERA_BASE.get(era.upper() if len(era) == 1 else era, 2018)
+    base = _TABLE_ERA_BASE.get(era.upper() if len(era) == 1 else era, 2018)
     return base + (1 if num == "元" else int(num))
 
 
@@ -4665,7 +4665,7 @@ def _segment_types(result: dict) -> dict[str, list[str]]:
 
 # ---- 値の書き方 ------------------------------------------------------------------------
 
-def _one_line(text) -> str:
+def _table_one_line(text) -> str:
     return " ".join(str(text or "").split())
 
 
@@ -4707,7 +4707,7 @@ def _is_hidden(col, spec: TableSpec) -> bool:
     return col.md == "omit"
 
 
-_BRACKETS = {"（": "）", "(": ")", "「": "」", "『": "』", "【": "】", "［": "］", "[": "]", "〔": "〕", "《": "》",
+_TABLE_BRACKETS = {"（": "）", "(": ")", "「": "」", "『": "』", "【": "】", "［": "］", "[": "]", "〔": "〕", "《": "》",
              "〈": "〉", "｛": "｝", "{": "}", "“": "”"}
 _TITLE_TAG = re.compile(r"^[【\[][^】\]]{0,12}[】\]][ 　]*|^■?[ 　]*発生(?:日時)?[ 　]*[:：][ 　]*")
 # 行頭の「R05.04.01 11:45(休日)、」のような日付・時刻（見出しの末尾に日付が入るので、現象の字数を使わない）
@@ -4734,9 +4734,9 @@ def _clip_title_text(text: str, limit: int) -> str:
     cut = text[:limit]
     opened: list[int] = []
     for i, ch in enumerate(cut):
-        if ch in _BRACKETS:
+        if ch in _TABLE_BRACKETS:
             opened.append(i)
-        elif opened and ch == _BRACKETS[cut[opened[-1]]]:
+        elif opened and ch == _TABLE_BRACKETS[cut[opened[-1]]]:
             opened.pop()
     if opened:
         cut = cut[:opened[0]]
@@ -4755,13 +4755,13 @@ def _title_text_line(raw) -> str:
     次の行（「設備:」の行は飛ばす）の札・項目名・日付を外した残りを使う。
     """
     lines = str(raw).split("\n")
-    first = _one_line(lines[0])
+    first = _table_one_line(lines[0])
     body = _strip_lead_date(_TITLE_TAG.sub("", first).strip()).strip()
     if body or not first:
         return body
     # 1行目が札と日付だけ（「発生:2024-04-28 14:50」）なら、次の行から探す。「設備:」の行は見出しの設備と重なるので飛ばす
     for line in lines[1:]:
-        line = _one_line(line)
+        line = _table_one_line(line)
         tag = _TITLE_TAG.match(line)
         text = _strip_lead_date(_TITLE_TAG.sub("", line).strip()).strip()
         label = _TITLE_LABEL.match(text)
@@ -4798,7 +4798,7 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
     else:
         key_col = spec.first_role("key")
         if key_col is not None and values.get(key_col.key):
-            pieces.append(f"【{_one_line(values[key_col.key])}】")
+            pieces.append(f"【{_table_one_line(values[key_col.key])}】")
         display = entity_display(values, spec)[2]
         if display:
             pieces.append(display)
@@ -4815,7 +4815,7 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
     date_value = values.get(spec.date_key)
     if date_value:
         title += f"｜{str(date_value)[:10]}"
-    title = _one_line(title)
+    title = _table_one_line(title)
     if title:
         return title
     # 見出しの材料が何も無い表（識別番号・設備・長文・日付のどれも無い）。全部の記録が同じ見出しに
@@ -4824,7 +4824,7 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
     for col in spec.columns:
         if _is_hidden(col, spec) or col.type == "text":
             continue
-        text = _one_line(str(values.get(col.key) or ""))
+        text = _table_one_line(str(values.get(col.key) or ""))
         if text:
             parts.append(_clip_title_text(text, 20))
         if len(parts) >= 3:
@@ -4914,9 +4914,9 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
             v = item.get("v") if isinstance(item, dict) else item
             if v:
                 target = spec.column(stage.target_key) if stage.target_key else None
-                lines += md_bullet(f"{target.display if target else stage.id}（AI分類）", _one_line(v))
+                lines += md_bullet(f"{target.display if target else stage.id}（AI分類）", _table_one_line(v))
     source = record.get("source", {}) or {}
-    lines += md_bullet("出典", _source_text(values, spec, source))
+    lines += md_bullet("出典", _table_source_text(values, spec, source))
     return lines, repeat
 
 
@@ -5031,11 +5031,11 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people)
     return out
 
 
-def _source_text(values: dict, spec: TableSpec, source: dict) -> str:
+def _table_source_text(values: dict, spec: TableSpec, source: dict) -> str:
     file_name = str(source.get("file") or "")
     key_col = spec.first_role("key")
     if key_col is not None and values.get(key_col.key):
-        return f"{file_name}（{key_col.display} {_one_line(values[key_col.key])}）"
+        return f"{file_name}（{key_col.display} {_table_one_line(values[key_col.key])}）"
     row = source.get("row")
     sheet = source.get("sheet")
     if row:

@@ -34,14 +34,14 @@ from app import core
 # ====================================================================================================
 
 _EDGE_CHARS = "[]()<>【】〈〉《》「」『』■□◆◇●○・*※:;."
-_BRACKETS = {"[": "]", "(": ")", "<": ">", "【": "】", "〈": "〉", "《": "》", "「": "」", "『": "』"}
-_CLOSERS = {close: open_ for open_, close in _BRACKETS.items()}
-_EDGE_MARKS = "".join(ch for ch in _EDGE_CHARS if ch not in _BRACKETS and ch not in _CLOSERS)
+_FORM_BRACKETS = {"[": "]", "(": ")", "<": ">", "【": "】", "〈": "〉", "《": "》", "「": "」", "『": "』"}
+_CLOSERS = {close: open_ for open_, close in _FORM_BRACKETS.items()}
+_EDGE_MARKS = "".join(ch for ch in _EDGE_CHARS if ch not in _FORM_BRACKETS and ch not in _CLOSERS)
 # 見出しの先頭の項番: 「3.」「3)」「3、」「(3)」「D3」（8D の D1〜D8）「A.機構部」。丸数字は section_stripped で別に見る
 _SECTION_NO_RE = re.compile(r"^(?:\d{1,2}[.)、](?!\d)|\(\d{1,2}\)|d[1-8](?=\D)|[a-z][.)、](?=[^\x00-\x7f]))")
 _TRAILING_PAREN_RE = re.compile(r"\([^()]{1,12}\)$")
 _INLINE_SEP = re.compile(r"[:：]")
-_DATE_RE = re.compile(r"(\d{4})\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})")
+_FORM_DATE_RE = re.compile(r"(\d{4})\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})")
 # 年の無い日付（「2/12」「2/12 3時17分」「2月12日 14:05」）。年は推測せず、原文のまま残して警告だけ出す。
 # 「24/8/25」のような2桁の年は、年の欄が空なのか2桁で書いたのか分からないのでこの形には含めない
 _NO_YEAR_RE = re.compile(r"^\s*(\d{1,2})\s*(?:/|月|-|\.)\s*(\d{1,2})\s*日?(?:\s|$|[^\d/\-.])")
@@ -50,10 +50,10 @@ _NO_YEAR_RE = re.compile(r"^\s*(\d{1,2})\s*(?:/|月|-|\.)\s*(\d{1,2})\s*日?(?:\
 _CLOCK_LEAD_RE = re.compile(r"日?\s*(?:\([月火水木金土日]\)\s*)?T?\s*")
 _CLOCK_RE = re.compile(r"(\d{1,2})\s*(?::(\d{2})(?::\d{2})?|時\s*(\d{1,2})\s*分?)(?!\d)")
 # 和暦「令和5年11月16日」「R5.11.16」「平成30年4月1日」「H30.4.1」。年の起点は元号ごと
-_ERA_RE = re.compile(r"(?<![A-Za-z])(令和|R|平成|H)\s*(\d{1,2}|元)\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})")
-_ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988}
+_FORM_ERA_RE = re.compile(r"(?<![A-Za-z])(令和|R|平成|H)\s*(\d{1,2}|元)\s*[年/\-.]\s*(\d{1,2})\s*[月/\-.]\s*(\d{1,2})")
+_FORM_ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988}
 # 「.5」「約.5時間」のような整数部の無い小数も読む（「5」と読まない）
-_NUM_RE = re.compile(r"-?(?:\d+(?:\.\d+)?|\.\d+)")
+_FORM_NUM_RE = re.compile(r"-?(?:\d+(?:\.\d+)?|\.\d+)")
 _DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:時間|hours?|hrs?|h)\s*(\d+(?:\.\d+)?)\s*(?:分|mins?|m)(?![A-Za-z])",
                           re.IGNORECASE)
 # 時刻の形の時間「2:45」「25:30」（時間の欄に h:mm で書いた値。Excel の [h]:mm のセルもこの形の文字にする）
@@ -125,7 +125,7 @@ def _strip_edges(s: str) -> str:
         s = s.strip(_EDGE_MARKS)
         if not s:
             break
-        close = _BRACKETS.get(s[0])
+        close = _FORM_BRACKETS.get(s[0])
         if close and s.endswith(close) and len(s) > 1:
             s = s[1:-1]
             continue
@@ -180,7 +180,7 @@ _CODE_NAME_PATTERNS = (
     (re.compile(rf"^({_CODE_TOKEN})(?:\s*[/:]\s*|\s+)(.+)$"), 1, 2),  # CMP-108　STI-CMP 8号機 / CMP-108：STI-CMP
     (re.compile(rf"^(.+?)(?:\s*[/:]\s*|\s+)({_CODE_TOKEN})$"), 2, 1),  # W-CMP 3号機　CMP-103
 )
-_CODE_ONLY = re.compile(rf"^{_CODE_TOKEN}$")
+_FORM_CODE_ONLY = re.compile(rf"^{_CODE_TOKEN}$")
 
 
 def split_code_name(text) -> tuple[str, str] | None:
@@ -195,7 +195,7 @@ def split_code_name(text) -> tuple[str, str] | None:
         m = pattern.match(s)
         if m:
             code, name = m[code_group].strip(), m[name_group].strip()
-            if name and not _CODE_ONLY.match(name) and not all(_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
+            if name and not _FORM_CODE_ONLY.match(name) and not all(_FORM_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
                 return code, name
     return None
 
@@ -296,7 +296,7 @@ def written_unit(text) -> str:
         # 「10〜20分」: 範囲の後ろの数値の単位を見る（先頭の「10」の直後の「〜」を単位としない）
         m = _UNIT_AFTER_RE.match(s, r.end())
         return normalize_unit(m[1]) if m and _unit_like(m[1]) else ""
-    first = _NUM_RE.search(s)
+    first = _FORM_NUM_RE.search(s)
     m = _UNIT_AFTER_RE.match(s, first.end()) if first else None
     if not m or not _unit_like(m[1]):
         return ""
@@ -335,7 +335,7 @@ def numeric_unit(text, unit: str = "") -> str:
     return written_unit(s)
 
 
-def cell_text(value) -> str:
+def form_cell_text(value) -> str:
     """セル値を表示用の文字列にする。"""
     if value is None:
         return ""
@@ -411,13 +411,13 @@ def to_date(raw, text: str, date1904: bool = False) -> tuple[str | None, str | N
             return from_excel(raw, epoch=epoch).date().isoformat(), None
 
     s = unicodedata.normalize("NFKC", text or "")
-    m = _ERA_RE.search(s)
+    m = _FORM_ERA_RE.search(s)
     if m:
-        year = _ERA_BASE[m[1]] + (1 if m[2] == "元" else int(m[2]))
+        year = _FORM_ERA_BASE[m[1]] + (1 if m[2] == "元" else int(m[2]))
         parsed = _safe_date(year, int(m[3]), int(m[4]))
         if parsed:
             return _with_clock(parsed, s, m.end())
-    m = _DATE_RE.search(s)
+    m = _FORM_DATE_RE.search(s)
     if m:
         parsed = _safe_date(int(m[1]), int(m[2]), int(m[3]))
         if parsed:
@@ -493,7 +493,7 @@ def to_number(raw, text: str, unit: str = "") -> tuple[int | float | str | None,
     if target and _NUM_RANGE_RE.search(s) and written_unit(s) not in ("", target):
         # 「時間」の欄に「10～20分」: 先頭の 10 を時間として読まない
         return (text or None), f"「{text}」は範囲で、単位も項目の単位（{target}）と違います。数値として読み取れません"
-    m = _NUM_RE.search(s)
+    m = _FORM_NUM_RE.search(s)
     if not m:
         return (text or None), "数値として読み取れません"
     number = float(m[0])
@@ -712,7 +712,7 @@ class SheetGrid:
         self.cells: dict[tuple[int, int], Cell] = {}
         self.max_row = self.max_col = 0
         for (r, c), xl in ws._cells.items():
-            text = cell_text(xl.value)
+            text = form_cell_text(xl.value)
             if not text:
                 continue
             top, left, bottom, right = self.bounds(r, c)
@@ -895,7 +895,7 @@ def _value_to_json(value):
         return {"t": "time", "v": value.isoformat()}
     if isinstance(value, timedelta):
         return {"t": "timedelta", "v": value.total_seconds()}
-    return cell_text(value)   # それ以外（openpyxl の特別な型など）は画面に出す文字で覚える
+    return form_cell_text(value)   # それ以外（openpyxl の特別な型など）は画面に出す文字で覚える
 
 
 def _value_from_json(raw):
@@ -924,7 +924,7 @@ def _cell_to_json(cell: Cell) -> list:
 def _cell_from_json(item: list) -> Cell | None:
     row, col, max_row, max_col, raw, bold, filled, fill, fmt_unit = (list(item) + [0] * 9)[:9]
     value = _value_from_json(raw)
-    text = cell_text(value)
+    text = form_cell_text(value)
     if not text:
         return None
     return make_cell(int(row), int(col), max(int(max_row), int(row)), max(int(max_col), int(col)), value, text,
@@ -1537,11 +1537,11 @@ def table_title(cell: Cell) -> str:
 
 
 def _title_text(raw) -> str:
-    text = _one_line(raw)
+    text = _form_one_line(raw)
     text = re.sub(r"^[■□◆◇●▼▽▶►・*※\s]+", "", text)
     if text.startswith(("【", "[")) and text.endswith(("】", "]")):
         text = text[1:-1]
-    return text.strip(" :：") or _one_line(raw)
+    return text.strip(" :：") or _form_one_line(raw)
 
 
 # ---- 値（{"columns": [...], "rows": [[...]]}）の扱い -----------------------------------------
@@ -1744,7 +1744,7 @@ def _compact(text: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text))).lower()
 
 
-def _one_line(text) -> str:
+def _form_one_line(text) -> str:
     return " ".join(unicodedata.normalize("NFKC", str(text or "")).split())
 
 
@@ -2914,7 +2914,7 @@ def _make_suggestion(norm: str, label_text: str, value, cell: Cell) -> _Suggesti
     entry = _dict_entry(norm) or (_dict_entry(cell.alt_norm) if cell.alt_norm and not cell.inline else None)
     entry = entry or (_dict_entry(normalize_label(base)) if unit else None)
     display = base if unit else label_text
-    example = cell_text(value)
+    example = form_cell_text(value)
     if entry:
         sug = _Suggestion(entry.field_name, display, entry.data_type, [label_text], entry.synonyms,
                           examples=[example], score=3, unit=unit)
@@ -2935,7 +2935,7 @@ def _guess_type(value, label: str = "") -> str:
         return "number"
     text = str(value)
     # 見本が文字列で日付を持つ帳票（「令和5年12月5日」「2025/12/19(金)」）も日付にして、本文を ISO にそろえる
-    if _date_label(label) and to_date(value, cell_text(value))[1] is None:
+    if _date_label(label) and to_date(value, form_cell_text(value))[1] is None:
         return "date"
     # 「発生」のように見出しからは日付と分からない欄も、値が日付だけで書かれていれば日付にする
     # （文字列のままだと ISO＋「（2024年7月）」の注記が付かず、同じ md の中で日付の書き方が混ざる）
@@ -2949,7 +2949,7 @@ def _date_value(value) -> bool:
 
     見本ごとの多数決はしない（この候補を作ったセルの値だけで見る。別シートの同名ラベルの値が混ざるため）。
     """
-    text = cell_text(value)
+    text = form_cell_text(value)
     return bool(_DATE_VALUE_RE.match(nfkc_value(text))) and to_date(value, text)[1] is None
 
 
@@ -3642,7 +3642,7 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     pattern = extraction["pattern"]
     type_name = _md_one_line(pattern["name"])
     shown = _shown_fields(extraction)
-    filled = [f for f in shown if not _is_blank(f["value"])]
+    filled = [f for f in shown if not _form_is_blank(f["value"])]
     title_fields = _title_fields(pattern, extraction["fields"], shown)
 
     title_texts = _title_texts(title_fields, heading=False)
@@ -3669,7 +3669,7 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     attachments = extraction.get("attachments") or []
     if attachments:
         tail.append(f"- 添付画像: {len(attachments)}枚")
-    tail.append(f"- 出典: {_source_text(doc, title_fields, filled)}")
+    tail.append(f"- 出典: {_form_source_text(doc, title_fields, filled)}")
 
     long_fields = [f for f in filled if f["data_type"] in ("text", "table")]
 
@@ -3771,7 +3771,7 @@ def _title_fields(pattern: dict, all_fields: list[dict], shown: list[dict]) -> l
     by_name = {f["field_name"]: f for f in shown if f["data_type"] != "table"}
     configured = [n for n in (pattern.get("title_fields") or []) if n in {f["field_name"] for f in all_fields}]
     keys = configured or list(DEFAULT_TITLE_KEYS)
-    return [by_name[k] for k in dict.fromkeys(keys) if k in by_name and not _is_blank(by_name[k]["value"])]
+    return [by_name[k] for k in dict.fromkeys(keys) if k in by_name and not _form_is_blank(by_name[k]["value"])]
 
 
 def _has_identifier(fields: list[dict]) -> bool:
@@ -3868,7 +3868,7 @@ def _plain_value(f: dict) -> str:
     return md_value_text(value)
 
 
-def _source_text(doc: dict, title_fields: list[dict], filled: list[dict] | None = None) -> str:
+def _form_source_text(doc: dict, title_fields: list[dict], filled: list[dict] | None = None) -> str:
     """出典: 元ファイル名（報告番号 R2026-00123）。報告番号がなければ最初の文字列のタイトル項目。
 
     タイトル項目が設備だけのときは、タイトルに足した項目（作業No.などの番号 → 日付）を書く。
@@ -3905,7 +3905,7 @@ def table_markdown_lines(value) -> list[str]:
     return lines
 
 
-def _is_blank(value) -> bool:
+def _form_is_blank(value) -> bool:
     if isinstance(value, dict):
         return not value.get("rows")
     return value is None or (isinstance(value, str) and not value.strip())
