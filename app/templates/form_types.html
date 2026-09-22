@@ -69,7 +69,14 @@
   <div class="split">
     <section class="split-pane sticky" aria-label="置いた帳票のシート">
       <div class="split-pane-head">
-        <h3>置いた帳票のシート{% if book %} <small class="muted">{{ book.file_name }}</small>{% endif %}</h3>
+        <h3>置いた帳票のシート{% if book %} <small class="muted">{{ book.file_name }}</small>{% endif %}
+          {% if grids %}
+          {#- 書き方の違う同じ帳票（「設備No」と「設備番号」など）に替えて同じ欄をクリックすると、どちらでも読めるようになる -#}
+          <form class="inline" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
+            <label class="link-like small" title="書き方の違う同じ帳票に替えて同じ欄をクリックすると、どちらの書き方でも読めるようになります">別のExcelに替える<input type="file" name="book" accept=".xlsx,.xlsm" hidden></label>
+          </form>
+          {% endif %}
+        </h3>
         {% if grids | length > 1 %}
         <div class="tabs" role="tablist">
           {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
@@ -78,8 +85,12 @@
       </div>
       <div class="split-pane-body">
         {% if not grids %}
-          <p class="muted">置いた Excel はサーバーに残していません。シートを見ながら項目を作る・直すときは、
-            同じ帳票の Excel を下の「この帳票のExcelを置く」でもう一度置いてください。</p>
+          {#- 置いた Excel はサーバーに残していないので、開き直したときはここに置き場を出す。
+              置くと登録のときと同じ画面（左にシート・右に項目）になり、同じ操作で直せる（利用者の指示 2026-09-22） -#}
+          <form class="stack" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
+            {{ ui.file_drop("book", fid="drop-book-edit", accept=".xlsx,.xlsm", label="この帳票のExcelをここにドラッグ＆ドロップ",
+                            hint="置くとすぐシートが出て、登録のときと同じようにセルをクリックして直せます。サーバーには保存しません（直す間だけ読んで、すぐ捨てます）") }}
+          </form>
         {% else %}
         <p class="hint" data-click-hint aria-live="polite">見出しのセルをクリックしてください。</p>
         <div class="btn-row" data-click-actions hidden>
@@ -112,7 +123,7 @@
                 {% if r.label != r.field.display_name %}<small class="muted">探す見出し: {{ r.label }}</small>{% endif %}
                 {% if r.field.data_type == 'table' %}<small class="muted">表（1行＝1明細）</small>{% endif %}</th>
               <td>
-                {% if not book %}<span class="muted">—（Excelを置くと、この設定で読んだ値が出ます）</span>
+                {% if not book %}<span class="muted">—（左にExcelを置くと、この設定で読んだ値が出ます）</span>
                 {% elif r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
                 {% else %}<span class="pre">{{ r.value | field_text | truncate(120) }}</span>{% if r.field.unit %} {{ r.field.unit }}{% endif %}{% endif %}
                 {% if r.warning %}<div class="warn">{{ r.warning }}</div>{% endif %}
@@ -137,7 +148,7 @@
       <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
     {% elif not test %}
       <p class="muted">いま Excel を置いていないので、読み取りテストはできません。設定は残っています。
-        確かめたいときは、下の「この帳票のExcelを置く」で同じ帳票の Excel を置いてください。</p>
+        確かめたいときは、左の欄に同じ帳票の Excel を置いてください。</p>
     {% else %}
       <p>{{ test.total }}項目中 <strong>{{ test.found }}</strong>項目が見つかりました（シート: {{ test.sheets | join('、') }}）。</p>
       <details class="fold" {% if test.found < test.total %}open{% endif %}>
@@ -148,17 +159,6 @@
     {% endif %}
   {% endcall %}
 
-  {# ---- この帳票の Excel を置く（サーバーには残さない） ---- #}
-  {% call ui.card("この帳票のExcelを置く", level=3) %}
-    <form class="upload-form" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}"
-          enctype="multipart/form-data">
-      <input type="file" name="book" accept=".xlsx,.xlsm" required aria-label="この帳票のExcel">
-      <button type="submit" class="btn">{{ "別のExcelに替える" if book else "Excelを置く" }}</button>
-    </form>
-    <p class="hint">置いた Excel は<strong>サーバーに残しません</strong>。項目を作る間だけ読み取って、すぐ捨てます。
-      残るのは読み取りの設定（シート名・セルの場所・項目名）だけです。</p>
-    <p class="hint">書き方の違う同じ帳票（「設備No」と「設備番号」など）に替えて同じ欄をクリックすると、どちらの書き方でも読めるようになります。</p>
-  {% endcall %}
 </div>
 {%- endmacro %}
 

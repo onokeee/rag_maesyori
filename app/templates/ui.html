@@ -144,8 +144,9 @@
 {%- endmacro %}
 
 {#- ファイル選択（ドラッグ＆ドロップ可）。accept: ".xlsx,.xlsm" -#}
-{% macro file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False) -%}
-{%- set fid = "drop-" ~ name -%}
+{% macro file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False, fid=None) -%}
+{#- fid: 同じ name の置き場が1画面に2つあるとき（帳票登録の「新しく登録する」と「項目を直す」）に id を分ける -#}
+{%- set fid = fid or ("drop-" ~ name) -%}
 <div class="file-drop" data-file-drop>
   <input type="file" id="{{ fid }}" name="{{ name }}" {% if accept %}accept="{{ accept }}"{% endif %} {{ 'multiple' if multiple }} required class="file-drop-input">
   <label for="{{ fid }}" class="file-drop-zone">

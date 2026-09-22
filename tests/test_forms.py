@@ -3910,10 +3910,10 @@ def test_the_panel_without_a_book_says_the_excel_is_not_kept(app, client, sample
     # 開き直したとき（Excel を置いていない）は、設定だけの画面になる
     panel = _panel_form_types_fixes7(client, pattern_id)
     assert "—（見つかりません）" not in panel
-    assert "—（Excelを置くと、この設定で読んだ値が出ます）" in panel
+    assert "—（左にExcelを置くと、この設定で読んだ値が出ます）" in panel
     assert "項目を1つ以上作ると、ここに読み取り結果が出ます。" not in panel
     assert "いま Excel を置いていないので、読み取りテストはできません" in panel
-    assert "サーバーに残していません" in panel
+    assert "サーバーには保存しません" in panel
 
 
 # ---- 置いた Excel を替えたあと、項目を削除しても表示が戻らない ---------------------------------------
@@ -4059,10 +4059,12 @@ def test_reopening_a_type_without_the_excel_shows_the_settings(app, client, tmp_
 
     panel = panel_html(client, pattern_id)
     assert "報告番号" in panel                   # 項目は残っている
-    assert "サーバーに残していません" in panel   # 残していないことと、置き直せることを言う
-    assert "この帳票のExcelを置く" in panel
+    # 左の欄が Excel の置き場になる（登録のときと同じ見た目・同じ操作で直せる。利用者の指示 2026-09-22）
+    assert "この帳票のExcelをここにドラッグ＆ドロップ" in panel
+    assert 'data-book-form=' in panel and 'id="drop-book-edit"' in panel   # 「新しく登録する」の置き場と id が重ならない
+    assert "サーバーには保存しません" in panel
     assert "いま Excel を置いていないので、読み取りテストはできません" in panel
-    assert "—（Excelを置くと、この設定で読んだ値が出ます）" in panel
+    assert "—（左にExcelを置くと、この設定で読んだ値が出ます）" in panel
 
     # Excel が無くても見出しは直せる（Markdown に書く名前だけが変わる）
     res = client.post(f"/form-types/{pattern_id}/fields/report_id/label", json={"name": "受付番号"})

@@ -199,7 +199,9 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 .btn-row { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; }
 .btn-row.end { justify-content: flex-end; }
 .btn-row form { margin: 0; }
-.link-like { color: var(--primary); text-decoration: underline; }
+.link-like { color: var(--primary); text-decoration: underline; cursor: pointer; }
+/* 見出しの横に置く小さなフォーム（帳票登録の「別のExcelに替える」） */
+form.inline { display: inline; margin: 0 0 0 .8rem; font-weight: 400; font-size: .85rem; }
 
 /* ===== 入力 ===== */
 .input, .field input[type=text], .field input[type=search], .field input[type=date], .field select, .field textarea {

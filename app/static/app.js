@@ -1409,6 +1409,9 @@ window.ragAiHeader = (() => {
     if (res.list_html !== undefined && listBody) listBody.innerHTML = res.list_html;
     if (res.html !== undefined) {
       buildBody.innerHTML = res.html;
+      // 開き直した種類は左の欄が Excel の置き場になる（登録のときと同じ見た目・同じ操作）。置き場の
+      // ドラッグ＆ドロップは共通の bindFileDrop に任せる（断片を入れ替えたので、ここで結び直す）
+      buildBody.querySelectorAll("[data-file-drop]").forEach(window.App.bindFileDrop);
       const root = buildBody.querySelector("#cellBuilder");
       patternId = root ? Number(root.dataset.pattern) : patternId;
       const nameInput = buildBody.querySelector("[data-rename]");
