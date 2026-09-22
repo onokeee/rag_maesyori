@@ -55,6 +55,31 @@
   </div>
 
   <div class="card">
+    <div class="card-head"><h2 class="card-title">帳票登録でのクリックのしかた（欄の形ごと）</h2></div>
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>帳票の欄の形</th><th>クリック</th><th>できる項目</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">見出しのセルと、その右か下に値のセル<br><small class="muted">例：「報告番号」｜「R2026-00123」</small></th>
+            <td>見出しのセル → 値のセル の<strong>2回</strong></td><td>1つの値の項目（<code>- 報告番号: R2026-00123</code>）</td></tr>
+        <tr><th scope="row">1つのセルに見出しと値<br><small class="muted">例：「設備番号：EQ-001」</small></th>
+            <td>同じセルを<strong>2回</strong></td><td>1つの値の項目。「：」の右側が値</td></tr>
+        <tr><th scope="row">設備の番号と名前が1つのセル<br><small class="muted">例：「使用設備：CMP-108　STI-CMP 8号機」</small></th>
+            <td>同じセルを2回</td><td>設備番号・設備名の<strong>2項目</strong>に分かれる</td></tr>
+        <tr><th scope="row">明細表（列見出しの行＋1行1明細）<br><small class="muted">例：No.｜品番｜品名｜数量｜金額(円) の表</small></th>
+            <td>列見出しのセルを<strong>どれか1つ、1回</strong>（値のセルは押さない）</td><td>表ごと1つの<strong>明細表</strong>の項目（右の一覧に「表（1行＝1明細）」の印）</td></tr>
+        <tr><th scope="row">見出しはあるが、値の欄がまだ空</th>
+            <td>見出しのセル → ［値が空のまま項目にする］</td><td>1つの値の項目（取り込む帳票では値を読む）</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="hint">明細表について：同じ塗りで横に並ぶ見出し（No.｜品番｜品名…）を1行の見出しとみなし、その下の行を空行か「合計」の行まで表として読みます。
+      項目名は表の上にある見出し（「使用部品」など）を使います。取り込む帳票ごとに行数が違っても全部読み、読み取り結果の画面で行の追加・削除ができます。
+      Markdown では <code>## 使用部品</code> の下に <code>- 品番: PI77-1713／品名: クライオポンプ（OH品）／数量: 1／金額(円): 1,650,000</code> のように1行1明細で書きます（下の「明細表の節」）。</p>
+    <p class="hint">項目の見出し（Markdown に書く名前）は、右の一覧でクリックして手で直せます。直しても、シートのどこを読むかは変わりません。</p>
+  </div>
+
+  <div class="card">
     <div class="card-head"><h2 class="card-title">先頭の見出し（#）とファイル名</h2></div>
     <ul class="list-plain">
       <li><code># 種類名 値1｜値2｜値3</code>。値は<strong>報告番号 → 設備（番号と名前）→ 発生日</strong>の順で、その帳票に値があるものだけ</li>
