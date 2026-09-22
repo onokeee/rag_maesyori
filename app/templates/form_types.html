@@ -54,10 +54,14 @@
     <label class="field"><span>帳票の種類の名前</span>
       <input class="input" value="{{ pattern.name }}" data-rename="{{ url_for('form_types.rename', pattern_id=pattern.id) }}"></label>
     <span>{{ ui.badge(pattern.status) }}</span>
+    {#- 直した内容はその場で保存される（確定の操作は無い）。それが分かるように、保存のたびにここを書き換える
+        （トーストは消えるので残る表示にする。利用者の指摘 2026-09-22「変更した内容を確定させるボタンがない」） -#}
+    <span class="muted small" data-save-line aria-live="polite">変更はその場で保存されます（確定の操作はありません）</span>
     <span class="spacer"></span>
     {% if pattern.status != 'active' %}
       <button type="button" class="btn primary" data-set-status="active" data-pattern="{{ pattern.id }}">使用開始</button>
     {% endif %}
+    <button type="button" class="btn" data-close-build title="この欄を閉じて一覧に戻ります（直した内容は保存済みです）">編集を終える</button>
     <button type="button" class="btn danger-outline" data-delete-type="{{ pattern.id }}"
             data-confirm="帳票の種類「{{ pattern.name }}」を削除します。元に戻せません。&#10;確定済みの帳票{{ confirmed_count }}件は削除されずに残ります。"
             data-confirm-ok="削除">この種類を削除</button>

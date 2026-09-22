@@ -4900,3 +4900,16 @@ def test_the_leave_signal_does_not_pull_a_running_job_out(sessions, client):
 
     assert _as_beacon(client, "/tables/discard", f'{{"import_ids": [{import_id}]}}').status_code == 204
     assert _alive(app, "table_imports", import_id)
+
+
+# ---- 直した内容はその場で保存される。それが画面で分かる（利用者の指摘 2026-09-22） --------------------------
+
+def test_the_build_panel_says_changes_are_saved_at_once_and_has_a_done_button(app, client, sample_dir):
+    """「変更した内容を確定させるボタンがない」への答え: 確定の操作は無く、その場で保存される。
+    それが分かる1行と、欄を閉じて一覧に戻る［編集を終える］を置く（保存のたびに JS が1行を書き換える）。"""
+    pattern_id = create_type(client, sample_dir / "standard.xlsx", "設備修理報告書")
+    panel = panel_html(client, pattern_id)
+    assert "変更はその場で保存されます（確定の操作はありません）" in panel
+    assert 'data-save-line' in panel and 'data-close-build' in panel and "編集を終える" in panel
+    # 「確定」「保存する」のようなボタンは無い（押すものが無いのに探させない）
+    assert "確定する" not in panel and ">保存する<" not in panel

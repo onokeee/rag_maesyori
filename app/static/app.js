@@ -1444,8 +1444,27 @@ window.ragAiHeader = (() => {
       sections.open("build", !!(opts && opts.scroll));
       if (keep) restoreSheetView(keep);
     }
-    if (res.message) toast(res.message, "ok");
+    if (res.message) { toast(res.message, "ok"); if (res.html !== undefined) markSaved(res.message); }
     (res.errors || []).forEach((m) => toast(m, "err"));
+  }
+
+  // 直した内容はその場で保存される。保存のたびに「保存しました 12:34（…）」を欄の上に残す
+  // （トーストは消えるので。利用者の指摘 2026-09-22「変更した内容を確定させるボタンがない」）
+  function markSaved(text) {
+    const line = buildBody.querySelector("[data-save-line]");
+    if (!line) return;
+    const now = new Date();
+    const hhmm = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+    line.textContent = "保存しました " + hhmm + (text ? "（" + text + "）" : "");
+  }
+
+  function closeBuild() {
+    buildBody.textContent = "";
+    patternId = null;
+    bookFile = null;
+    if (buildName) buildName.textContent = "";
+    sections.close("build");
+    sections.open("list", true);
   }
 
   // ---- 新しく登録する ----
@@ -1515,6 +1534,8 @@ window.ragAiHeader = (() => {
       status.disabled = false;
       return;
     }
+    // 編集を終える（直した内容は保存済み。欄を閉じて一覧に戻るだけ）
+    if (event.target.closest("[data-close-build]")) { event.preventDefault(); closeBuild(); return; }
     // 削除（確認ダイアログは app.js が先に出す。ここは「はい」のあとの本番）
     const del = event.target.closest("[data-delete-type][data-confirmed='1']");
     if (del) {
@@ -1612,6 +1633,7 @@ window.ragAiHeader = (() => {
       input.dataset.saved = value;
       if (buildName) buildName.textContent = value;
       if (res.list_html !== undefined && listBody) listBody.innerHTML = res.list_html;
+      markSaved("名前を「" + value + "」にしました");
     } catch (e) { toast(e.message, "err"); }
   });
 
