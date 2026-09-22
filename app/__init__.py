@@ -1,4 +1,4 @@
-"""Flask アプリ（create_app）と設定（env ファイルを読み込む。旧 config.py）。起動は run.py。
+"""Flask アプリ（create_app）と設定（env ファイルを読み込む。旧 config.py）。起動は flask --app app serve。
 
 アプリ本体はこの app/ フォルダに全部ある: core.py（土台。DBもここ）・forms.py（帳票）・tables.py（一覧表）・
 ai.py（AI整形・AI接続・経過の記録）・views.py（画面）と templates/・static/。"""
@@ -131,8 +131,8 @@ _NO_DEBUG_MSG = (
     "\n[app] デバッグモードでは起動しません。\n"
     "  理由: デバッガが開くと、例外が出たときにブラウザからこのサーバの Python を実行できます。\n"
     "  断ったもの: flask run の --debug / --debugger と、環境変数 FLASK_DEBUG=1。\n"
-    "  通常の起動: python run.py\n"
-    "  詳しいエラーを見たいとき: app/__init__.py の DEBUG を True にして python run.py\n"
+    "  通常の起動: flask --app app serve\n"
+    "  詳しいエラーを見たいとき: app/__init__.py の DEBUG を True にして flask --app app serve\n"
 )
 
 
@@ -146,7 +146,7 @@ def _refuse_debugger() -> None:
 # --- 待ち受け先と、受け付ける宛先の名前 -------------------------------------------------
 # サーバ（JupyterLab のターミナルなど）で起動し、社内LANの他のPCから数人で開いて使う（design.md 0）。
 # 既定はこのサーバの中からだけ開ける 127.0.0.1。LAN に出すときは起動時に環境変数で渡す:
-#   HOST=0.0.0.0 PORT=5000 python run.py
+#   HOST=0.0.0.0 PORT=5000 flask --app app serve
 _ALL_ADDRESSES = ("", "0.0.0.0", "::")
 
 
@@ -157,7 +157,7 @@ def _env_port(default: int = 5000) -> int:
     try:
         port = int(raw)
     except ValueError:
-        raise SystemExit(f"\n[app] PORT が数字ではありません: {raw!r}\n  例: PORT=5000 python run.py\n") from None
+        raise SystemExit(f"\n[app] PORT が数字ではありません: {raw!r}\n  例: PORT=5000 flask --app app serve\n") from None
     if not 1 <= port <= 65535:
         raise SystemExit(f"\n[app] PORT が範囲外です: {port}（1〜65535）\n")
     return port
@@ -382,6 +382,29 @@ def create_app(overrides: dict | None = None) -> Flask:
     @app.errorhandler(500)
     def _server_error(_exc):
         return render_template("base.html", code=500), 500
+
+    @app.cli.command("serve")
+    def _serve() -> None:
+        """本番用サーバー（waitress）で待ち受ける。待ち受け先は環境変数 HOST・PORT。"""
+        # flask --app app run は Flask の開発サーバーを使うので、通常はこちらを使う。開発サーバーだと
+        # WAITRESS_OPTIONS の outbuf_high_watermark が効かず、途中で切れたダウンロードに気づけない
+        # （送り終えたように見えた時点でデータを消してしまう。design.md 3.3「欠けないダウンロード」）。
+        if DEBUG and not _is_loopback(HOST):
+            # DEBUG=True の Flask はデバッガを開く。LAN に出す起動では絶対に開かせない（_NO_DEBUG_MSG と同じ理由）
+            raise SystemExit("\n[app] DEBUG = True のまま LAN のアドレス（HOST=%s）では起動しません。\n"
+                             "  理由: デバッガが開くと、例外が出たときにブラウザからこのサーバの Python を実行できます。\n"
+                             "  詳しいエラーを見たいときは HOST を外して（127.0.0.1 で）起動してください。\n" % HOST)
+        print(startup_notice())
+        if DEBUG:
+            app.run(host=HOST, port=PORT, debug=True, use_reloader=False)
+            return
+        try:
+            from waitress import serve
+        except ImportError:
+            print("[app] waitress が無いため Flask の開発サーバで起動します（pip install waitress を推奨）")
+            app.run(host=HOST, port=PORT, debug=False)
+        else:
+            serve(app, host=HOST, port=PORT, **WAITRESS_OPTIONS)
 
     _recover_jobs(app)
     _purge_pending(app)

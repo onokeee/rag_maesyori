@@ -10,8 +10,10 @@ Excel/CSV の帳票・一覧表を読み取り、LightRAG に手作業で投入�
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python run.py
+flask --app app serve
 ```
+
+`flask --app app serve` は本番用サーバー（waitress）で待ち受けます。`flask --app app run` も動きますが Flask の開発サーバーになり、途中で切れたダウンロードを検知する設定（outbuf_high_watermark）が効かないので使わないでください。
 
 http://127.0.0.1:5000 を開きます（既定はサーバーの中からだけ開けます）。初回は `instance/app.db` を作り、古い DB は起動時に自動で移行します。
 
@@ -57,8 +59,8 @@ export OPENAI_MODEL="gpt-5.6-sol"
 ## 構成
 
 ```
-run.py                 起動（waitress で create_app() を動かす）
-app/                   アプリ本体（views・forms・tables・aiproc・llm・core・database・logproc）
+app/__init__.py        create_app・設定・エラー画面・起動コマンド（serve）
+app/                   アプリ本体（views・forms・tables・ai・core）
 app/templates/         画面（HTML）
 app/static/            app.js・style.css
 requirements.txt       必要なパッケージ
