@@ -437,10 +437,47 @@ document.querySelectorAll(".progress-box[data-job-url]").forEach(bindProgressBox
 ragSections.refresh();
 // 他のスクリプトから使う
 window.ragFetch = ragFetch;
+// ---- 読み取ったセルの目印（帳票取り込みの③と帳票登録の左のシート） -------------------------------------
+// items: [{sheet, labelCell, valueCell, no}]。値のセルに番号の札（data-field-no を CSS の ::before で描く）と色、
+// 見出しのセルに薄い色を付ける。右の項目一覧にも同じ番号を出すので、どこが読み取り済みかが一目で分かる
+// （利用者の指摘 2026-09-22「どこが読み取り済なのかぱっと見でわからない」）。
+// 札を td の文字にしない（textContent を値に使う処理があるため）。同じセルに2項目なら「3,4」。
+function markReadCells(root, items) {
+  const top = (coord) => (coord || "").split(":")[0];
+  root.querySelectorAll("td.is-read, td.is-read-label").forEach((td) => {
+    td.classList.remove("is-read", "is-read-label");
+    td.removeAttribute("data-field-no");
+  });
+  items.forEach((it) => {
+    const grid = it.sheet ? root.querySelector('.sheet-grid[data-sheet="' + CSS.escape(it.sheet) + '"]') : null;
+    if (!grid) return;
+    const value = top(it.valueCell) ? grid.querySelector('td[data-cell="' + top(it.valueCell) + '"]') : null;
+    const label = top(it.labelCell) ? grid.querySelector('td[data-cell="' + top(it.labelCell) + '"]') : null;
+    if (label && label !== value) label.classList.add("is-read-label");
+    const cell = value || label;
+    if (!cell) return;
+    cell.classList.add("is-read");
+    cell.dataset.fieldNo = cell.dataset.fieldNo ? cell.dataset.fieldNo + "," + it.no : String(it.no);
+  });
+}
+
+// 項目の一覧の側に同じ番号を出す（見出しの前に丸い札）
+function numberFieldRows(rows, labelSelector) {
+  rows.forEach((row, i) => {
+    row.dataset.fieldNo = String(i + 1);
+    const label = row.querySelector(labelSelector) || row;
+    if (label.querySelector(".field-no")) return;
+    const s = document.createElement("span");
+    s.className = "field-no";
+    s.textContent = String(i + 1);
+    label.prepend(s);
+  });
+}
+
 window.ragSections = ragSections;
 window.ragDiscard = ragDiscard;
 window.App = { toast, getJson, pollJob, confirmDialog, bindFileDrop, bindProgressBox, ragFetch, ragSections,
-               ragDiscard };
+               ragDiscard, markReadCells, numberFieldRows };
 
 
 // ---- AI接続（ヘッダー右上。どの画面にもある） ----------------------------------------------------
@@ -872,6 +909,9 @@ window.ragAiHeader = (() => {
     b.sheetGrids = Array.from(root.querySelectorAll(".sheet-grid"));
     b.sheetTabs = Array.from(root.querySelectorAll("[data-sheet-tab]"));
     b.paneTabs = Array.from(root.querySelectorAll("[data-pane-tab]"));
+    // 右の項目に 1, 2, 3… の番号を付け、左のシートの読み取ったセルにも同じ番号と色を付ける
+    window.App.numberFieldRows(b.fieldBoxes, ".field-label");
+    if (b.gridLoaded) markBlock(b);
 
     b.sheetTabs.forEach((tab) => tab.addEventListener("click", async () => {
       await loadGrid(b);
@@ -899,10 +939,18 @@ window.ragAiHeader = (() => {
       }
     });
 
-    // セルをクリック → 選んでいる項目にその値を入れる（あとから読み込む表にも効く）
+    // セルをクリック → 選んでいる項目にその値を入れる（あとから読み込む表にも効く）。
+    // 項目を選んでいないときに番号の付いたセルを押したら、その項目の入力欄を選ぶ
     root.addEventListener("click", (event) => {
       const td = event.target.closest("td[data-cell]");
-      if (!td || !b.activeBox) return;
+      if (!td) return;
+      if (!b.activeBox) {
+        const no = Number((td.dataset.fieldNo || "").split(",")[0]);
+        const box = no ? b.fieldBoxes[no - 1] : null;
+        const target = box && inputOf(box);
+        if (target) { target.focus(); target.scrollIntoView({ block: "nearest" }); }
+        return;
+      }
       const input = inputOf(b.activeBox);
       if (!input) return;
       input.value = td.textContent.trim();
@@ -978,6 +1026,7 @@ window.ragAiHeader = (() => {
         const res = await get(b.root.dataset.gridUrl);
         if (slot) slot.innerHTML = res.html || "";
         b.sheetGrids = Array.from(b.root.querySelectorAll(".sheet-grid"));
+        markBlock(b);
       } catch (e) {
         if (slot) {
           slot.textContent = "";
@@ -992,6 +1041,13 @@ window.ragAiHeader = (() => {
       }
     })();
     return b.gridLoading;
+  }
+
+  // 読み取ったセルの目印（番号と色）。表が届いたとき・項目を結び直したときに付け直す
+  function markBlock(b) {
+    window.App.markReadCells(b.root, b.fieldBoxes.map((box, i) => ({
+      sheet: box.dataset.sheet, labelCell: box.dataset.labelCell, valueCell: box.dataset.valueCell, no: i + 1,
+    })));
   }
 
   function showSheet(b, name) {
@@ -1648,6 +1704,12 @@ window.ragAiHeader = (() => {
     const actions = root.querySelector("[data-click-actions]");
     const tabs = Array.from(root.querySelectorAll("[data-sheet-tab]"));
     const panes = Array.from(root.querySelectorAll(".sheet-grid"));
+    // 登録済みの項目に番号を付け、左のシートの読み取るセルにも同じ番号と色を付ける（帳票取り込みの③と同じ見え方）
+    const fieldRows = Array.from(root.querySelectorAll("tr[data-field]"));
+    window.App.numberFieldRows(fieldRows, "th");
+    window.App.markReadCells(root, fieldRows.map((tr, i) => ({
+      sheet: tr.dataset.sheet, labelCell: tr.dataset.labelCell, valueCell: tr.dataset.valueCell, no: i + 1,
+    })));
 
     const clearHighlight = () => root.querySelectorAll("td.hl-label, td.hl-value")
       .forEach((td) => td.classList.remove("hl-label", "hl-value"));

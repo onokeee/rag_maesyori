@@ -2628,6 +2628,12 @@ def test_nav_has_only_the_three_screens(client):
         assert client.get(url).status_code == 200, url
     guide = client.get("/guide").get_data(as_text=True)
     assert "「- 見出し: 値」と「## 見出し」はどう分けているか" in guide and "40文字" in guide
+    # 表の取り込みの側も書いてある（利用者の求め 2026-09-22）: 6つの判断と、経過の記録の切り分け
+    for word in ("表の取り込み（一覧表）の Markdown ができるまで", "② 表の範囲", "③ 列の対応づけ", "④ 値の正規化",
+                 "⑤ Markdown（記録ファイル）", "⑥ 経過の記録", "400トークン", "記入順が一部前後している"):
+        assert word in guide, word
+
+
     # 無くした画面の言葉はヘッダーの行き先（nav）に出さない。右上の「AI接続」は行き先ではなく、その場で開くパネル
     # （2026-09-21。パネルの文には「設定」の語が入る）
     nav = page[page.index('<nav id="mainNav"'):page.index("</nav>")]
@@ -2636,6 +2642,22 @@ def test_nav_has_only_the_three_screens(client):
     for word in ("取り込み履歴", "LightRAGへの入れ方", "保存先フォルダ", "名寄せ辞書", "/settings"):
         assert word not in page, word
     assert 'data-ai-header' in page and "AI接続" in page   # 右上の AI接続
+
+
+def test_read_cells_are_numbered_and_coloured_on_the_sheet(app):
+    """読み取ったセルが一目で分かる（利用者の指摘 2026-09-22）: 値のセルに番号の札と色、右の項目にも同じ番号。
+    札は td の文字にせず data-field-no を CSS で描く（セルの文字を値に使う処理を壊さない）。"""
+    from pathlib import Path
+
+    root = Path(app.root_path)
+    js = (root / "static" / "app.js").read_text(encoding="utf-8")
+    css = (root / "static" / "style.css").read_text(encoding="utf-8")
+    assert "function markReadCells(root, items)" in js and "function numberFieldRows(" in js
+    assert "markReadCells, numberFieldRows" in js                  # 帳票取り込み・帳票登録の両方から使う
+    assert js.count("window.App.markReadCells(") >= 2 and js.count("window.App.numberFieldRows(") >= 2
+    assert 'cell.dataset.fieldNo' in js and ".cell-no" not in js   # 札を文字として td に入れない
+    assert ".data-grid td.is-read::before" in css and "content: attr(data-field-no)" in css
+    assert ".field-no {" in css and ".data-grid td.is-read-label" in css
 
 
 def test_the_removed_screens_are_gone(client):
