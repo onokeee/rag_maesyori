@@ -2620,11 +2620,14 @@ def test_root_goes_to_the_form_import_screen(client):
 
 def test_nav_has_only_the_three_screens(client):
     page = client.get("/forms/new").get_data(as_text=True)
+    # 3つの画面と、読むだけの「解説」（帳票の Markdown の作り方。利用者の求め 2026-09-22）
     for href, label in (('href="/forms/new"', "帳票取り込み"), ('href="/tables/new"', "表の取り込み"),
-                        ('href="/form-types/"', "帳票登録")):
+                        ('href="/form-types/"', "帳票登録"), ('href="/guide"', "解説")):
         assert href in page and label in page, href
-    for url in ("/forms/new", "/tables/new", "/form-types/"):
+    for url in ("/forms/new", "/tables/new", "/form-types/", "/guide"):
         assert client.get(url).status_code == 200, url
+    guide = client.get("/guide").get_data(as_text=True)
+    assert "「- 見出し: 値」と「## 見出し」はどう分けているか" in guide and "40文字" in guide
     # 無くした画面の言葉はヘッダーの行き先（nav）に出さない。右上の「AI接続」は行き先ではなく、その場で開くパネル
     # （2026-09-21。パネルの文には「設定」の語が入る）
     nav = page[page.index('<nav id="mainNav"'):page.index("</nav>")]

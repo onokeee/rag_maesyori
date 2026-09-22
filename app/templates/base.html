@@ -24,6 +24,7 @@
       <a href="{{ url_for('forms.new') }}" {% if path.startswith('/forms') %}class="active" aria-current="page"{% endif %}>帳票取り込み</a>
       <a href="{{ url_for('tables.new') }}" {% if path.startswith('/tables') %}class="active" aria-current="page"{% endif %}>表の取り込み</a>
       <a href="{{ url_for('form_types.index') }}" {% if path.startswith('/form-types') %}class="active" aria-current="page"{% endif %}>帳票登録</a>
+      <a href="{{ url_for('home.guide') }}" {% if path.startswith('/guide') %}class="active" aria-current="page"{% endif %}>解説</a>
     </nav>
     <div class="ai-status" data-ai-header data-state="{{ ai_header.state }}">
       <button type="button" class="ai-status-btn" data-ai-open aria-haspopup="dialog" aria-controls="aiDialog"

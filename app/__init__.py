@@ -96,6 +96,15 @@ def to_forms():
     return redirect(url_for("forms.new"))
 
 
+@home_bp.get("/guide", endpoint="guide")
+def guide():
+    """解説（帳票の Markdown がどう作られるか）。上部タブの4つ目。読むだけの画面で、データには触れない
+    （利用者の求め 2026-09-22）。中身は templates/guide.html。"""
+    from flask import render_template
+
+    return render_template("guide.html")
+
+
 def _secret_key() -> str:
     """セッション署名鍵（画面のメッセージ表示に使う）。再起動しても変わらないようファイルに保持する。"""
     env = os.getenv("FLASK_SECRET_KEY", "").strip()

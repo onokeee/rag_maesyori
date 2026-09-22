@@ -1,0 +1,125 @@
+{#- 解説: 帳票の Markdown がどう作られるか（裏側の決まり）。利用者の求め 2026-09-22
+    「帳票関係のマークダウン作成の裏側のロジックを書いた文書を解説ページを上部タブに追加して作成して」。
+    中身は app/forms.py の build_markdown・_guess_type・_basic_lines・table_markdown_lines と docs/design.md 6.1 のとおり。
+    コードを変えたらここも直す（数字はコードの定数と同じにしておく）。 -#}
+{% extends "base.html" %}
+{% block title %}解説{% endblock %}
+{% block content %}
+<div class="stack guide">
+
+  <div class="card">
+    <div class="card-head"><h1 class="card-title">帳票の Markdown ができるまで</h1></div>
+    <p>帳票取り込みで作る Markdown は、<strong>1帳票＝1ファイル</strong>で、登録した「帳票の種類」の項目を上から順に書きます。
+      形は次の3つだけです。</p>
+    <ul class="list-plain">
+      <li><code># </code> … ファイルの先頭に1つ。帳票の種類の名前と、その帳票を見分ける値（報告番号・設備・日付）</li>
+      <li><code>- 見出し: 値</code> … 短い値の項目（文字列・日付・数値）</li>
+      <li><code>## 見出し</code> … 文章の項目と明細表。その下に本文を書く</li>
+    </ul>
+<pre class="code md-preview"># 設備修理報告書 R2026-00123｜CMP研磨装置1号機（CMP-101）｜2026-09-14
+
+- 帳票の種類: 設備修理報告書
+- 報告番号: R2026-00123
+- 設備: CMP研磨装置1号機（CMP-101）
+- 発生日: 2026-09-14（2026年9月）
+- 作業時間: 2.5時間
+
+## 故障内容
+ウェーハ搬送時に搬送アームが停止した。
+装置画面に「Robot Position Error」が表示された。
+
+## 使用部品
+- 品番: PW48-1591／品名: ベアリング／数量: 2
+
+- 添付画像: 2枚
+- 出典: 修理報告書_標準.xlsx（報告番号 R2026-00123）</pre>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">「- 見出し: 値」と「## 見出し」はどう分けているか</h2></div>
+    <p>項目ごとの<strong>型</strong>で決めています。型は帳票登録でセルをクリックしたときに、置いた帳票の値を見て自動で決めます（画面には出しません）。</p>
+    <div class="table-wrap">
+    <table class="table compact">
+      <thead><tr><th>型</th><th>こう決める（クリックした値のセルを見る）</th><th>Markdown での形</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">日付</th><td>セルが日付型。または見出しが日付らしい（発生日・報告日 など）か、値が日付だけで書かれている（「令和5年12月5日」「2025/12/19(金)」）</td><td><code>- 発生日: 2026-09-14（2026年9月）</code></td></tr>
+        <tr><th scope="row">数値</th><td>セルが数値型</td><td><code>- 停止時間: 95分</code>（単位付き）</td></tr>
+        <tr><th scope="row">文章</th><td>値に<strong>改行がある</strong>、または<strong>40文字を超える</strong></td><td><code>## 故障内容</code> の節。本文は改行ごとに1行</td></tr>
+        <tr><th scope="row">文字列</th><td>上のどれでもない</td><td><code>- 報告者: 藤原</code></td></tr>
+        <tr><th scope="row">明細表</th><td>表の列見出しを1回クリックして登録した項目（1行＝1明細）</td><td><code>## 使用部品</code> の節。1行1明細</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p class="hint">つまり「文章」と「明細表」だけが <code>##</code> の節になり、それ以外はすべて <code>- 見出し: 値</code> です。
+      短い値の項目でも値が複数行のときは <code>- 見出し:</code> の下に2文字下げで続けます。値が空の項目は書きません。</p>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">先頭の見出し（#）とファイル名</h2></div>
+    <ul class="list-plain">
+      <li><code># 種類名 値1｜値2｜値3</code>。値は<strong>報告番号 → 設備（番号と名前）→ 発生日</strong>の順で、その帳票に値があるものだけ</li>
+      <li>設備しか無い帳票は、同じ設備の帳票が何十件もあって見分けられないので、番号らしい項目（作業No. など）か日付を足します</li>
+      <li>報告番号も設備も無いときは、元の Excel のファイル名（拡張子なし）を末尾に足します</li>
+      <li>ファイル名は <code>{種類名}_{タイトルの値…}.md</code>。報告番号が入らないときは、同じ名前が重ならないよう末尾にファイルの指紋（8文字）を足します</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">基本情報の箇条書き（- ）</h2></div>
+    <ul class="list-plain">
+      <li>先頭は必ず <code>- 帳票の種類: …</code></li>
+      <li>設備番号と設備名の2項目は <code>- 設備: 名前（番号）</code> の1行にまとめます</li>
+      <li>日付は <code>2026-09-14（2026年9月）</code> と ISO 形式に年月の注記を付けます（「令和6年7月29日」「R6.7.29」も同じ形にそろえます。時刻があれば残します）</li>
+      <li>数値は単位付きで書きます。単位は「帳票の種類の設定」→「値に書かれた単位（390分・2.5h）」の順に決め、勝手に換算はしません</li>
+      <li>年の無い日付（「2/12」）は年を補わず、書かれたまま残して要確認にします</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">文章の節（##）</h2></div>
+    <ul class="list-plain">
+      <li>本文はセルの改行ごとに1行。空行は入れません（文字は1つも削りません）</li>
+      <li>行頭が「1.」「-」「#」「&gt;」「---」「```」で始まる行は、<code>\</code> を付けて <code>1\.</code> のように無効化します。
+        付けないと Markdown として番号を振り直されたり見出しに化けたりして、書かれた内容が変わってしまうためです（表示上の印で、文字そのものは残ります）</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">明細表の節（##）</h2></div>
+    <ul class="list-plain">
+      <li><code>## 見出し</code> の下に <strong>1行1明細</strong>：<code>- 品番: PW48-1591／品名: ベアリング／数量: 2</code></li>
+      <li>空のセルは書かず、連番だけの「No」列も書きません。合計の行は <code>- 合計: …</code></li>
+      <li>パイプ表（<code>| 品番 | 品名 |</code>）は使いません。1行が「どの見出しの、どの値か」を自分の中に持つので、途中で切られても意味が通ります</li>
+      <li>見出しの組が縦に積み重なる表（特性要因図など）は1つの表にまとめ、各行にはその行の空でない列だけを書きます</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">大きい帳票の工夫（LightRAG に切られても身元が分かるように）</h2></div>
+    <p>LightRAG は文書を一定の長さの断片に切って扱います。切り方の設定はこのアプリからは分からないので、どの断片にも「どの帳票の話か」が残る形にしています。</p>
+    <ul class="list-plain">
+      <li>帳票全体が推定 <strong>1,200トークン</strong>を超えるときは、すべての <code>##</code> に識別子を付けます：<code>## 原因（R2026-00123／CMP-101 CMP研磨装置1号機／2026-09-14）</code></li>
+      <li>明細表の節が推定 <strong>800トークン</strong>を超えるときは <code>## 使用部品（続き）（識別子）</code> に分けます（分けないと、明細の行だけで埋まった断片に報告番号も設備名も残らないため）</li>
+      <li>小さい帳票（大半）は、上の例のとおり <code>## 故障内容</code> のままです</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">末尾と、書かないもの</h2></div>
+    <ul class="list-plain">
+      <li>末尾に <code>- 添付画像: n枚</code>（画像があるとき）と <code>- 出典: 元ファイル名（報告番号 …）</code></li>
+      <li>値が別の欄の見出し語そのもの（「- 品名: 品番」のような読み取り誤り）は書きません</li>
+      <li>画像のセル番地・帳票の種類の版・DB の番号は書きません（読み取り結果の JSON には残ります）</li>
+      <li>人名の項目も書きます（読み取った内容は削らない、が決まりです）。帳票の種類で「出さない」にした項目だけ外れます</li>
+      <li>ブロックの間は空行1つ、ファイルの末尾は改行1つ、改行コードは LF。同じ帳票からは何度作っても同じ Markdown になります</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h2 class="card-title">一覧表（表の取り込み）との違い</h2></div>
+    <p>一覧表は<strong>1行＝1件</strong>で、月ごとに1ファイル。1件が <code>## 【管理No】対象 現象｜日付</code> の節になり、その下がすべて <code>- 見出し: 値</code> です。
+      1件が推定 400トークンを超えると「（続きn/m）」に分け、2つ目以降にも管理No・対象・日付を書き直します。</p>
+  </div>
+
+</div>
+{% endblock %}
