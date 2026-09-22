@@ -4,9 +4,16 @@ __pycache__/
 /instance/
 /uploads/
 /output/
-# 生成サンプル（python scripts/generate_samples.py で再生成できる）
+# 生成サンプル（python scripts/make_samples.py で再生成できる）
 /samples/
 # APIキー・セッション鍵を含む
 /env
 /data/
 /.flask_secret
+
+# push するのはアプリを動かすファイルだけ。下は手元に置いたまま追跡しない
+/tests/
+/pytest.ini
+/scripts/
+/docs/
+/.claude/
