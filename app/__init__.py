@@ -1,6 +1,6 @@
 """Flask アプリ（create_app）と設定（env ファイルを読み込む。旧 config.py）。起動は flask --app app serve。
 
-アプリ本体はこの app/ フォルダに全部ある: core.py（土台。DBもここ）・forms.py（帳票）・tables.py（一覧表）・
+アプリ本体はこの app/ フォルダに全部ある: core.py（土台。DBもここ）・extract.py（帳票と一覧表の読み取り）・
 ai.py（AI整形・AI接続・経過の記録）・views.py（画面）と templates/・static/。"""
 import os
 import secrets

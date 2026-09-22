@@ -39,7 +39,7 @@ from openai import OpenAI
 from app import core
 from app.core import (estimate_tokens, JobCancelled, JobError, NO_LIVE_OWNER, REMOVE_RETRIES,
                       REMOVE_RETRY_WAIT, request_pause)
-from app.tables import base_date_from
+from app.extract import base_date_from
 
 
 ####################################################################################################
@@ -3972,7 +3972,7 @@ def load_spec(import_id: int, conn=None):
     if d is None:
         return None
     try:
-        from app.tables import spec_from_dict
+        from app.extract import spec_from_dict
         return spec_from_dict(d)
     except Exception:
         return d

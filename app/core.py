@@ -43,7 +43,7 @@ from flask import current_app, g, has_app_context
 # ====================================================================================================
 
 if TYPE_CHECKING:
-    from app.forms import FieldDef, PatternDef, SheetDef
+    from app.extract import FieldDef, PatternDef, SheetDef
 
 BUSY_TIMEOUT_MS = 5000
 
@@ -591,7 +591,7 @@ def create_pattern(name: str) -> int:
 
 
 def _field_def(row: dict) -> FieldDef:
-    from app.forms import FieldDef, PatternDef, SheetDef   # forms が core を読み込むので、ここで
+    from app.extract import FieldDef, PatternDef, SheetDef   # extract が core を読み込むので、ここで
     fd = FieldDef(
         field_name=row["field_name"],
         display_name=row["display_name"],
@@ -633,7 +633,7 @@ def _extraction_rule(f: FieldDef) -> dict:
 
 
 def load_pattern(pattern_id: int | None) -> PatternDef | None:
-    from app.forms import FieldDef, PatternDef, SheetDef   # forms が core を読み込むので、ここで
+    from app.extract import FieldDef, PatternDef, SheetDef   # extract が core を読み込むので、ここで
     row = _one("SELECT * FROM patterns WHERE id = ?", (pattern_id,))
     if row is None:
         return None

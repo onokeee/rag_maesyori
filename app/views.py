@@ -61,7 +61,7 @@ from app.core import (
     request_pause,
     request_resume,
 )
-from app.forms import (
+from app.extract import (
     apply_manual_values,
     extract_document,
     is_blank_value,
@@ -92,7 +92,7 @@ from app.forms import (
     match_pattern,
     PatternDef,
 )
-from app.tables import (
+from app.extract import (
     count_levels,
     has_blocking,
     suggest_columns,
