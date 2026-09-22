@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% import "ui.html" as ui %}
 {% block title %}表の取り込み{% endblock %}
 {% block container_class %}wide{% endblock %}
 {#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("tables.html", "part_x", ...)
@@ -78,8 +77,8 @@
 
   <div class="sub-block">
     <h3 class="sub-title">先頭{{ rows|length }}行</h3>
-    {{ ui.grid_legend() }}
-    {{ ui.data_grid(rows, max_cols=width, caption="元の表の先頭") }}
+    {{ ui_grid_legend() }}
+    {{ ui_data_grid(rows, max_cols=width, caption="元の表の先頭") }}
   </div>
 
   <div class="form-actions">
@@ -105,7 +104,7 @@
     <small>Markdown のファイル名と、記録ファイルの見出しに使います。</small>
   </label>
 
-  {% call ui.card("列の対応づけ", "この段で決めるのは「出す列」と「役割」だけです。ほかは見出しと値から決めます。"
+  {% call ui_card("列の対応づけ", "この段で決めるのは「出す列」と「役割」だけです。ほかは見出しと値から決めます。"
                                   if summary else
                                   "Markdown に出す列にチェックを入れ、役割を選びます。キー・型・単位・出し方は値から決めます。") %}
     {% if summary %}
@@ -211,7 +210,7 @@
     <p class="hint">これまでの結果: {% for status, n in counts.items() %}{{ item_labels.get(status, status) }} {{ n }}件{% if not loop.last %}／{% endif %}{% endfor %}</p>
     {% endif %}
     {% if job %}
-      {{ ui.progress(job, url=(job_url if job_active else None), label="AI整形の進み具合") }}
+      {{ ui_progress(job, url=(job_url if job_active else None), label="AI整形の進み具合") }}
       <p class="hint" data-ai-detail>{% if job.progress %}OK {{ job.progress.ok or 0 }}／要確認 {{ job.progress.flagged or 0 }}／エラー {{ job.progress.error or 0 }}／ルールのみ {{ job.progress.rule_only or 0 }}{% endif %}</p>
       {% if job.status == 'failed' and job.message %}<div class="flash flash-error" role="alert">{{ job.message }}</div>{% endif %}
       {% if job_active %}
@@ -275,7 +274,7 @@
 {#- 段6「内容の確認」の中身。件数・問題・作られるファイル・データを見てから確定する。 -#}
 <div data-preview-page data-file-url="{{ url_for('tables.preview_file', import_id=imp.id) }}">
   <p class="hint">ファイル: {{ imp.file_name }}／表の名前: {{ spec.name }}
-    {%- if confirmed %}　{{ ui.badge("confirmed") }}（確定済み）{% endif %}</p>
+    {%- if confirmed %}　{{ ui_badge("confirmed") }}（確定済み）{% endif %}</p>
 
   <dl class="tbl-summary">
     <div><dt>記録件数</dt><dd>{{ stats.records or 0 }}件</dd></div>
@@ -425,29 +424,29 @@
       実際に捨てるのは static/app.js の ragDiscard → POST /tables/discard。 -#}
   <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた zip はその場でダウンロードしてください。</p>
 
-  {% call ui.step("file", 1, "ファイルを置く", open=True) %}
+  {% call ui_step("file", 1, "ファイルを置く", open=True) %}
     <form data-upload-form class="stack">
-      {{ ui.file_drop("file", accept=".xlsx,.xlsm,.csv,.tsv,.txt", label="一覧表のファイルをここにドラッグ＆ドロップ",
+      {{ ui_file_drop("file", accept=".xlsx,.xlsm,.csv,.tsv,.txt", label="一覧表のファイルをここにドラッグ＆ドロップ",
            hint=".xlsx / .xlsm / .csv / .tsv / .txt（月別集計のようなクロス集計の表には対応していません）") }}
     </form>
   {% endcall %}
 
-  {% call ui.step("source", 2, "読み取り方", open=True) %}
+  {% call ui_step("source", 2, "読み取り方", open=True) %}
     <p class="muted">上でファイルを置くと、ここに文字コード・区切り・シートが出ます。</p>
   {% endcall %}
-  {% call ui.step("layout", 3, "表の範囲", open=True) %}
+  {% call ui_step("layout", 3, "表の範囲", open=True) %}
     <p class="muted">見出しの行とデータの範囲を、色分けした先頭の行を見ながら決めます。</p>
   {% endcall %}
-  {% call ui.step("columns", 4, "列の対応づけ", open=True) %}
+  {% call ui_step("columns", 4, "列の対応づけ", open=True) %}
     <p class="muted">表の名前と、列ごとに「使うか」「役割」を決めます。ほかは見出しと値から決めます。</p>
   {% endcall %}
-  {% call ui.step("ai", 5, "AI整形（任意）", open=True) %}
+  {% call ui_step("ai", 5, "AI整形（任意）", open=True) %}
     <p class="muted">④で「経過の記録」にした列（例: 対応内容）があるときだけ使います。AI接続の設定は画面右上の［AI接続］にあります。</p>
   {% endcall %}
-  {% call ui.step("preview", 6, "内容の確認", open=True) %}
+  {% call ui_step("preview", 6, "内容の確認", open=True) %}
     <p class="muted">件数・問題の一覧と、作られる Markdown の中身をここで確認します。</p>
   {% endcall %}
-  {% call ui.step("done", 7, "確定してダウンロード（zip）", open=True) %}
+  {% call ui_step("done", 7, "確定してダウンロード（zip）", open=True) %}
     <p class="muted">確定すると、ここから zip をダウンロードできます。ダウンロードするとサーバーからデータが消えます。</p>
   {% endcall %}
 </div>

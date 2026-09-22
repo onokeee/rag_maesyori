@@ -324,7 +324,7 @@ def create_app(overrides: dict | None = None) -> Flask:
             text = f"このアドレスでは開けません。このアプリは {home_url} で開いてください"
             if request.accept_mimetypes.best == "application/json" or request.is_json:
                 return jsonify(error=text), 400
-            return render_template("error.html", code=400, host_refused=True, home_url=home_url), 400
+            return render_template("base.html", code=400, host_refused=True, home_url=home_url), 400
 
     @app.before_request
     def _refuse_cross_site_write():
@@ -350,7 +350,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         if request.accept_mimetypes.best == "application/json" or request.is_json:
             return jsonify(error="ほかのサイトのページから送られてきた操作に見えたため受け付けませんでした。"
                                  "取り込みの画面からやり直してください"), 403
-        return render_template("error.html", code=403), 403
+        return render_template("base.html", code=403), 403
 
     @app.errorhandler(404)
     def _not_found(_exc):
@@ -360,7 +360,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         if request.accept_mimetypes.best == "application/json" or request.is_json:
             return jsonify(error="このデータはサーバーに残っていません（ダウンロード済みか、削除されています）。"
                                  "取り込みの画面からやり直してください"), 404
-        return render_template("error.html", code=404), 404
+        return render_template("base.html", code=404), 404
 
     @app.errorhandler(413)
     def _too_large(_exc):
@@ -369,7 +369,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         text = f"{limit / 1024 / 1024:.0f}MB" if limit >= 1024 * 1024 else f"{limit / 1024:.0f}KB"
         if request.accept_mimetypes.best == "application/json" or request.is_json:
             return jsonify(error=f"送った内容が大きすぎます（1回に合計 {text} まで）。分けて送ってください"), 413
-        return render_template("error.html", code=413, limit=text), 413
+        return render_template("base.html", code=413, limit=text), 413
 
     @app.errorhandler(400)
     @app.errorhandler(405)
@@ -377,11 +377,11 @@ def create_app(overrides: dict | None = None) -> Flask:
         # 送信専用の URL をアドレス欄から開いた（405）など。Werkzeug の英語の画面を出さない（design.md 2）
         if request.accept_mimetypes.best == "application/json" or request.is_json:
             return jsonify(error="この操作は受け付けられませんでした。取り込みの画面から開き直してください"), exc.code
-        return render_template("error.html", code=400), exc.code
+        return render_template("base.html", code=400), exc.code
 
     @app.errorhandler(500)
     def _server_error(_exc):
-        return render_template("error.html", code=500), 500
+        return render_template("base.html", code=500), 500
 
     _recover_jobs(app)
     _purge_pending(app)

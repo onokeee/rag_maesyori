@@ -1,9 +1,174 @@
-<!doctype html>
+{#- 画面共通の部品。base.html を extends した画面から ui_step(...) のように裸の名前で呼ぶ -#}
+
+{#- 状態 → (表示語, 色)。ui_badge で出すものだけ（帳票・帳票の種類・ジョブ）。
+    AI整形の行の状態は aiproc/items.STATUS_LABELS、読み取った値の出どころは
+    templates/forms.html の part_review_block の SOURCE_LABELS と static/app.js（帳票取り込み）の SOURCES が持つ。 -#}
+{% set STATE_LABELS = {
+  "unread": ("読み取り前", "gray"), "reviewing": ("確認中", "amber"), "modified": ("修正中", "violet"),
+  "confirmed": ("確定済み", "green"),
+  "draft": ("作成中", "amber"), "active": ("使用中", "green"), "inactive": ("停止中", "gray"),
+  "queued": ("待ち", "gray"), "running": ("実行中", "blue"), "paused": ("一時停止", "amber"), "done": ("完了", "green"),
+  "failed": ("失敗", "red"), "cancelled": ("中止", "gray"), "interrupted": ("中断", "red"),
+} %}
+
+{#- エラー画面（1枚）の題。app/__init__.py が code（400/403/404/413/500）と、必要なら
+    host_refused・home_url・limit を渡す。枠（カード・題・戻るボタン）は共通で、題と本文だけが code で変わる。
+    本文は下の {% block content %} の既定値。 -#}
+{%- set TITLES = {400: "このページは開けません", 403: "この操作は受け付けませんでした", 404: "ページが見つかりません",
+                 413: "ファイルが大きすぎます", 500: "エラーが発生しました"} -%}
+
+{#- 1画面の中の「段」。①→②→③と画面を移らず、同じ画面に段が増えていく（利用者の指示 2026-09-20）。
+    使い方:
+      {% call ui_step("sheet", 2, "どのシートを使うか", open=false) %}…中身…{% endcall %}
+    開け閉て（済みの印・要約・開く／閉じる）は static/app.js の window.ragSections が行う。
+    id は ragSections.open("sheet") のように呼ぶときの名前。 -#}
+{% macro ui_step(id, no, title, open=False) -%}
+<section class="step{{ ' is-open' if open }}" data-step="{{ id }}" id="step-{{ id }}">
+  <div class="step-head">
+    <span class="step-no" aria-hidden="true"><span class="step-no-text">{{ no }}</span></span>
+    <h2 class="step-title">{{ title }}</h2>
+    <p class="step-summary" data-step-summary></p>
+    <span class="step-toggle" data-step-toggle hidden>開く</span>
+  </div>
+  <div class="step-body">
+    {{ caller() if caller else "" }}
+  </div>
+</section>
+{%- endmacro %}
+
+{#- カード。{% call ui_card("見出し", "説明") %}本文{% endcall %}。level は見出しの深さ -#}
+{% macro ui_card(title=None, subtitle=None, level=2) -%}
+<section class="card">
+  {%- if title %}
+  <div class="card-head">
+    <div>
+      <h{{ level }} class="card-title">{{ title }}</h{{ level }}>
+      {%- if subtitle %}<p class="card-subtitle">{{ subtitle }}</p>{% endif %}
+    </div>
+  </div>
+  {%- endif %}
+  {{ caller() if caller else "" }}
+</section>
+{%- endmacro %}
+
+{#- 状態タグ -#}
+{% macro ui_badge(state) -%}
+{%- set info = STATE_LABELS.get(state, (state, "gray")) -%}
+<span class="badge badge-{{ info[1] }} badge-{{ state }}">{{ info[0] }}</span>
+{%- endmacro %}
+
+{#- ジョブの進捗。job: {"id","status","progress" or "progress_json", "message"}、url を渡すと app.js が自動で更新 -#}
+{% macro ui_progress(job, url=None, label="進み具合") -%}
+{%- set prog = job.progress if job.progress is defined and job.progress is mapping else (job.progress_json if job.progress_json is mapping else {}) -%}
+{%- set done = prog.get("done", 0) or 0 -%}
+{%- set total = prog.get("total", 0) or 0 -%}
+{%- set pct = ((done * 100 / total) | round(0, 'floor') | int) if total else 0 -%}
+<div class="progress-box" {% if url %}data-job-url="{{ url }}"{% endif %} data-job-status="{{ job.status }}">
+  <div class="progress-head">
+    <span class="progress-label">{{ label }}</span>
+    <span class="progress-state">{{ ui_badge(job.status) }}</span>
+  </div>
+  <div class="progress" role="progressbar" aria-label="{{ label }}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ pct }}">
+    <div class="progress-bar{{ ' indeterminate' if not total and job.status == 'running' }}" style="width: {{ pct }}%"></div>
+  </div>
+  <p class="progress-text"><span data-job-count>{% if total %}{{ done }} / {{ total }}件{% endif %}</span> <span data-job-message>{{ job.message or "" }}</span></p>
+</div>
+{%- endmacro %}
+
+{#- セルグリッド（元のシートのプレビュー）。
+    rows: [{"index": 行番号, "cells": [文字列...], "kind": "header|data|subtotal|note|continuation|excluded|title|blank",
+            "hidden": bool, "strike": bool, "reason": str}] または 文字列の二重配列 -#}
+{% macro ui_data_grid(rows, max_cols=None, caption=None) -%}
+{%- set ncols = max_cols or (rows | map(attribute="cells") | map("length") | max if rows and rows[0] is mapping else (rows | map("length") | max if rows else 0)) -%}
+<div class="grid-wrap" tabindex="0" {% if caption %}aria-label="{{ caption }}"{% endif %}>
+  <table class="data-grid">
+    {%- if caption %}<caption class="sr-only">{{ caption }}</caption>{% endif %}
+    <thead><tr><th class="corner" scope="col"></th>
+      {%- for c in range(ncols) %}<th scope="col">{{ ui_col_letter(c + 1) }}</th>{% endfor %}
+    </tr></thead>
+    <tbody>
+    {%- for row in rows %}
+      {%- if row is mapping %}{% set idx, cells = row.index, row.cells %}{% else %}{% set idx, cells = loop.index, row %}{% endif %}
+      <tr class="row-{{ row.kind if row is mapping and row.kind else 'data' }}{{ ' row-hidden' if row is mapping and row.hidden }}{{ ' row-strike' if row is mapping and row.strike }}" data-row="{{ idx }}" {% if row is mapping and row.reason %}title="{{ row.reason }}"{% endif %}>
+        <th scope="row" class="rownum">{{ idx }}</th>
+        {%- for c in range(ncols) %}
+        {%- set v = cells[c] if c < cells|length else "" %}
+        <td>{{ v if v is not none else "" }}</td>
+        {%- endfor %}
+      </tr>
+    {%- endfor %}
+    </tbody>
+  </table>
+</div>
+{%- endmacro %}
+
+{#- 段の中に出す「処理中…」の1行（中身は static/app.js を通さず各画面の JS が書く） -#}
+{% macro ui_work_line(name) -%}
+<p class="work-line" data-work="{{ name }}" hidden><span class="spinner" aria-hidden="true"></span><span data-work-text></span></p>
+{%- endmacro %}
+
+{#- 元のシート・見本のシートの表示（views の _sheet_grids が作る grids）。
+    click_cells=True にすると、1回のクリックで表ごと項目にできるセルに目印を付ける（帳票登録）。 -#}
+{% macro ui_sheet_grid(grids, click_cells=False) -%}
+{%- for g in grids %}
+<div class="sheet-grid" data-sheet="{{ g.name }}" {% if not loop.first %}hidden{% endif %}>
+  {% if g.truncated %}<p class="hint">大きいシートのため、先頭の一部だけ表示しています。</p>{% endif %}
+  {% if g.images %}<p class="hint">このシートに画像が{{ g.images }}件あります。</p>{% endif %}
+  <div class="grid-wrap" tabindex="0" aria-label="シート {{ g.name }}">
+    <table class="data-grid">
+      <thead><tr><th class="corner"></th>{% for l in g.letters %}<th scope="col">{{ l }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for row in g.rows %}
+        <tr><th scope="row" class="rownum">{{ row.index }}</th>
+        {% for c in row.cells %}<td data-cell="{{ c.coord }}"{% if c.rowspan > 1 %} rowspan="{{ c.rowspan }}"{% endif %}{% if c.colspan > 1 %} colspan="{{ c.colspan }}"{% endif %}{% if c.label %} class="is-label"{% endif %}{% if click_cells and c.coord in g.click_cells %} data-table-head="1" title="この表を1つの項目にします"{% endif %}>{{ c.text }}</td>{% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{%- endfor %}
+{%- endmacro %}
+
+{#- 行の色の凡例（一覧表の範囲確認） -#}
+{% macro ui_grid_legend() -%}
+<ul class="grid-legend" aria-label="色の意味">
+  <li><span class="swatch row-header"></span>見出し</li>
+  <li><span class="swatch row-data"></span>データ</li>
+  <li><span class="swatch row-subtotal"></span>小計・合計</li>
+  <li><span class="swatch row-note"></span>注記</li>
+  <li><span class="swatch row-continuation"></span>継続行</li>
+  <li><span class="swatch row-excluded"></span>除外</li>
+  <li><span class="swatch row-hidden"></span>非表示・取り消し線</li>
+</ul>
+{%- endmacro %}
+
+{#- 列番号 → A, B, …, AA -#}
+{% macro ui_col_letter(n) -%}
+{%- set letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" -%}
+{%- if n > 26 %}{{ letters[((n - 1) // 26) - 1] }}{{ letters[(n - 1) % 26] }}{% else %}{{ letters[n - 1] }}{% endif -%}
+{%- endmacro %}
+
+{#- ファイル選択（ドラッグ＆ドロップ可）。accept: ".xlsx,.xlsm" -#}
+{% macro ui_file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False, fid=None) -%}
+{#- fid: 同じ name の置き場が1画面に2つあるとき（帳票登録の「新しく登録する」と「項目を直す」）に id を分ける -#}
+{%- set fid = fid or ("drop-" ~ name) -%}
+<div class="file-drop" data-file-drop>
+  <input type="file" id="{{ fid }}" name="{{ name }}" {% if accept %}accept="{{ accept }}"{% endif %} {{ 'multiple' if multiple }} required class="file-drop-input">
+  <label for="{{ fid }}" class="file-drop-zone">
+    <svg class="file-drop-icon" viewBox="0 0 48 48" aria-hidden="true"><path d="M24 31V11m0 0-8 8m8-8 8 8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 29v8a3 3 0 0 0 3 3h24a3 3 0 0 0 3-3v-8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>
+    <span class="file-drop-label">{{ label }}</span>
+    <span class="file-drop-or">または <span class="link-like">クリックしてファイルを選ぶ</span></span>
+    {%- if hint %}<span class="file-drop-hint">{{ hint }}</span>{% endif %}
+    <span class="file-drop-name" data-file-name aria-live="polite"></span>
+  </label>
+</div>
+{%- endmacro -%}<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=1280">
-  <title>{% block title %}帳票取り込み{% endblock %}｜RAG用Markdown作成</title>
+  <title>{% block title %}{{ TITLES.get(code, TITLES[500]) if code else "帳票取り込み" }}{% endblock %}｜RAG用Markdown作成</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -53,7 +218,70 @@
       </div>
       {% endif %}
     {% endwith %}
-    {% block content %}{% endblock %}
+    {% block content %}{% if code %}
+<div class="card narrow">
+  <div class="card-head">
+    <h1 class="card-title">{{ TITLES.get(code, TITLES[500]) }}</h1>
+  </div>
+
+  {% if code == 400 %}
+  {#- サーバーが待ち受けていない名前（別名・hosts の書き換えなど）で開かれた。同じアドレスのホームへ戻しても断られるので、開けるアドレスを示す -#}
+  {% if host_refused %}
+  <p>このアドレスでは開けません。このアプリは <strong>{{ home_url }}</strong> で開いてください。</p>
+  {% else %}
+  <p>このページは再読み込みや古いアドレスからは開けません。取り込みの画面から開き直してください。</p>
+  {% endif %}
+  <div class="btn-row">
+    {% if host_refused %}
+    <a class="btn primary" href="{{ home_url }}">{{ home_url }} を開く</a>
+    {% else %}
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+    {% endif %}
+  </div>
+
+  {% elif code == 403 %}
+  <p>ほかのサイトのページから送られてきた操作に見えたため、途中で止めました。データは変わっていません。</p>
+  <p class="hint">このアプリはログインが無く、社内LANの中だけで使うようにしてあります。そのため、ほかのサイトのページが利用者のブラウザを使って勝手に書き込むことを防いでいます。</p>
+  <p>心当たりがないときは、取り込みの画面からもう一度やり直してください。ブックマークや履歴から古い画面を開いたときにも出ることがあります。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+
+  {% elif code == 404 %}
+  {#- 帳票の種類・取り込み設定はダウンロードでは消えない（design.md §3.3）ので、設定の URL には別の文を出す -#}
+  {%- set p = request.path -%}
+  {%- if p.startswith("/form-types") -%}
+    {%- set back = (url_for('form_types.index'), "帳票登録へ") -%}
+  {%- elif p.startswith("/tables/templates") -%}
+    {%- set back = (url_for('tables.new'), "表の取り込みへ") -%}
+  {%- else -%}
+    {%- set back = None -%}
+  {%- endif %}
+  {% if back %}
+  <p>この設定は見つかりませんでした（削除された可能性があります）。URL が違うこともあります。</p>
+  {% else %}
+  <p>お探しの帳票／取り込みは見つかりませんでした。ダウンロード済み（渡したデータはサーバーに残しません）か、しばらく置いたままで捨てられたか、URL が違います。もう一度ファイルを取り込んでください。</p>
+  {% endif %}
+  <div class="btn-row">
+    {% if back %}<a class="btn" href="{{ back[0] }}">{{ back[1] }}</a>{% endif %}
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+
+  {% elif code == 413 %}
+  <p>1回に送れるのは合計 {{ limit }} までです。いま選んだファイルは合計でこれを超えたため、受け付けませんでした（何も保存していません）。</p>
+  <p>帳票をまとめて取り込むときは、ファイルを何回かに分けて選んでください。画像の多いブックは、不要な画像を消して保存し直すと小さくなります。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+
+  {% else %}
+  <p>処理の途中で問題が起きました。もう一度やり直してください。何度も同じところで止まるときは、起動した画面（コマンドプロンプト）に出ているメッセージを確認してください。</p>
+  <div class="btn-row">
+    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+  </div>
+  {% endif %}
+</div>
+{% endif %}{% endblock %}
   </main>
 
   <dialog id="confirmDialog" class="dialog" aria-labelledby="confirmDialogTitle">

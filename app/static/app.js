@@ -66,7 +66,7 @@ const JOB_LABELS = {
   failed: "失敗", cancelled: "中止", interrupted: "中断",
 };
 
-// components/_ui.html の progress(job, url) を自動で更新する
+// base.html の ui_progress(job, url) を自動で更新する
 function bindProgressBox(box) {
   const url = box.dataset.jobUrl;
   if (!url || JOB_FINISHED.includes(box.dataset.jobStatus)) return;

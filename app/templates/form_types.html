@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% import "ui.html" as ui %}
 {% block title %}帳票登録{% endblock %}
 {% block container_class %}wide{% endblock %}
 {#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("form_types.html", "part_x", ...)
@@ -17,7 +16,7 @@
   {% for p in patterns %}
     <tr data-pattern="{{ p.id }}">
       <td><strong>{{ p.name }}</strong></td>
-      <td>{{ ui.badge(p.status) }}</td>
+      <td>{{ ui_badge(p.status) }}</td>
       <td>{{ p.field_count }}</td>
       <td>
         <div class="btn-row">
@@ -53,7 +52,7 @@
   <div class="cluster build-top">
     <label class="field"><span>帳票の種類の名前</span>
       <input class="input" value="{{ pattern.name }}" data-rename="{{ url_for('form_types.rename', pattern_id=pattern.id) }}"></label>
-    <span>{{ ui.badge(pattern.status) }}</span>
+    <span>{{ ui_badge(pattern.status) }}</span>
     {#- 直した内容はその場で保存される（確定の操作は無い）。それが分かるように、保存のたびにここを書き換える
         （トーストは消えるので残る表示にする。利用者の指摘 2026-09-22「変更した内容を確定させるボタンがない」） -#}
     <span class="muted small" data-save-line aria-live="polite">変更はその場で保存されます（確定の操作はありません）</span>
@@ -101,7 +100,7 @@
           <p class="hint">この種類は、シートを覚えるようになる前に登録したものです。同じ帳票の Excel を一度置くと、
             そのシートの中身（セルの番地と文字）を覚えて、次からは置かずにこの画面が出ます。</p>
           <form class="stack" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
-            {{ ui.file_drop("book", fid="drop-book-edit", accept=".xlsx,.xlsm", label="この帳票のExcelをここにドラッグ＆ドロップ",
+            {{ ui_file_drop("book", fid="drop-book-edit", accept=".xlsx,.xlsm", label="この帳票のExcelをここにドラッグ＆ドロップ",
                             hint="置くとすぐシートが出て、登録のときと同じようにセルをクリックして直せます。" ~ snapshot_note) }}
           </form>
         {% else %}
@@ -110,7 +109,7 @@
           <button type="button" class="btn small" data-click-empty>値が空のまま項目にする</button>
           <button type="button" class="btn small ghost" data-click-cancel>選び直す</button>
         </div>
-        {{ ui.sheet_grid(grids, click_cells=True) }}
+        {{ ui_sheet_grid(grids, click_cells=True) }}
         {% endif %}
       </div>
     </section>
@@ -156,7 +155,7 @@
   </div>
 
   {# ---- 読み取りテスト ---- #}
-  {% call ui.card("読み取りテスト", ("いまの設定で、" ~ ("登録したときに覚えたシート" if remembered else "置いた帳票") ~ "を実際に読み取った結果です。") if book else none, level=3) %}
+  {% call ui_card("読み取りテスト", ("いまの設定で、" ~ ("登録したときに覚えたシート" if remembered else "置いた帳票") ~ "を実際に読み取った結果です。") if book else none, level=3) %}
     {% if not rows %}
       <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
     {% elif not test %}
@@ -184,23 +183,23 @@
   <p class="notice" role="note"><strong>Excel のファイルは保存しません。</strong>登録したときのシートの中身（セルの番地と文字）だけを覚えておき、あとから開いたときにその画面を出します。
     セルの色は覚えません（塗りの有る無しだけを、見出しの判定のために覚えます）。残るのは登録した帳票の種類（読み取りの設定と覚えたシート）だけです。</p>
 
-  {% call ui.step("list", 1, "登録済みの帳票の種類", open=True) %}
+  {% call ui_step("list", 1, "登録済みの帳票の種類", open=True) %}
       <div data-list-body>{{ list_html | safe }}</div>
   {% endcall %}
 
-  {% call ui.step("new", 2, "新しく登録する", open=True) %}
+  {% call ui_step("new", 2, "新しく登録する", open=True) %}
       <form id="newTypeForm" class="stack" enctype="multipart/form-data">
-        {{ ui.file_drop("book", accept=".xlsx,.xlsm", label="この種類の帳票のExcelをここにドラッグ＆ドロップ",
+        {{ ui_file_drop("book", accept=".xlsx,.xlsm", label="この種類の帳票のExcelをここにドラッグ＆ドロップ",
                         hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。1ファイル" ~ max_mb ~ "MBまで", multiple=False) }}
         <label class="field"><span>帳票の種類の名前<span class="req">*</span></span>
           <input name="name" class="input" placeholder="置いたファイルの名前が入ります" data-type-name required>
           <span class="hint">置くとすぐにシートが開きます。名前は下の画面で直せます。</span></label>
         <p class="hint" role="note">{{ snapshot_note }}</p>
       </form>
-      {{ ui.work_line("create") }}
+      {{ ui_work_line("create") }}
   {% endcall %}
 
-  {% call ui.step("build", 3, "読み取る欄をクリックする", open=True) %}
+  {% call ui_step("build", 3, "読み取る欄をクリックする", open=True) %}
       <div data-build-body>
         <div class="split">
           <section class="split-pane" aria-label="置いた帳票のシート">

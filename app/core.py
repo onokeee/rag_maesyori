@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 BUSY_TIMEOUT_MS = 5000
 
 # 帳票の状態（導出値）: unread=読み取り前 / reviewing=確認中 / confirmed=確定済み / modified=修正中
-# 画面に出す語は templates/components/_ui.html の STATE_LABELS が持つ
+# 画面に出す語は templates/base.html の STATE_LABELS が持つ
 _STATE_SQL = """CASE
     WHEN d.data_json IS NULL THEN 'unread'
     WHEN d.confirmed_json IS NULL THEN 'reviewing'

@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% import "ui.html" as ui %}
 {% block title %}帳票取り込み{% endblock %}
 {% block container_class %}wide{% endblock %}
 {#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("forms.html", "part_x", ...)
@@ -247,7 +246,7 @@
   <p class="muted">元のファイルを読み込めませんでした。値の確認は右の項目だけで行ってください。</p>
 {% endif %}
 <p class="hint">項目の入力欄を選ぶと、見出しのセル（橙）と値のセル（青）が光ります。入力欄を選んだ状態でセルをクリックすると、そのセルの値を入れます。</p>
-{{ ui.sheet_grid(grids) }}
+{{ ui_sheet_grid(grids) }}
 {%- endmacro %}
 
 {% macro part_finish() -%}
@@ -265,7 +264,7 @@
       <span class="item-sub">{{ d.file_name }}</span>
     </div>
     <div class="cluster">
-      {{ ui.badge(d.state) }}
+      {{ ui_badge(d.state) }}
       <button type="button" class="btn small" data-goto-doc="{{ d.id }}">読み取り結果を見る</button>
     </div>
   </li>
@@ -323,7 +322,7 @@
       実際に捨てるのは static/app.js の ragDiscard → POST /forms/discard。 -#}
   <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた Markdown はその場でダウンロードしてください。</p>
 
-  {% call ui.step("file", 1, "ファイルを置く", open=True) %}
+  {% call ui_step("file", 1, "ファイルを置く", open=True) %}
       {% if active_pattern_count == 0 %}
       <div class="notice" role="note">
         {% if pattern_count == 0 %}
@@ -335,25 +334,25 @@
       </div>
       {% endif %}
       <form id="uploadForm" class="stack" enctype="multipart/form-data">
-        {{ ui.file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
+        {{ ui_file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
                         hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて置くと、この画面で1件ずつ読み取って最後に zip にまとめます（" ~ max_files ~ "ファイル・合計" ~ max_mb ~ "MBまで）", multiple=True) }}
         <p class="hint">取り込んだデータはサーバーに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
       </form>
-      {{ ui.work_line("upload") }}
+      {{ ui_work_line("upload") }}
   {% endcall %}
 
-  {% call ui.step("type", 2, "帳票の種類とシート", open=True) %}
+  {% call ui_step("type", 2, "帳票の種類とシート", open=True) %}
       <div data-type-body><p class="muted">上で Excel を置くと、ここに帳票の種類と読み取るシートが出ます。まとめて置いた帳票には、同じ帳票の種類とシートを使います。</p></div>
-      {{ ui.work_line("read") }}
+      {{ ui_work_line("read") }}
   {% endcall %}
 
-  {% call ui.step("review", 3, "読み取り結果", open=True) %}
+  {% call ui_step("review", 3, "読み取り結果", open=True) %}
       <div data-review-body><p class="muted">読み取ると、ここに元のシートと読み取った値が並びます（まとめて置いた帳票は縦に全部並びます）。値はその場で直せます。</p></div>
   {% endcall %}
 
-  {% call ui.step("finish", 4, "確定してダウンロード", open=True) %}
+  {% call ui_step("finish", 4, "確定してダウンロード", open=True) %}
       <div data-finish-body><p class="muted">読み取り結果を確定すると、ここから Markdown をダウンロードできます。</p></div>
-      {{ ui.work_line("confirm") }}
+      {{ ui_work_line("confirm") }}
   {% endcall %}
 </div>
 {% endblock %}
