@@ -1,6 +1,6 @@
 """Flask アプリ（create_app）と設定（env ファイルを読み込む。旧 config.py）。起動は run.py。
 
-アプリ本体はこの app/ フォルダに全部ある: core.py（土台）・database.py・forms.py（帳票）・tables.py（一覧表）・
+アプリ本体はこの app/ フォルダに全部ある: core.py（土台。DBもここ）・forms.py（帳票）・tables.py（一覧表）・
 logproc.py（経過の記録）・aiproc.py（AI整形）・llm.py（AI接続）・views.py（画面）と templates/・static/。"""
 import os
 import secrets
@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from flask import Blueprint, Flask, abort, jsonify, redirect, render_template, request, url_for
 
-from app import database
+from app import core
 from app.views import SESSION_LIFETIME, form_types_bp, forms_bp, is_cross_site_write, tables_bp
 
 
@@ -294,7 +294,7 @@ def create_app(overrides: dict | None = None) -> Flask:
     for key in ("UPLOAD_DIR", "DATA_DIR", "TABLES_DIR"):
         app.config[key] = Path(app.config[key])
         app.config[key].mkdir(parents=True, exist_ok=True)
-    database.init_app(app)
+    core.init_app(app)
     if not app.config.get("ALLOWED_HOSTS"):
         app.config["ALLOWED_HOSTS"] = allowed_hosts()
     else:   # 設定から渡されたものも、Host と同じ形（ポート無し・小文字）に揃え、ループバックは必ず足す
@@ -453,7 +453,7 @@ def _cleanup_leftovers(app: Flask) -> None:
     """
     from app import core
     from app.core import remove_orphan_import_dirs, remove_orphan_uploads
-    from app.database import get_db
+    from app.core import get_db
 
     try:
         with app.app_context():

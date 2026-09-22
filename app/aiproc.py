@@ -28,7 +28,7 @@ from typing import Callable
 
 from flask import current_app
 
-from app import database
+from app import core
 from app import llm
 from app.core import JobCancelled, JobError, estimate_tokens, NO_LIVE_OWNER, request_pause
 from app.logproc import (
@@ -101,7 +101,7 @@ def nfkc(text) -> str:
 #   接続先を別のサーバーに変えたら、同じモデル名でも前の応答は使わない。
 # - 受け取ったらその場で1件ずつコミットする（落ちても払い済みの呼び出しを失わない）。
 # - 照合と描画は読み出すたびにやり直す（閾値や md の形を変えても再課金しない）。
-# - conn を渡さなければ database.connect() で開いて閉じる（app_context が必要）。
+# - conn を渡さなければ core.connect() で開いて閉じる（app_context が必要）。
 # ====================================================================================================
 
 def cache_key(messages: list[dict], model: str, params: dict | None = None, schema: dict | None = None,
@@ -122,7 +122,7 @@ def cache_key(messages: list[dict], model: str, params: dict | None = None, sche
 def _run(conn, fn):
     if conn is not None:
         return fn(conn)
-    own = database.connect()
+    own = core.connect()
     try:
         return fn(own)
     finally:
@@ -161,7 +161,7 @@ def put(key: str, raw_text: str, *, model: str, params: dict | None = None, stru
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (key, raw_text, json.dumps(parsed, ensure_ascii=False) if parsed is not None else None, model,
              json.dumps(params or {}, ensure_ascii=False, default=str), structured_mode, finish_reason,
-             tokens_in, tokens_out, latency_ms, database.now(), int(import_id) if import_id else None),
+             tokens_in, tokens_out, latency_ms, core.now(), int(import_id) if import_id else None),
         )
         c.commit()
     _run(conn, run)
@@ -284,7 +284,7 @@ def upsert_item(template_id: int, stage_id: str, row_key: str, *, status: str, t
     checks_json = json.dumps(checks, ensure_ascii=False) if checks is not None else None
 
     def run(c):
-        now = database.now()
+        now = core.now()
         # import_id が NULL の行（古いDBの分）も1行にまとめたいので ON CONFLICT ではなく「IS ?」で探して更新する
         updated = c.execute(
             """UPDATE ai_items SET template_version_id = ?, source_hash = ?, context_hash = ?, segments_hash = ?,
@@ -330,7 +330,7 @@ def mark_outdated(template_id: int, stage_id: str, current: dict[str, dict], tem
             if is_outdated(item, template_version_id, h.get("source_hash"), h.get("context_hash"),
                            h.get("segments_hash")):
                 c.execute("UPDATE ai_items SET status = 'outdated', updated_at = ? WHERE id = ?",
-                          (database.now(), item["id"]))
+                          (core.now(), item["id"]))
                 n += 1
         c.commit()
         return n
@@ -1520,7 +1520,7 @@ def load_rows_for_ai(import_id: int) -> ImportData:
 def _db(conn, fn):
     if conn is not None:
         return fn(conn)
-    own = database.connect()
+    own = core.connect()
     try:
         return fn(own)
     finally:
@@ -2111,7 +2111,7 @@ def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int |
     stats = {"total": 0, "done": 0, "ok": 0, "flagged": 0, "error": 0, "rule_only": 0, "skipped": 0,
              "already": 0, "cache_hits": 0, "calls": 0, "tokens_in": 0, "tokens_out": 0}
     todo: list[StageWork] = []
-    conn = database.connect()
+    conn = core.connect()
     try:
         for w in works:
             item = existing[w.stage_id].get(w.row_key)
@@ -2356,7 +2356,7 @@ def _ensure_trial_import(import_id: int, keys=()) -> None:
     試し実行はジョブではないので、AIの応答を待っている間に別のタブからダウンロード・削除されることがある。
     消えていたら結果を書かず、この試し実行で保存した生の応答も（どの結果からも使われていなければ）消す。
     """
-    conn = database.connect()
+    conn = core.connect()
     try:
         if not _import_gone(conn, import_id):
             return
@@ -2481,7 +2481,7 @@ def estimate(import_id: int, trial_stats: list[dict] | None = None, *, scope: st
     works = prepare_works(data, stage_ids)
     template_id = data.template_id or 0
     # DBは1回だけ開いて使い回す（行ごとに開き直すと1万行規模で数十秒かかる）
-    conn = database.connect()
+    conn = core.connect()
     try:
         existing = {sid: items_by_key(template_id, sid, conn, import_id=import_id)
                     for sid in {w.stage_id for w in works}}

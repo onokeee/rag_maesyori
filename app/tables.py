@@ -49,7 +49,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.xml.constants import COMMENTS_NS
 from openpyxl.xml.functions import fromstring
 
-from app import database
+from app import core
 from app.core import (
     UploadError,
     nfkc_keep_enclosed,
@@ -5230,7 +5230,7 @@ def build_zip(md_files: list[tuple[str, bytes]]) -> bytes:
 #
 # 取り込み設定は保存しない（利用者の指示 2026-09-20:「表の方には、取り込み設定を保持しておく機能はいらない」）。
 # 取り込みごとに列の対応づけを決め、その設定（TableSpec）を取り込みの行（spec_json）に持つ。
-# 接続は models.database.get_db()（リクエスト中もジョブの app_context 中も使える）。conn を渡せばそれを使う。
+# 接続は models.core.get_db()（リクエスト中もジョブの app_context 中も使える）。conn を渡せばそれを使う。
 # JSON の列は読み出し時に dict/list に直した値を別名（source, stats）で付け、spec_json は TableSpec にする。
 # ====================================================================================================
 
@@ -5238,7 +5238,7 @@ IMPORT_JSON_COLUMNS = {"source_json": "source", "stats_json": "stats"}
 
 
 def _db(conn=None) -> sqlite3.Connection:
-    return conn if conn is not None else database.get_db()
+    return conn if conn is not None else core.get_db()
 
 
 def _loads(text, default):
@@ -5280,7 +5280,7 @@ def create_import(file_name: str, file_hash: str, stored_path: str, source: dict
     （ai_items）がこの番号で取り込みを束ねている。design.md 3.2）。
     """
     db = _db(conn)
-    ts = database.now()
+    ts = core.now()
     cur = db.execute("""INSERT INTO table_imports (file_name, file_hash, stored_path, source_json, session_id,
                         status, created_at, updated_at)
                         VALUES (?, ?, ?, ?, ?, 'uploaded', ?, ?)""",
@@ -5312,7 +5312,7 @@ def update_import(import_id: int, conn=None, commit: bool = True, **columns) -> 
         sets.append(f"{column} = ?")
         args.append(value)
     sets.append("updated_at = ?")
-    args.append(database.now())
+    args.append(core.now())
     db = _db(conn)
     db.execute(f"UPDATE table_imports SET {', '.join(sets)} WHERE id = ?", (*args, import_id))
     if commit:
@@ -5629,7 +5629,7 @@ def _preview_signature(import_id: int, imp: dict, spec) -> str:
     """プレビューの md を作った入力（設定・行データ・AI の結果）の目印。"""
 
     rows_path = import_files(import_id)["rows"]
-    row = database.get_db().execute(
+    row = core.get_db().execute(
         # この取り込みの AI の結果だけ（usable_ai_results が読む範囲と同じ）。同じ設定の別の取り込みでは変わらない
         "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM ai_items WHERE template_id = ? AND import_id = ?",
         (imp.get("template_id") or 0, import_id)).fetchone()
@@ -5775,7 +5775,7 @@ def run_render(ctx, import_id: int) -> dict:
             file_count = len(files)
         stats = imp.get("stats") or {}
         stats["output"] = {"files": file_count, "records": len(records)}
-        update_import(import_id, status="confirmed", confirmed_at=database.now(), stats=stats)
+        update_import(import_id, status="confirmed", confirmed_at=core.now(), stats=stats)
         ctx.progress(phase="完了", done=3, total=3)
         return {"files": file_count, "records": len(records)}
     except Exception:

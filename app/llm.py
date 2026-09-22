@@ -1,7 +1,7 @@
 """OpenAI 互換 API の接続と、ヘッダーの「AI接続」からブラウザごとに保存する接続の設定。
 
 設定の出どころは3つで、この順に見る（項目ごと）:
-  1. そのブラウザが「AI接続」で保存したもの（database.ai_connections。持ち主は views.current_session_id）
+  1. そのブラウザが「AI接続」で保存したもの（core.ai_connections。持ち主は views.current_session_id）
   2. 前の版の画面が書いた data/model_settings.yaml（サーバー共通。もう書かない。あれば読むだけ）
   3. env ファイル（OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL / OPENAI_MODELS。手で組んだサーバー向け）
 画面の入力欄には 1 の値しか入れない（2・3 は「サーバー共通の設定」として、あることだけ知らせる）。
@@ -90,7 +90,7 @@ def read_yaml(name: str) -> dict:
 #
 # aiagent_minimal_rag_tougou の llm.py / models.py と同じ仕様:
 #   - 接続先とAPIキーは env（OPENAI_BASE_URL / OPENAI_API_KEY）が既定。
-#     ヘッダーの「AI接続」でそのブラウザが保存した値（database.ai_connections）があればそちらを優先する。
+#     ヘッダーの「AI接続」でそのブラウザが保存した値（core.ai_connections）があればそちらを優先する。
 #     前の版の画面が書いた data/model_settings.yaml（サーバー共通）は、その間（ブラウザ → yaml → env）。
 #   - URL はフルパス2本（…/chat/completions と …/models）で持つ。
 #   - 選べるモデルは「ブラウザが取得した候補 → yaml の候補 → env の OPENAI_MODELS」の順。使うモデルは必ず候補に入る。
@@ -154,9 +154,9 @@ def _browser() -> dict:
         return {}
     cached = getattr(g, "_ai_connection", None)
     if cached is None or cached[0] != sid:
-        from app import database
+        from app import core
 
-        cached = (sid, database.get_ai_connection(sid) or {})
+        cached = (sid, core.get_ai_connection(sid) or {})
         g._ai_connection = cached
     return cached[1]
 
@@ -299,7 +299,7 @@ def fetch_api_models(refresh: bool = False) -> list[str]:
 #   off       ● 未接続        まだ何も無い（キーか接続先が無い）
 #   unchecked ● 未確認        サーバー共通の設定（yaml / env）だけがあり、このブラウザではまだ確かめていない
 # 確認しに行くのは「保存したとき」「パネルを開いたとき」「AI整形を始めるとき」だけ（check_connection）。
-# 画面を開くだけでは行かない（お金がかかり、画面が待たされる）。結果は database.ai_connections に覚えて表示する。
+# 画面を開くだけでは行かない（お金がかかり、画面が待たされる）。結果は core.ai_connections に覚えて表示する。
 
 STATE_LABELS = {"ok": "接続中", "ng": "つながりません", "off": "未接続", "unchecked": "未確認"}
 _CHECK_PROMPT = "接続テストです。「OK」とだけ返してください。"
@@ -410,9 +410,9 @@ def save_browser(session_id: str, data: dict) -> dict:
         if not (8 <= len(key_new) <= 500):
             raise ValueError("APIキーの長さが不自然です。値を確かめてください。")
 
-    from app import database
+    from app import core
 
-    database.save_ai_connection(session_id, api_key=key_new or None, chat_url=chat_url, models_url=models_url,
+    core.save_ai_connection(session_id, api_key=key_new or None, chat_url=chat_url, models_url=models_url,
                                 model=model, models=models)
     forget_browser()
     reset_llm_client()   # 次のAI呼び出しから新しい接続先・キーを使う（再起動不要）
@@ -422,10 +422,10 @@ def save_browser(session_id: str, data: dict) -> dict:
 
 def clear_browser_key(session_id: str) -> dict:
     """［キーを消す］（共有PC）。そのブラウザの APIキーと確認の結果だけ消す。"""
-    from app import database
+    from app import core
 
     if session_id:
-        database.clear_ai_connection_key(session_id)
+        core.clear_ai_connection_key(session_id)
         forget_browser()
         reset_llm_client()
     return connection_status()
@@ -464,7 +464,7 @@ def record_check(session_id: str, ok: bool, steps: list[dict]) -> None:
     """確認の結果をそのブラウザの行に覚える（ヘッダーの表示のもと）。設定が無いときは覚えない。"""
     if not session_id or not is_configured():
         return
-    from app import database
+    from app import core
 
     failed = [s for s in steps if not s.get("ok")]
     if ok and not failed:
@@ -473,7 +473,7 @@ def record_check(session_id: str, ok: bool, steps: list[dict]) -> None:
         detail = failed[0]["detail"]   # 2つの手順が同じ理由で失敗（接続先に届かない等）なら1回だけ書く
     else:
         detail = "／".join(f"{s['name']}: {s['detail']}" for s in failed)
-    database.set_ai_connection_check(session_id, ok, detail)
+    core.set_ai_connection_check(session_id, ok, detail)
     forget_browser()
 
 

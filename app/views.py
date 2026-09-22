@@ -32,7 +32,7 @@ from flask import (
     flash,
 )
 
-from app import database as db
+from app import core as db
 from app.core import (
     FORM_MAX_MERGED_CELLS,
     UploadError,
@@ -135,7 +135,7 @@ from app.tables import (
 # 取り込んだ帳票・一覧表はそのブラウザのものとして持ち主を記録し、ほかのブラウザからは
 # 見えない・触れないようにする（views/forms.py・views/tables.py の 404）。
 # 「設定」のうち帳票の種類はみんなで使うので分けない。AI接続（APIキー・接続先）だけは、同じ id で
-# ブラウザごとに持つ（利用者の指示 2026-09-21「cookieでユーザー毎に登録内容をずっと保持」。llm.py・database.ai_connections）。
+# ブラウザごとに持つ（利用者の指示 2026-09-21「cookieでユーザー毎に登録内容をずっと保持」。llm.py・core.ai_connections）。
 # そのためクッキーは約1年もたせる（SESSION_LIFETIME。create_app が PERMANENT_SESSION_LIFETIME に入れる）。
 # 長くしても分かれ方は変わらない: id は uuid4 で、署名鍵（SECRET_KEY）付きの HttpOnly・SameSite=Lax のクッキー
 # にしか無く、ほかのブラウザからは推測も持ち出しもできない。
@@ -1083,7 +1083,7 @@ def forms_legacy(doc_id: int):
 # 置いた Excel のファイルはサーバーに残さない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ
 # 保持するようにしてほしい」）。受け取った要求の中で読み取り、中身（bytes）はそのまま捨てる。
 # その代わり、読み取ったシートの中身（セルの番地と文字・結合・太字・塗りの有る無し）を帳票の種類と一緒に
-# DB が覚える（database.pattern_books。利用者の指示 2026-09-22「再度シートを置かなくても、登録したときに
+# DB が覚える（core.pattern_books。利用者の指示 2026-09-22「再度シートを置かなくても、登録したときに
 # シートのセル番地と文字情報を記憶しておけばだせるはず」）。開き直したときはそれでシートを出し、同じ
 # クリックの操作で直せる。セルの色は覚えない（同日の指示「セル色の情報は不要」）。
 # 置いた直後の操作（セルのクリック・項目の作り直し・読み取りテスト）ではブラウザが同じ Excel を送り直して
@@ -1205,7 +1205,7 @@ def _request_book(pattern_id: int | None = None) -> tuple[Book | None, str]:
     """この操作で見ている Excel。戻り値: (ブック, エラー文)。
 
     順に探す: ブラウザが送ってきたファイル → さっき読んだブック（sha256。core.workbook_cache）→
-    その種類が覚えているシート（database.pattern_books）。
+    その種類が覚えているシート（core.pattern_books）。
     どれも無ければ (None, "")＝シートの無い画面（覚える前に登録した種類。項目の一覧と見出しの手直しはできる）。
     """
     storage = request.files.get(BOOK_FIELD)
@@ -2531,7 +2531,7 @@ def ai_control(import_id: int, action: str):
 # 利用者の指示（2026-09-21）:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる。
 # 全部空欄にしておいてcookieでユーザー毎に登録内容をずっと保持させるようにしてほしい」
 # 「AI接続はヘッダー上で、接続中 か 未接続 一目で分かるように」
-# 設定はブラウザごと（current_session_id ごと。llm.py・database.ai_connections）。URL は昔のまま /tables/ の下に
+# 設定はブラウザごと（current_session_id ごと。llm.py・core.ai_connections）。URL は昔のまま /tables/ の下に
 # 置いてある（画面には出ない。base.html の data-* 属性で渡す）。
 
 @tables_bp.app_context_processor
