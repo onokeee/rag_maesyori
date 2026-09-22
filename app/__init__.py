@@ -1,7 +1,7 @@
 """Flask アプリ（create_app）と設定（env ファイルを読み込む。旧 config.py）。起動は run.py。
 
 アプリ本体はこの app/ フォルダに全部ある: core.py（土台。DBもここ）・forms.py（帳票）・tables.py（一覧表）・
-logproc.py（経過の記録）・aiproc.py（AI整形）・llm.py（AI接続）・views.py（画面）と templates/・static/。"""
+ai.py（AI整形・AI接続・経過の記録）・views.py（画面）と templates/・static/。"""
 import os
 import secrets
 import socket

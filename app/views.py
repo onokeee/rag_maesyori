@@ -135,7 +135,7 @@ from app.tables import (
 # 取り込んだ帳票・一覧表はそのブラウザのものとして持ち主を記録し、ほかのブラウザからは
 # 見えない・触れないようにする（views/forms.py・views/tables.py の 404）。
 # 「設定」のうち帳票の種類はみんなで使うので分けない。AI接続（APIキー・接続先）だけは、同じ id で
-# ブラウザごとに持つ（利用者の指示 2026-09-21「cookieでユーザー毎に登録内容をずっと保持」。llm.py・core.ai_connections）。
+# ブラウザごとに持つ（利用者の指示 2026-09-21「cookieでユーザー毎に登録内容をずっと保持」。ai.py・core.ai_connections）。
 # そのためクッキーは約1年もたせる（SESSION_LIFETIME。create_app が PERMANENT_SESSION_LIFETIME に入れる）。
 # 長くしても分かれ方は変わらない: id は uuid4 で、署名鍵（SECRET_KEY）付きの HttpOnly・SameSite=Lax のクッキー
 # にしか無く、ほかのブラウザからは推測も持ち出しもできない。
@@ -1563,7 +1563,7 @@ def form_types_delete(pattern_id: int):
 # 範囲の決まり（利用者の判断）: 期間の置き換え・投入済みとの差分・取り消しはしない。取り込みごとに
 # その取り込みの記録だけから全 Markdown を作り、全ファイルを zip で渡す。クロス集計と名寄せ辞書は扱わない。
 # ダウンロードした取り込みのデータは、zip を送り終えたあとに消す（design.md 3.3・core.purge.purge_after_send）。
-# 読み込み・Markdown 作成・AI整形は core.jobs のジョブ（tables.pipeline / aiproc.runner）で動かし、
+# 読み込み・Markdown 作成・AI整形は core.jobs のジョブ（tables.pipeline / ai.runner）で動かし、
 # 同じ画面の中に進み具合を出す。表の範囲・列の段は取り込みの控え（tables.source_cache）を通して読む。
 # ====================================================================================================
 
@@ -2323,18 +2323,18 @@ def _ai_job(import_id: int) -> dict | None:
 
 def _ai_connection_ctx() -> dict:
     """AI整形の段に要る AI接続の状態（設定そのものはヘッダーの「AI接続」。ai_header_ctx）。"""
-    from app import llm
+    from app import ai
 
-    ready = llm.is_configured()
+    ready = ai.is_configured()
     external, model = False, ""
     if ready:
         try:
-            settings = llm.job_client_settings()
-            external = not llm.is_local_endpoint(settings.get("chat_url") or "")
+            settings = ai.job_client_settings()
+            external = not ai.is_local_endpoint(settings.get("chat_url") or "")
             model = settings.get("model") or ""
         except Exception:
             ready = False
-    return {"ai_ready": ready, "external": external, "model": model, "ai_state": llm.connection_status()}
+    return {"ai_ready": ready, "external": external, "model": model, "ai_state": ai.connection_status()}
 
 
 def _panel_ai(imp: dict):
@@ -2348,7 +2348,7 @@ def _panel_ai(imp: dict):
     reason = _not_ready_reason(imp, spec)
     if reason:
         return _locked(reason)
-    from app import aiproc as ai_items
+    from app import ai
 
     log_key = spec.log_stage.column
     col = spec.column(log_key)
@@ -2364,25 +2364,25 @@ def _panel_ai(imp: dict):
     html = render_part("tables.html", "part_ai", imp=imp, log_display=col.display if col else log_key, row_choices=row_choices,
         trial_keys=[k for k, _ in row_choices[:10]], job=ai_job, job_active=bool(ai_job and not ai_job.get("finished")),
         job_url=url_for("tables.api_job", job_id=ai_job["id"]) if ai_job else None,
-        counts=ai_items.counts(imp["template_id"], "log", import_id=import_id),
-        scopes=SCOPE_LABELS, item_labels=ai_items.STATUS_LABELS, **_ai_connection_ctx())
+        counts=ai.counts(imp["template_id"], "log", import_id=import_id),
+        scopes=SCOPE_LABELS, item_labels=ai.STATUS_LABELS, **_ai_connection_ctx())
     return _panel(html, note=f"経過の記録の列: {col.display if col else log_key}",
                   job=_job_info(ai_job, import_id) if ai_job and not ai_job.get("finished") else None)
 
 
 @tables_bp.post("/imports/<int:import_id>/ai/split-preview")
 def ai_split_preview(import_id: int):
-    from app import aiproc
-    from app.logproc import format_author, format_when, review_notes
-    from app.logproc import render_timeline
-    from app import llm
+    from app import ai
+    from app.ai import format_author, format_when, review_notes
+    from app.ai import render_timeline
+    from app import ai
 
     _load_import(import_id)
     row_key = str(_tables_payload().get("row_key") or "")
     try:
-        data = aiproc.load_rows_for_ai(import_id)
-        works = aiproc.prepare_works(data, ["log"], [row_key])
-    except aiproc.AIJobError as exc:
+        data = ai.load_rows_for_ai(import_id)
+        works = ai.prepare_works(data, ["log"], [row_key])
+    except ai.AIJobError as exc:
         return _json_error(str(exc))
     if not works:
         return _json_error("行が見つかりません")
@@ -2399,16 +2399,15 @@ def ai_split_preview(import_id: int):
     } for n, s in enumerate(parse.segments, start=1)]
     return jsonify({
         "row_key": row_key, "kind": parse.kind, "order": parse.order, "text": parse.text, "segments": segments,
-        "route": w.route, "reason": w.reason, "ai_ready": llm.is_configured(), "notes": review_notes(parse),
+        "route": w.route, "reason": w.reason, "ai_ready": ai.is_configured(), "notes": review_notes(parse),
         "timeline": render_timeline(parse, w.entity_label, glossary=(w.stage.glossary or None) if w.stage else None),
-        "sent_text": aiproc.messages_text(w.messages) if w.messages else "",
+        "sent_text": ai.messages_text(w.messages) if w.messages else "",
     })
 
 
 @tables_bp.post("/imports/<int:import_id>/ai/trial")
 def ai_trial(import_id: int):
-    from app import aiproc
-    from app import llm
+    from app import ai
 
     imp = _load_import(import_id)
     spec = _spec_for(imp)
@@ -2421,27 +2420,27 @@ def ai_trial(import_id: int):
     payload = _tables_payload()
     row_key = str(payload.get("row_key") or "")
     try:
-        settings = llm.job_client_settings()
-        if not llm.is_local_endpoint(settings.get("chat_url") or "") and not payload.get("confirm_external"):
+        settings = ai.job_client_settings()
+        if not ai.is_local_endpoint(settings.get("chat_url") or "") and not payload.get("confirm_external"):
             return _json_error("対応内容が外部のAIサービスに送信されます。確認のチェックを入れてください")
         with _TRIALS_LOCK:
             _TRIALS[import_id] += 1
         try:
-            data = aiproc.load_rows_for_ai(import_id)
-            result = aiproc.trial_row(import_id, row_key, stage_ids=["log"], data=data)
+            data = ai.load_rows_for_ai(import_id)
+            result = ai.trial_row(import_id, row_key, stage_ids=["log"], data=data)
         finally:
             with _TRIALS_LOCK:
                 _TRIALS[import_id] -= 1
                 if _TRIALS[import_id] <= 0:
                     del _TRIALS[import_id]
-    except llm.LLMNotConfigured:
+    except ai.LLMNotConfigured:
         return _json_error("AI接続が設定されていません。画面右上の「AI接続」で設定してください")
-    except llm.LLMCallError as exc:
+    except ai.LLMCallError as exc:
         if exc.kind == "fatal":
             # 接続先に届かない・キーが拒否された。ヘッダーの表示もそれに合わせる（確認しに行く手間はかけない）
-            llm.record_check(current_session_id(), False, [{"name": "試し実行", "ok": False, "detail": str(exc)}])
+            ai.record_check(current_session_id(), False, [{"name": "試し実行", "ok": False, "detail": str(exc)}])
         return _json_error(str(exc))
-    except aiproc.AIJobError as exc:
+    except ai.AIJobError as exc:
         return _json_error(str(exc))
     stage = next((s for s in result["stages"] if s.get("stage_id") == "log"), None) or {}
     accepted = stage.get("result") if stage.get("status") in ("ok", "flagged") else None
@@ -2456,35 +2455,32 @@ def ai_trial(import_id: int):
         "row_key": row_key, "status": stage.get("status"), "route": stage.get("route"), "reason": stage.get("reason"),
         "error": stage.get("error") or "", "points": ai_point_lines(accepted, spec.log_stage.glossary) if accepted else [],
         "timeline": stage.get("timeline") or [], "issues": issues, "markdown": md, "cached": stage.get("cached"),
-        "stats": aiproc.trial_stats([result]),
+        "stats": ai.trial_stats([result]),
     })
 
 
 @tables_bp.post("/imports/<int:import_id>/ai/estimate")
 def ai_estimate(import_id: int):
-    from app import aiproc as ai_estimate_mod
-    from app import aiproc
-    from app import llm
+    from app import ai
 
     _load_import(import_id)
     data = _tables_payload()
     scope = data.get("scope") if data.get("scope") in SCOPE_LABELS else "pending"
     try:
-        settings = llm.job_client_settings()
-        result = ai_estimate_mod.estimate(import_id, [s for s in data.get("trials") or [] if isinstance(s, dict)],
+        settings = ai.job_client_settings()
+        result = ai.estimate(import_id, [s for s in data.get("trials") or [] if isinstance(s, dict)],
                                           scope=scope, concurrency=_int(data.get("concurrency")) or None,
                                           settings=settings, stage_ids=["log"])
-    except llm.LLMNotConfigured:
+    except ai.LLMNotConfigured:
         return _json_error("AI接続が設定されていません")
-    except aiproc.AIJobError as exc:
+    except ai.AIJobError as exc:
         return _json_error(str(exc))
     return jsonify(result)
 
 
 @tables_bp.post("/imports/<int:import_id>/ai/run")
 def ai_run(import_id: int):
-    from app import aiproc
-    from app import llm
+    from app import ai
 
     imp = _load_import(import_id)
     data = _tables_payload()
@@ -2496,22 +2492,22 @@ def ai_run(import_id: int):
     scope = data.get("scope") if data.get("scope") in SCOPE_LABELS else "pending"
     concurrency = min(16, max(1, _int(data.get("concurrency"), 1) or 1))
     try:
-        settings = llm.job_client_settings()
-        if not llm.is_local_endpoint(settings.get("chat_url") or "") and not data.get("confirm_external"):
+        settings = ai.job_client_settings()
+        if not ai.is_local_endpoint(settings.get("chat_url") or "") and not data.get("confirm_external"):
             return _json_error("対応内容が外部のAIサービスに送信されます。確認のチェックを入れてください")
         # 始める前に接続を確かめる（利用者の指示: AI整形を始めるときに確認）。ヘッダーの表示もここで更新される。
         # つながらなければジョブを作らずに理由を返す（何百行も失敗させてから気づかせない）
-        ok, steps = llm.check_connection()
-        llm.record_check(current_session_id(), ok, steps)
+        ok, steps = ai.check_connection()
+        ai.record_check(current_session_id(), ok, steps)
         if not ok:
             failed = next((s for s in steps if not s.get("ok")), steps[-1])
             return _json_error(f"AIにつながりません（{failed['name']}: {failed['detail']}）。"
-                               "画面右上の「AI接続」を確認してください", ai_status=llm.connection_status())
-        job_id = aiproc.start_ai_job(import_id, scope=scope, concurrency=concurrency, stage_ids=["log"])
-    except llm.LLMNotConfigured:
+                               "画面右上の「AI接続」を確認してください", ai_status=ai.connection_status())
+        job_id = ai.start_ai_job(import_id, scope=scope, concurrency=concurrency, stage_ids=["log"])
+    except ai.LLMNotConfigured:
         return _json_error("AI接続が設定されていません。画面右上の「AI接続」で設定してください")
     return jsonify({"ok": True, "job_id": job_id, "job_url": url_for("tables.api_job", job_id=job_id),
-                    "ai_status": llm.connection_status()})
+                    "ai_status": ai.connection_status()})
 
 
 @tables_bp.post("/imports/<int:import_id>/ai/<action>")
@@ -2531,16 +2527,16 @@ def ai_control(import_id: int, action: str):
 # 利用者の指示（2026-09-21）:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる。
 # 全部空欄にしておいてcookieでユーザー毎に登録内容をずっと保持させるようにしてほしい」
 # 「AI接続はヘッダー上で、接続中 か 未接続 一目で分かるように」
-# 設定はブラウザごと（current_session_id ごと。llm.py・core.ai_connections）。URL は昔のまま /tables/ の下に
+# 設定はブラウザごと（current_session_id ごと。ai.py・core.ai_connections）。URL は昔のまま /tables/ の下に
 # 置いてある（画面には出ない。base.html の data-* 属性で渡す）。
 
 @tables_bp.app_context_processor
 def ai_header_ctx() -> dict:
     """どの画面のヘッダーにも「AI接続」の状態を出す。確認しには行かず、覚えている結果を出すだけ。"""
-    from app import llm
+    from app import ai
 
     try:
-        status = llm.connection_status()
+        status = ai.connection_status()
     except Exception as exc:   # DB が読めないときでも画面は出す
         status = {"state": "off", "state_label": "未接続", "ready": False, "checked_text": "", "check_detail": str(exc),
                   "sub_text": "クリックして設定", "panel_sub_text": "",
@@ -2556,19 +2552,19 @@ def ai_header_ctx() -> dict:
 @tables_bp.post("/ai-connection")
 def save_ai_connection():
     """ヘッダーの「AI接続」の［保存する］。保存したあと、その設定でつながるかを確かめる（結果はヘッダーに出る）。"""
-    from app import llm
+    from app import ai
 
     data = _tables_payload()
     sid = current_session_id()
     try:
-        llm.save_browser(sid, data)
+        ai.save_browser(sid, data)
     except ValueError as exc:
         return _json_error(str(exc))
     except sqlite3.Error as exc:
         return _json_error(f"保存できませんでした（{exc.__class__.__name__}）。少し待ってから、もう一度保存してください")
-    ok, steps = llm.check_connection()
-    llm.record_check(sid, ok, steps)
-    status = llm.connection_status()
+    ok, steps = ai.check_connection()
+    ai.record_check(sid, ok, steps)
+    status = ai.connection_status()
     if not status["ready"]:
         message = "保存しました（APIキーと接続先がそろうと接続を確かめます）"
     else:
@@ -2579,36 +2575,36 @@ def save_ai_connection():
 @tables_bp.post("/ai-connection/clear")
 def clear_ai_key():
     """［キーを消す］（共有PCで使い終わったとき）。このブラウザの APIキーだけ消す。接続先・モデルは残す。"""
-    from app import llm
+    from app import ai
 
-    status = llm.clear_browser_key(current_session_id())
+    status = ai.clear_browser_key(current_session_id())
     return jsonify({"ok": True, "message": "このブラウザのAPIキーを消しました", "status": status})
 
 
 @tables_bp.post("/ai-connection/models")
 def refresh_ai_models():
     """APIからモデル一覧を取得し、このブラウザの候補（入力欄の候補）として覚える。"""
-    from app import llm
+    from app import ai
 
     try:
-        catalog = llm.model_catalog(refresh=True)
+        catalog = ai.model_catalog(refresh=True)
     except Exception as exc:
-        return _json_error(f"モデル一覧を取得できませんでした: {llm.friendly_error(exc)}")
+        return _json_error(f"モデル一覧を取得できませんでした: {ai.friendly_error(exc)}")
     if catalog:
         db.save_ai_connection(current_session_id(), models=catalog)   # 入力欄の候補（datalist）として覚える
-        llm.forget_browser()
+        ai.forget_browser()
     return jsonify({"ok": True, "models": catalog, "message": f"APIからモデル一覧を取得しました（{len(catalog)}件）",
-                    "status": llm.connection_status()})
+                    "status": ai.connection_status()})
 
 
 @tables_bp.post("/ai-connection/test")
 def test_ai_connection():
     """接続の確認: モデル一覧の取得と、1回の短いチャット。パネルを開いたとき・［接続を確かめる］で呼ぶ。"""
-    from app import llm
+    from app import ai
 
-    ok, steps = llm.check_connection()
-    llm.record_check(current_session_id(), ok, steps)
-    return jsonify({"ok": ok, "steps": steps, "status": llm.connection_status()})
+    ok, steps = ai.check_connection()
+    ai.record_check(current_session_id(), ok, steps)
+    return jsonify({"ok": ok, "steps": steps, "status": ai.connection_status()})
 
 
 # ---- 内容の確認 ---------------------------------------------------------------------------

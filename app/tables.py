@@ -2597,7 +2597,7 @@ class LogStageSpec:
     incident: bool = True
     run_if: dict = field(default_factory=dict)
     limits: dict = field(default_factory=dict)
-    splitter: dict = field(default_factory=dict)  # logproc.SplitOptions.from_dict の形
+    splitter: dict = field(default_factory=dict)  # ai.SplitOptions.from_dict の形
     mask: list[str] = field(default_factory=lambda: ["phone", "email"])
 
 
@@ -2679,7 +2679,7 @@ def base_date_from(values: dict, spec) -> date | None:
     """経過の記録の相対日付（「翌週」など）を解くときの基準日。無ければ None（＝年不明）。
 
     探す順: 期間の日付列 → role='date' の列すべて → occurred_at。'-' でも '/' でも読む。
-    AI整形（aiproc.runner）と Markdown（tables.markdown）で同じ日付にするため、ここ1か所に置く。
+    AI整形（ai.runner）と Markdown（tables.markdown）で同じ日付にするため、ここ1か所に置く。
     """
     keys = [_sget(_sget(spec, "period", {}) or {}, "date_column", None)]
     for col in _sget(spec, "columns", []) or []:
@@ -2927,7 +2927,7 @@ _NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*|][^)]*\)[+*{]")
 
 def _log_stage_errors(stage: LogStageSpec) -> list[str]:
     """AI整形の設定（JSON で取り込んだときだけ画面に出ない項目）の問題点。"""
-    from app.logproc import normalize_rules
+    from app.ai import normalize_rules
 
     errors: list[str] = []
     bad = [m for m in stage.mask if not normalize_rules([m])]
@@ -2989,7 +2989,7 @@ def _is_int_at_least(value, low: int) -> bool:
 
 
 def _run_if_ok(rule, depth: int) -> bool:
-    """実行条件（aiproc.runner._run_if の形）の数値と入れ子を確かめる。"""
+    """実行条件（ai.runner._run_if の形）の数値と入れ子を確かめる。"""
     if not isinstance(rule, dict):
         return True   # 条件でないものは runner が「条件なし」として扱う
     if depth > 10:
@@ -4564,7 +4564,7 @@ class MdFile:
 
 def people_index_for(spec: TableSpec, records: list[dict]):
     """記入者の判定に使う人物の索引（人物一覧＋担当列の値）。"""
-    from app.logproc import PeopleIndex
+    from app.ai import PeopleIndex
 
     stage = spec.log_stage
     person_keys = [c.key for c in spec.columns if c.role == "person"]
@@ -4575,13 +4575,13 @@ def people_index_for(spec: TableSpec, records: list[dict]):
 
 
 def _base_date(values: dict, spec: TableSpec) -> date | None:
-    # AI整形（aiproc.runner）と同じ探し方にする。片方だけ日付が出て md が「年不明」になるのを防ぐ
+    # AI整形（ai.runner）と同じ探し方にする。片方だけ日付が出て md が「年不明」になるのを防ぐ
     return base_date_from(values, spec)
 
 
 def parse_log_cell(spec: TableSpec, values: dict, people=None):
     """ログ列のセルをルールで分割する（マスク → parse_log）。AI 整形も同じ関数で分割して ID をそろえる。"""
-    from app.logproc import PeopleIndex, SplitOptions, mask_text, parse_log
+    from app.ai import PeopleIndex, SplitOptions, mask_text, parse_log
 
     stage = spec.log_stage
     if stage is None:
@@ -4610,7 +4610,7 @@ def _ai_item(ai_results: dict | None, key: str) -> tuple[str | None, dict]:
 def _glossary(text: str, glossary: dict | None) -> str:
     if not glossary or not text:
         return text
-    from app.logproc import apply_glossary
+    from app.ai import apply_glossary
 
     return apply_glossary(text, glossary)
 
@@ -5018,7 +5018,7 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people)
         types = _segment_types(result)
     _eid, entity_name, entity_text = entity_display(values, spec)
     entity_label = entity_name or entity_text
-    from app.logproc import render_timeline
+    from app.ai import render_timeline
 
     timeline = render_timeline(parse, entity_label, types=types or None, glossary=stage.glossary or None)
     if parse.kind == "header_cell":
@@ -5601,18 +5601,17 @@ def usable_ai_results(import_id: int, imp: dict, spec) -> dict:
     """照合に通った AI の結果のうち、今の行の内容と合うものだけ（md 用の形 {key: {"status","result"}}）。"""
     if spec.log_stage is None or not imp.get("template_id"):
         return {}
-    from app import aiproc as ai_items
-    from app import aiproc
+    from app import ai
 
-    accepted = ai_items.results_for_render(imp["template_id"], "log", import_id=import_id)
+    accepted = ai.results_for_render(imp["template_id"], "log", import_id=import_id)
     if not accepted:
         return {}
-    data = aiproc.load_rows_for_ai(import_id)
-    by_key = ai_items.items_by_key(imp["template_id"], "log", import_id=import_id)
+    data = ai.load_rows_for_ai(import_id)
+    by_key = ai.items_by_key(imp["template_id"], "log", import_id=import_id)
     out = {}
-    for w in aiproc.prepare_works(data, ["log"], list(accepted)):
+    for w in ai.prepare_works(data, ["log"], list(accepted)):
         item = by_key.get(w.row_key)
-        if item is None or ai_items.is_outdated(item, item.get("template_version_id"), w.source_hash, w.context_hash,
+        if item is None or ai.is_outdated(item, item.get("template_version_id"), w.source_hash, w.context_hash,
                                                 w.segments_hash):
             continue
         out[w.row_key] = {"status": "ok", "result": accepted[w.row_key]}
