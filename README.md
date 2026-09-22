@@ -15,7 +15,35 @@ python run.py
 
 http://127.0.0.1:5000 を開きます（既定はサーバーの中からだけ開けます）。初回は `instance/app.db` を作り、古い DB は起動時に自動で移行します。
 
-社内LANの他のPCから開くときは、`env.example` を `env`（ドット無し）にコピーして `HOST="0.0.0.0"` を有効にしてください。AI（OpenAI互換API）の接続先・APIキーも同じファイルか、画面右上の［AI接続］で設定します。AI なしでも最後まで使えます。
+## 設定（env ファイル）
+
+社内LANの他のPCから開くときや、AI（OpenAI互換API）を使うときは、リポジトリ直下に `env`（ドット無し）という名前でファイルを作り、下をコピーして値を入れてください。AI の接続先・APIキーは画面右上の［AI接続］でブラウザごとに設定することもできます（そちらが優先されます）。**AI なしでも最後まで使えます。**
+
+```sh
+# このファイルを "env"（ドット無し）という名前でコピーして値を入れてください。
+# 画面右上の「AI接続」でブラウザごとに保存した値がある場合は、そちらが優先されます（空欄の項目だけ、ここの値を使います）。
+
+# OpenAI互換APIの接続先（Ollama等なら http://127.0.0.1:11434/v1）
+export OPENAI_BASE_URL="https://api.openai.com/v1"
+export OPENAI_API_KEY="<API_KEY>"
+
+# 画面で候補を登録していないときの選択肢（; または , 区切り）と既定モデル
+export OPENAI_MODELS="gpt-5.6-sol;gpt-5.6-luna;gpt-4.1;gpt-4o-mini"
+export OPENAI_MODEL="gpt-5.6-sol"
+
+# 社内LANのサーバーで動かすとき（JupyterLab のターミナルから起動する）
+# export HOST="0.0.0.0"          # 既定 127.0.0.1（このサーバーの中からしか開けない）
+# export PORT="5000"
+# export ALLOWED_HOSTS="rag-server;rag.example.local"   # 社内DNSの別名で開くとき（; か , 区切り。* で全許可）
+# export JOB_WORKERS="3"         # 読み込み・AI整形を同時に動かす本数（1〜8）。数人で使うなら 3 前後
+
+# 任意
+# export OPENAI_TEMPERATURE="0"
+# export OPENAI_TOP_P=""
+# export OPENAI_MAX_TOKENS=""
+# export LLM_RATE_LIMIT_RETRIES="3"
+# export LLM_RATE_LIMIT_MAX_WAIT="20"
+```
 
 ## 画面
 
@@ -34,5 +62,4 @@ app/                   アプリ本体（views・forms・tables・aiproc・llm�
 app/templates/         画面（HTML）
 app/static/            app.js・style.css
 requirements.txt       必要なパッケージ
-env.example            環境変数の見本
 ```
