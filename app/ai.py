@@ -36,8 +36,8 @@ import yaml
 from flask import current_app, g, has_request_context, session
 from openai import OpenAI
 
-from app import core
-from app.core import (estimate_tokens, JobCancelled, JobError, NO_LIVE_OWNER, REMOVE_RETRIES,
+import app as core
+from app import (estimate_tokens, JobCancelled, JobError, NO_LIVE_OWNER, REMOVE_RETRIES,
                       REMOVE_RETRY_WAIT, request_pause)
 from app.extract import base_date_from
 
@@ -1784,7 +1784,7 @@ def _browser() -> dict:
         return {}
     cached = getattr(g, "_ai_connection", None)
     if cached is None or cached[0] != sid:
-        from app import core
+        import app as core
 
         cached = (sid, core.get_ai_connection(sid) or {})
         g._ai_connection = cached
@@ -2040,9 +2040,9 @@ def save_browser(session_id: str, data: dict) -> dict:
         if not (8 <= len(key_new) <= 500):
             raise ValueError("APIキーの長さが不自然です。値を確かめてください。")
 
-    from app import core
+    import app as core
 
-    core.save_ai_connection(session_id, api_key=key_new or None, chat_url=chat_url, models_url=models_url,
+    core.save_ai_connection_row(session_id, api_key=key_new or None, chat_url=chat_url, models_url=models_url,
                                 model=model, models=models)
     forget_browser()
     reset_llm_client()   # 次のAI呼び出しから新しい接続先・キーを使う（再起動不要）
@@ -2052,7 +2052,7 @@ def save_browser(session_id: str, data: dict) -> dict:
 
 def clear_browser_key(session_id: str) -> dict:
     """［キーを消す］（共有PC）。そのブラウザの APIキーと確認の結果だけ消す。"""
-    from app import core
+    import app as core
 
     if session_id:
         core.clear_ai_connection_key(session_id)
@@ -2094,7 +2094,7 @@ def record_check(session_id: str, ok: bool, steps: list[dict]) -> None:
     """確認の結果をそのブラウザの行に覚える（ヘッダーの表示のもと）。設定が無いときは覚えない。"""
     if not session_id or not is_configured():
         return
-    from app import core
+    import app as core
 
     failed = [s for s in steps if not s.get("ok")]
     if ok and not failed:
@@ -4546,7 +4546,7 @@ def execute_work(work: StageWork, settings: dict, mode: str, stop_event: threadi
 def start_ai_job(import_id: int, scope: str = "pending", concurrency: int | None = None, stage_ids=None,
                  row_keys=None, model: str | None = None) -> int:
     """画面から呼ぶ：設定を固定してジョブを登録する（app_context 内）。"""
-    from app.core import start_job
+    from app import start_job
 
     settings = job_client_settings(model=model)
     params = {"import_id": import_id, "scope": scope, "concurrency": concurrency, "stage_ids": stage_ids,

@@ -55,8 +55,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.xml.constants import COMMENTS_NS
 from openpyxl.xml.functions import fromstring
 
-from app import core
-from app.core import escape_md_line, estimate_tokens, JobCancelled, JobError, join_blocks, md_bullet, md_filename, nfkc_keep_enclosed, start_job, upload_path, UploadError
+import app as core
+from app import escape_md_line, estimate_tokens, JobCancelled, JobError, join_blocks, md_bullet, md_filename, nfkc_keep_enclosed, start_job, upload_path, UploadError
 
 
 ####################################################################################################
@@ -9389,7 +9389,7 @@ def md_paths(import_id: int) -> list[Path]:
 
 
 def _write_md_dir(target: Path, files: list[MdFile]) -> None:
-    from app.core import path_limit
+    from app import path_limit
 
     tmp = target.with_name(target.name + ".new")
     limit = path_limit()
