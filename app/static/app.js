@@ -1352,7 +1352,9 @@ window.ragAiHeader = (() => {
 //
 // 置いた Excel はサーバーに残らない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ保持する」）。
 // ブラウザ側で選んだファイル（bookFile）を持ち続け、セルのクリック・項目の削除・見出しの手直し・
-// 使用開始のたびに一緒に送る。サーバーは受け取った Excel を読み取るだけで保存しない。
+// 使用開始のたびに一緒に送る。サーバーは受け取った Excel を読み取るだけでファイルは保存しない。
+// 登録したときのシートの中身（セルの番地と文字）はサーバーが種類と一緒に覚えている（2026-09-22）ので、
+// 開き直した種類（bookFile が無い）でもシートは出るし、ファイルを送らなくてもクリックできる。
 (function () {
   "use strict";
 
@@ -1388,10 +1390,11 @@ window.ragAiHeader = (() => {
   const buildBody = page.querySelector("[data-build-body]");
   const buildName = page.querySelector('#step-build [data-step-summary]');
   let patternId = null;
-  let bookFile = null;     // いま画面で見ている帳票の Excel（ブラウザの中だけ。サーバーには残らない）
+  let bookFile = null;     // いま画面で見ている帳票の Excel（ブラウザの中だけ。サーバーにファイルは残らない）
 
   // ---- サーバーへ送るとき、いまの Excel を一緒に持たせる ----
-  // 送るものが無いときは、さっき読んでもらったブックの合図（sha256）だけを送る
+  // 送るものが無いときは、さっき読んでもらったブックの合図（sha256）だけを送る。合図も無ければ何も足さない
+  // （サーバーは、その種類が覚えているシートを使う。開き直した種類はこれで足りる）
   function withBook(data) {
     const form = data || new FormData();
     if (bookFile) {
@@ -1405,12 +1408,32 @@ window.ragAiHeader = (() => {
   }
 
   // ---- 返ってきた断片を画面に入れる ----
+  // 断片を入れ替える前後で、左のシートのスクロール位置・選んでいたシート・ページの位置を保つ。
+  // 保たないと、値のセルをクリックして項目が増えるたびにシートが一番上へ戻ってしまう（利用者の指摘 2026-09-22）
+  const sheetPane = () => buildBody.querySelector(".split-pane.sticky .split-pane-body");
+  function rememberSheetView() {
+    const pane = sheetPane();
+    const tab = buildBody.querySelector("[data-sheet-tab][aria-selected='true']");
+    return { top: pane ? pane.scrollTop : 0, left: pane ? pane.scrollLeft : 0,
+             tab: tab ? tab.dataset.sheetTab : null, page: window.scrollY };
+  }
+  function restoreSheetView(keep) {
+    if (keep.tab !== null) {
+      const tab = buildBody.querySelector('[data-sheet-tab="' + keep.tab + '"]');
+      if (tab && tab.getAttribute("aria-selected") !== "true") tab.click();
+    }
+    const pane = sheetPane();
+    if (pane) { pane.scrollTop = keep.top; pane.scrollLeft = keep.left; }
+    if (Math.abs(window.scrollY - keep.page) > 1) window.scrollTo(window.scrollX, keep.page);
+  }
+
   function apply(res, opts) {
     if (res.list_html !== undefined && listBody) listBody.innerHTML = res.list_html;
     if (res.html !== undefined) {
+      const keep = (opts && opts.scroll) ? null : rememberSheetView();
       buildBody.innerHTML = res.html;
-      // 開き直した種類は左の欄が Excel の置き場になる（登録のときと同じ見た目・同じ操作）。置き場の
-      // ドラッグ＆ドロップは共通の bindFileDrop に任せる（断片を入れ替えたので、ここで結び直す）
+      // 開き直した種類は覚えたシートがそのまま出る。シートを覚える前に登録した種類だけ、左の欄が
+      // Excel の置き場になる。置き場のドラッグ＆ドロップは共通の bindFileDrop に任せる（断片を入れ替えたので、ここで結び直す）
       buildBody.querySelectorAll("[data-file-drop]").forEach(window.App.bindFileDrop);
       const root = buildBody.querySelector("#cellBuilder");
       patternId = root ? Number(root.dataset.pattern) : patternId;
@@ -1419,6 +1442,7 @@ window.ragAiHeader = (() => {
       bindBuilder();
       sections.done("new", nameInput ? nameInput.value : "");
       sections.open("build", !!(opts && opts.scroll));
+      if (keep) restoreSheetView(keep);
     }
     if (res.message) toast(res.message, "ok");
     (res.errors || []).forEach((m) => toast(m, "err"));
@@ -1532,7 +1556,8 @@ window.ragAiHeader = (() => {
     }
   }
 
-  // ---- この帳票の Excel を置く（登録済みの種類を開き直したとき・別の書き方の帳票に替えるとき） ----
+  // ---- この帳票の Excel を置く（別の書き方の帳票に替えるとき・シートを覚える前に登録した種類を開いたとき） ----
+  // 置くとサーバーが覚えているシートもその Excel のものに入れ替わる（ファイルは保存しない）
   page.addEventListener("submit", async (event) => {
     const form = event.target.closest("[data-book-form]");
     if (!form) return;
