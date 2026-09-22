@@ -3080,10 +3080,11 @@ def test_form_type_status_and_delete(app, client, sample_dir, tmp_path):
     with app.app_context():
         assert len(db.list_patterns()) == 2      # 置き直しで種類は増えない
 
+    # 「使用を停止」は無い（利用者の指示 2026-09-22）。使わない種類は削除する
     res = client.post(f"/form-types/{pattern_id}/status", json={"status": "inactive"})
-    assert "使用を停止しました" in res.get_json()["message"]
+    assert res.status_code == 400
     with app.app_context():
-        assert db.load_pattern(pattern_id).status == "inactive"
+        assert db.load_pattern(pattern_id).status == "active"
 
     res = client.post(f"/form-types/{pattern_id}/delete")
     assert "を削除しました" in res.get_json()["message"]

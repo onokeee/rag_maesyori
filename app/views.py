@@ -1454,16 +1454,15 @@ def change_status(pattern_id: int):
     pattern = _get_pattern(pattern_id)
     payload = request.get_json(force=True, silent=True) or {}
     status = payload.get("status") or request.form.get("status")
-    if status not in ("active", "inactive"):
+    # 画面から出来るのは「使用開始」だけ（「使用を停止」のボタンは無くした。利用者の指示 2026-09-22）。
+    # 使わなくなった種類は削除する。項目を全部消したときだけ、delete_field が使用中を解く
+    if status != "active":
         abort(400)
-    if status == "active" and not pattern.fields:
+    if not pattern.fields:
         return jsonify(error="読み取る項目がありません。シートで見出しのセルと値のセルをクリックしてください"), 400
     db.set_pattern_status(pattern_id, status)
-    if status == "active":
-        # 残すのは設定だけ（Excel はもともと置いていない）。画面はそのまま続けて使える
-        message = f"「{pattern.name}」の使用を開始しました。帳票取り込みの候補に出ます"
-    else:
-        message = f"「{pattern.name}」の使用を停止しました。帳票取り込みの候補に出なくなります"
+    # 残すのは設定だけ（Excel はもともと置いていない）。画面はそのまま続けて使える
+    message = f"「{pattern.name}」の使用を開始しました。帳票取り込みの候補に出ます"
     return jsonify(ok=True, status=status, html=_build_html(pattern_id, _request_book()[0]),
                    list_html=_list_html(), message=message)
 

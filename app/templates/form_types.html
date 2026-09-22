@@ -22,9 +22,7 @@
       <td>
         <div class="btn-row">
           <button type="button" class="btn small" data-open-type="{{ p.id }}">項目を見る・直す</button>
-          {% if p.status == 'active' %}
-          <button type="button" class="btn small" data-set-status="inactive" data-pattern="{{ p.id }}">使用を停止</button>
-          {% else %}
+          {% if p.status != 'active' %}
           <button type="button" class="btn small" data-set-status="active" data-pattern="{{ p.id }}">使用開始</button>
           {% endif %}
           <button type="button" class="btn danger-outline small" data-delete-type="{{ p.id }}"
@@ -56,9 +54,7 @@
       <input class="input" value="{{ pattern.name }}" data-rename="{{ url_for('form_types.rename', pattern_id=pattern.id) }}"></label>
     <span>{{ ui.badge(pattern.status) }}</span>
     <span class="spacer"></span>
-    {% if pattern.status == 'active' %}
-      <button type="button" class="btn" data-set-status="inactive" data-pattern="{{ pattern.id }}">使用を停止</button>
-    {% else %}
+    {% if pattern.status != 'active' %}
       <button type="button" class="btn primary" data-set-status="active" data-pattern="{{ pattern.id }}">使用開始</button>
     {% endif %}
     <button type="button" class="btn danger-outline" data-delete-type="{{ pattern.id }}"
