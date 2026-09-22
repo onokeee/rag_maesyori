@@ -39,12 +39,13 @@
 {%- endmacro %}
 
 {% macro part_build() -%}
-{#- 読み取る欄をクリックする欄（HTML の断片）。置いた Excel はサーバーに残さないので、
-    シートが出るのは「いまブラウザが持っているファイルを送ってきたとき」だけ。 -#}
+{#- 読み取る欄をクリックする欄（HTML の断片）。Excel のファイルはサーバーに残さないが、登録したときの
+    シートの中身（セルの番地と文字）は種類と一緒に覚えている（views._stored_book）ので、開き直しても
+    シートは出る。出ないのは、覚える前に登録した種類だけ（そのときは置き場を出す）。 -#}
 <div id="cellBuilder" data-pattern="{{ pattern.id }}"
      data-add-url="{{ url_for('form_types.add_field', pattern_id=pattern.id) }}"
      {#- いま画面に出ているブックの合図（sha256）。ブラウザがファイルを持っていないとき、
-         これを送れば「さっき読んだブック」を指せる（サーバーは読み取った結果だけを覚えている） -#}
+         これを送れば「さっき読んだブック」を指せる（無ければサーバーは覚えたシートを使う） -#}
      data-book="{{ book.file_hash if book }}">
 
   {% for note in notes %}<p class="warn">{{ note }}</p>{% endfor %}
@@ -71,12 +72,18 @@
       <div class="split-pane-head">
         <h3>置いた帳票のシート{% if book %} <small class="muted">{{ book.file_name }}</small>{% endif %}
           {% if grids %}
-          {#- 書き方の違う同じ帳票（「設備No」と「設備番号」など）に替えて同じ欄をクリックすると、どちらでも読めるようになる -#}
+          {#- 書き方の違う同じ帳票（「設備No」と「設備番号」など）に替えて同じ欄をクリックすると、どちらでも読めるようになる。
+              置き替えると、覚えているシートもその Excel のものに入れ替わる -#}
           <form class="inline" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
-            <label class="link-like small" title="書き方の違う同じ帳票に替えて同じ欄をクリックすると、どちらの書き方でも読めるようになります">別のExcelに替える<input type="file" name="book" accept=".xlsx,.xlsm" hidden></label>
+            <label class="link-like small" title="書き方の違う同じ帳票に替えて同じ欄をクリックすると、どちらの書き方でも読めるようになります。置き替えると、覚えておくシートもその Excel のものに入れ替わります（ファイルは保存しません）">別のExcelに替える<input type="file" name="book" accept=".xlsx,.xlsm" hidden></label>
           </form>
           {% endif %}
         </h3>
+        {% if remembered %}
+        {#- 覚えたシートで出している（Excel は要らない）。いつ置いたものかを書く -#}
+        <p class="hint" data-remembered-book>登録したときに覚えたシートです（{{ remembered.file_name }}、{{ remembered.saved_at[:16] | replace('T', ' ') }} に置いたもの）。
+          Excel のファイルは保存していません。セルの番地と文字だけを覚えています（セルの色は覚えません）。</p>
+        {% endif %}
         {% if grids | length > 1 %}
         <div class="tabs" role="tablist">
           {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
@@ -85,11 +92,13 @@
       </div>
       <div class="split-pane-body">
         {% if not grids %}
-          {#- 置いた Excel はサーバーに残していないので、開き直したときはここに置き場を出す。
-              置くと登録のときと同じ画面（左にシート・右に項目）になり、同じ操作で直せる（利用者の指示 2026-09-22） -#}
+          {#- 覚えたシートが無い種類（シートを覚えるようになる前に登録したもの）だけ、ここに置き場を出す。
+              置くとシートを覚え、登録のときと同じ画面（左にシート・右に項目）になり、次からは置かずに開ける -#}
+          <p class="hint">この種類は、シートを覚えるようになる前に登録したものです。同じ帳票の Excel を一度置くと、
+            そのシートの中身（セルの番地と文字）を覚えて、次からは置かずにこの画面が出ます。</p>
           <form class="stack" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
             {{ ui.file_drop("book", fid="drop-book-edit", accept=".xlsx,.xlsm", label="この帳票のExcelをここにドラッグ＆ドロップ",
-                            hint="置くとすぐシートが出て、登録のときと同じようにセルをクリックして直せます。サーバーには保存しません（直す間だけ読んで、すぐ捨てます）") }}
+                            hint="置くとすぐシートが出て、登録のときと同じようにセルをクリックして直せます。" ~ snapshot_note) }}
           </form>
         {% else %}
         <p class="hint" data-click-hint aria-live="polite">見出しのセルをクリックしてください。</p>
@@ -123,7 +132,7 @@
                 {% if r.label != r.field.display_name %}<small class="muted">探す見出し: {{ r.label }}</small>{% endif %}
                 {% if r.field.data_type == 'table' %}<small class="muted">表（1行＝1明細）</small>{% endif %}</th>
               <td>
-                {% if not book %}<span class="muted">—（左にExcelを置くと、この設定で読んだ値が出ます）</span>
+                {% if not book %}<span class="muted">—（左にExcelを置くと、この設定で読んだ値が出ます。シートを覚える前に登録した種類です）</span>
                 {% elif r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
                 {% else %}<span class="pre">{{ r.value | field_text | truncate(120) }}</span>{% if r.field.unit %} {{ r.field.unit }}{% endif %}{% endif %}
                 {% if r.warning %}<div class="warn">{{ r.warning }}</div>{% endif %}
@@ -143,12 +152,12 @@
   </div>
 
   {# ---- 読み取りテスト ---- #}
-  {% call ui.card("読み取りテスト", "いまの設定で、置いた帳票を実際に読み取った結果です。" if book else none, level=3) %}
+  {% call ui.card("読み取りテスト", ("いまの設定で、" ~ ("登録したときに覚えたシート" if remembered else "置いた帳票") ~ "を実際に読み取った結果です。") if book else none, level=3) %}
     {% if not rows %}
       <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
     {% elif not test %}
-      <p class="muted">いま Excel を置いていないので、読み取りテストはできません。設定は残っています。
-        確かめたいときは、左の欄に同じ帳票の Excel を置いてください。</p>
+      <p class="muted">この種類はシートを覚える前に登録したもので、いま Excel も置いていないので、読み取りテストはできません。
+        設定は残っています。確かめたいときは、左の欄に同じ帳票の Excel を置いてください（置くとシートを覚えます）。</p>
     {% else %}
       <p>{{ test.total }}項目中 <strong>{{ test.found }}</strong>項目が見つかりました（シート: {{ test.sheets | join('、') }}）。</p>
       <details class="fold" {% if test.found < test.total %}open{% endif %}>
@@ -166,8 +175,10 @@
 
 <div id="typesPage" data-steps-open data-create-url="{{ url_for('form_types.create') }}">
 
-  {#- 帳票登録は Excel を預からない（利用者の指示 2026-09-21）。読み取ってすぐ捨て、設定だけ残す。 -#}
-  <p class="notice" role="note">置いた Excel は<strong>サーバーに残しません</strong>。読み取る欄を決める間だけ読んで、すぐ捨てます。残るのは登録した帳票の種類（読み取りの設定）だけです。</p>
+  {#- 帳票登録は Excel のファイルを預からない（利用者の指示 2026-09-21）。読み取ってすぐ捨て、設定と
+      シートの中身（セルの番地と文字。色は無し）だけを覚える（利用者の指示 2026-09-22）。「何も残さない」とは言わない。 -#}
+  <p class="notice" role="note"><strong>Excel のファイルは保存しません。</strong>登録したときのシートの中身（セルの番地と文字）だけを覚えておき、あとから開いたときにその画面を出します。
+    セルの色は覚えません（塗りの有る無しだけを、見出しの判定のために覚えます）。残るのは登録した帳票の種類（読み取りの設定と覚えたシート）だけです。</p>
 
   {% call ui.step("list", 1, "登録済みの帳票の種類", open=True) %}
       <div data-list-body>{{ list_html | safe }}</div>
@@ -180,7 +191,7 @@
         <label class="field"><span>帳票の種類の名前<span class="req">*</span></span>
           <input name="name" class="input" placeholder="置いたファイルの名前が入ります" data-type-name required>
           <span class="hint">置くとすぐにシートが開きます。名前は下の画面で直せます。</span></label>
-        <p class="hint" role="note">置いた Excel は項目を作る間だけ読み取ります。<strong>サーバーには保存しません</strong>（残るのは読み取りの設定だけ）。</p>
+        <p class="hint" role="note">{{ snapshot_note }}</p>
       </form>
       {{ ui.work_line("create") }}
   {% endcall %}

@@ -775,10 +775,12 @@ def path_limit() -> int | None:
 # 設定だけ保持するようにしてほしい」）。ブラウザはファイルを選んだまま持っているので、セルを
 # クリックするたびに同じ Excel を送り直してくる。そのたびにブックを開き直すと（結合セル・図形を
 # 1つずつ作るので）数秒かかることがあるため、開いた結果（WorkbookInfo）だけをここに置く。
+# 登録したときのシートの中身（セルの番地と文字）は帳票の種類と一緒に DB が覚える
+# （database.pattern_books。2026-09-22）。ここはそれを開いた結果も同じように短い間だけ置く。
 #
 # 決まりごと:
 #   - ディスクには何も書かない。Excel の中身（bytes）も持たない（開いた結果だけ）。
-#   - アプリを終えれば消える（残るのは読み取りの設定だけ、という約束を崩さない）。
+#   - アプリを終えれば消える（残るのは読み取りの設定と覚えたシートだけ、という約束を崩さない）。
 #   - 鍵は「ブラウザの作業場所（session_id）＋ファイルの sha256」。ほかの人が置いたブックは見えない。
 #   - 古いもの・多すぎるもの・大きすぎるものは、置いた順に落とす。
 #   - waitress は1つのプロセスを複数のスレッドで回すので、出し入れは錠（Lock）の中で行う。
@@ -794,13 +796,18 @@ MAX_BYTES = 64 * 1024 * 1024
 
 @dataclass
 class Book:
-    """ブラウザが置いた Excel を読み取った結果（中身そのものは持たない）。"""
+    """ブラウザが置いた Excel を読み取った結果（中身そのものは持たない）。
+
+    帳票の種類が覚えているシート（database.pattern_books。views._stored_book が戻す）も同じ形で持つ。
+    そのときの size は覚えた JSON の大きさ、saved_at は置いた日時。
+    """
 
     file_name: str
     file_hash: str
     size: int                      # 元の Excel の大きさ（置ける量を数えるため）
     info: object                   # excel.workbook.WorkbookInfo
     used_at: float = field(default_factory=time.monotonic)
+    saved_at: str = ""             # 帳票の種類と一緒に覚えたシートなら、その Excel を置いた日時
 
 
 _books: dict[tuple[str, str], Book] = {}
@@ -1442,7 +1449,9 @@ SHARED_TABLES = ("llm_calls",)
 # 「設定」の表。取り込みを捨てる片付け（purge_* / sweep_stale / purge_session）では決して消さない。
 # ai_connections はブラウザごとの AI接続（APIキー・接続先。利用者の指示 2026-09-21「ずっと保持」）で、
 # 帳票・一覧表と同じ session_id を持ち主に持つが、その人の取り込みを捨てても残す。
-SETTINGS_TABLES = ("patterns", "pattern_sheets", "pattern_fields", "ai_connections")
+# pattern_books は帳票の種類が覚えているシートの中身（セルの番地と文字。Excel のファイルではない。
+# 利用者の指示 2026-09-22）で、種類と一緒にしか消えない。
+SETTINGS_TABLES = ("patterns", "pattern_sheets", "pattern_fields", "pattern_books", "ai_connections")
 
 
 def _tables_with_column(db, column: str) -> list[str]:

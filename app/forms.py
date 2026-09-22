@@ -7,6 +7,7 @@ Excel のセル構造の読み込み（旧 excel/）、ラベル探索による�
 from __future__ import annotations
 
 import io
+import json
 import posixpath
 import re
 import unicodedata
@@ -653,7 +654,11 @@ class Cell:
     inline: tuple[str, str] | None
     bold: bool = False
     filled: bool = False
-    fill: str = ""  # 塗りつぶし色の識別キー（"rgb:FFDDEEFF" / "theme:4:0.6" など。塗りなしは ""）
+    # 塗りつぶしの「組」の番号（同じブックの中で同じ色なら同じ番号。1, 2, 3… の見つけた順。塗りなしは 0）。
+    # 色そのもの（RGB・テーマ色）は持たない。使うのは「塗ってあるか」と「2つのセルが同じ塗りか」だけ
+    # （見出し・列見出し・ラベル欄の終わりの判定）で、セルの色は覚えない（利用者の指示 2026-09-22
+    # 「セル色の情報は不要」）。覚えたシート（to_json）にもこの番号しか書かない
+    fill: int = 0
     alt_norm: str = ""  # 先頭の項番を除いたラベル（「３．暫定対策」→「暫定対策」）。無ければ ""
     part_norms: tuple[str, ...] = ()  # 「ライン／工程」のように2つのラベルをまとめた見出しの各部分
     fmt_unit: str = ""  # 数値のセルの表示形式に書かれた単位（「#,##0"分"」→「分」）。無ければ ""
@@ -678,16 +683,31 @@ class Cell:
         return self.matches(label_norms) or (self.inline is not None and self.inline[0] in label_norms)
 
 
+def make_cell(row: int, col: int, max_row: int, max_col: int, value, text: str, *,
+              bold: bool = False, filled: bool = False, fill: int = 0, fmt_unit: str = "") -> Cell:
+    """値と書式（太字・塗り・表示形式の単位）から Cell を作る。比較用の項目（norm・inline・alt_norm・part_norms）はここで決める。
+
+    ブックを開いたとき（SheetGrid）も、覚えたシート（WorkbookInfo.from_json）から戻すときも、ここを通るので
+    同じ Cell になる。
+    """
+    label_like = _label_like(value, text)
+    return Cell(
+        row=row, col=col, max_row=max_row, max_col=max_col,
+        value=value, text=text, norm=normalize_label(text), inline=split_inline(text),
+        bold=bold, filled=filled, fill=fill,
+        alt_norm=section_stripped(text) if label_like else "",
+        part_norms=label_parts(text) if label_like else (),
+        fmt_unit=fmt_unit,
+    )
+
+
 class SheetGrid:
-    def __init__(self, ws):
+    def __init__(self, ws, fill_groups: dict[str, int] | None = None):
+        """openpyxl のシートから作る。fill_groups はブックの中で塗りの色に番号を振る帳（シートをまたいで共有する）。"""
         self.name: str = ws.title
         self.hidden: bool = getattr(ws, "sheet_state", "visible") != "visible"
-        self._bounds: dict[tuple[int, int], tuple[int, int, int, int]] = {}
-        for rng in ws.merged_cells.ranges:
-            bounds = (rng.min_row, rng.min_col, rng.max_row, rng.max_col)
-            for r in range(rng.min_row, rng.max_row + 1):
-                for c in range(rng.min_col, rng.max_col + 1):
-                    self._bounds[(r, c)] = bounds
+        self._set_bounds((rng.min_row, rng.min_col, rng.max_row, rng.max_col) for rng in ws.merged_cells.ranges)
+        groups = fill_groups if fill_groups is not None else {}
 
         self.cells: dict[tuple[int, int], Cell] = {}
         self.max_row = self.max_col = 0
@@ -698,20 +718,52 @@ class SheetGrid:
             top, left, bottom, right = self.bounds(r, c)
             if (top, left) != (r, c):
                 continue
-            self.cells[(r, c)] = Cell(
-                row=r, col=c, max_row=bottom, max_col=right,
-                value=xl.value, text=text, norm=normalize_label(text), inline=split_inline(text),
+            self._add(make_cell(
+                r, c, bottom, right, xl.value, text,
                 bold=bool(xl.font and xl.font.b),
                 filled=bool(xl.fill and xl.fill.fill_type == "solid"),
-                fill=fill_key(xl),
-                alt_norm=section_stripped(text) if _label_like(xl.value, text) else "",
-                part_norms=label_parts(text) if _label_like(xl.value, text) else (),
+                fill=fill_group(fill_key(xl), groups),
                 fmt_unit=(format_unit(xl.number_format)
                           if isinstance(xl.value, (int, float)) and not isinstance(xl.value, bool) else ""),
-            )
-            self.max_row = max(self.max_row, bottom)
-            self.max_col = max(self.max_col, right)
+            ))
+        self._index()
 
+    @classmethod
+    def from_cells(cls, name: str, hidden: bool, merged, cells) -> SheetGrid:
+        """覚えたシート（WorkbookInfo.from_json）から作る。merged は結合範囲 (top, left, bottom, right) の並び。"""
+        grid = cls.__new__(cls)
+        grid.name = name
+        grid.hidden = bool(hidden)
+        grid._set_bounds(merged)
+        grid.cells = {}
+        grid.max_row = grid.max_col = 0
+        for cell in cells:
+            top, left, _, _ = grid.bounds(cell.row, cell.col)
+            if (top, left) != (cell.row, cell.col) or not cell.text:
+                continue
+            grid._add(cell)
+        grid._index()
+        return grid
+
+    def _set_bounds(self, merged) -> None:
+        self._bounds: dict[tuple[int, int], tuple[int, int, int, int]] = {}
+        for top, left, bottom, right in merged:
+            bounds = (int(top), int(left), int(bottom), int(right))
+            for r in range(bounds[0], bounds[2] + 1):
+                for c in range(bounds[1], bounds[3] + 1):
+                    self._bounds[(r, c)] = bounds
+
+    def merged_bounds(self) -> list[tuple[int, int, int, int]]:
+        """結合範囲（top, left, bottom, right）の一覧。覚えたシートに書くため。"""
+        return sorted(set(self._bounds.values()))
+
+    def _add(self, cell: Cell) -> None:
+        self.cells[(cell.row, cell.col)] = cell
+        self.max_row = max(self.max_row, cell.max_row)
+        self.max_col = max(self.max_col, cell.max_col)
+
+    def _index(self) -> None:
+        """ラベルの照合用の索引（cells が揃ったあとに作る）。"""
         self._by_norm: dict[str, list[Cell]] = defaultdict(list)
         self._by_inline: dict[str, list[Cell]] = defaultdict(list)
         self._by_base: dict[str, list[str]] = defaultdict(list)  # 括弧書きを除いたラベル → 元のキー
@@ -793,7 +845,7 @@ def _label_like(value, text: str) -> bool:
 
 
 def fill_key(xl) -> str:
-    """セルの塗りつぶし色を比較用の文字列にする（ラベル欄と同じ色かの判定に使う）。"""
+    """セルの塗りつぶし色を比較用の文字列にする。ブックを開いている間だけ使い、fill_group で番号に替えて捨てる。"""
     fill = getattr(xl, "fill", None)
     if fill is None or fill.fill_type != "solid":
         return ""
@@ -804,6 +856,79 @@ def fill_key(xl) -> str:
         return f"{color.type}:{color.value}"
     except (AttributeError, TypeError, ValueError):
         return "solid"
+
+
+def fill_group(key: str, groups: dict[str, int]) -> int:
+    """塗りの色を、そのブックの中だけで通じる番号（1, 2, 3… 見つけた順）にする。塗りなしは 0。
+
+    セルの色は覚えない（利用者の指示 2026-09-22「セル色の情報は不要」）。読み取りが使うのは
+    「同じ塗りか」だけなので、番号が同じなら同じ色、で足りる。色の文字列（key）はここで捨てる。
+    """
+    if not key:
+        return 0
+    return groups.setdefault(key, len(groups) + 1)
+
+
+# ---- 覚えたシート（スナップショット）-------------------------------------------------------
+# 帳票登録は Excel のファイルを保存しない（利用者の指示 2026-09-21）。その代わり、登録したときの
+# シートの中身（セルの番地と文字・結合・太字・塗りの有る無し・型のある値）を JSON にして帳票の種類と
+# 一緒に持ち（database.pattern_books）、あとから開いたときに同じ画面を出す（利用者の指示 2026-09-22
+# 「登録したときにシートのセル番地と文字情報を記憶しておけばだせるはず」）。
+# 書くのは読み取り（クリックで項目を作る・読み取りテスト）に要るものだけ。色・列幅・罫線・数式・
+# 画像の中身は書かない。
+
+SNAPSHOT_VERSION = 1
+# 覚えたシートの JSON でのセルの並び（配列。名前を毎セル書かないため）:
+#   [行, 列, 結合の下端の行, 結合の右端の列, 値, 太字, 塗りあり, 塗りの組の番号, 表示形式の単位]
+# 値は文字列・数値・真偽はそのまま、日付などは {"t": 型, "v": 文字} で型を付ける（_value_to_json）。
+
+
+def _value_to_json(value):
+    """セルの値を JSON に書ける形にする。型のある値（日時・日付・時刻・時間）は型を付けて、戻すときに同じ型にする。"""
+    if isinstance(value, (bool, int, float, str)) or value is None:
+        return value
+    if isinstance(value, datetime):
+        return {"t": "datetime", "v": value.isoformat()}
+    if isinstance(value, date):
+        return {"t": "date", "v": value.isoformat()}
+    if isinstance(value, time):
+        return {"t": "time", "v": value.isoformat()}
+    if isinstance(value, timedelta):
+        return {"t": "timedelta", "v": value.total_seconds()}
+    return cell_text(value)   # それ以外（openpyxl の特別な型など）は画面に出す文字で覚える
+
+
+def _value_from_json(raw):
+    if isinstance(raw, dict):
+        kind, text = raw.get("t"), raw.get("v")
+        try:
+            if kind == "datetime":
+                return datetime.fromisoformat(text)
+            if kind == "date":
+                return date.fromisoformat(text)
+            if kind == "time":
+                return time.fromisoformat(text)
+            if kind == "timedelta":
+                return timedelta(seconds=float(text))
+        except (TypeError, ValueError):
+            pass
+        return str(text if text is not None else "")
+    return raw
+
+
+def _cell_to_json(cell: Cell) -> list:
+    return [cell.row, cell.col, cell.max_row, cell.max_col, _value_to_json(cell.value),
+            int(cell.bold), int(cell.filled), int(cell.fill or 0), cell.fmt_unit or ""]
+
+
+def _cell_from_json(item: list) -> Cell | None:
+    row, col, max_row, max_col, raw, bold, filled, fill, fmt_unit = (list(item) + [0] * 9)[:9]
+    value = _value_from_json(raw)
+    text = cell_text(value)
+    if not text:
+        return None
+    return make_cell(int(row), int(col), max(int(max_row), int(row)), max(int(max_col), int(col)), value, text,
+                     bold=bool(bold), filled=bool(filled), fill=int(fill or 0), fmt_unit=str(fmt_unit or ""))
 
 
 @dataclass
@@ -823,6 +948,50 @@ class WorkbookInfo:
     def images_in(self, sheet_names: list[str]) -> list[dict]:
         return [img for img in self.images if img["sheet"] in sheet_names]
 
+    # ---- 覚えたシート（JSON）との行き来 ----
+
+    def to_snapshot(self) -> dict:
+        """覚えたシートの中身（JSON にできる dict）。to_json はこれを文字列にする。"""
+        sheets = []
+        for grid in self.grids.values():
+            sheets.append({
+                "name": grid.name,
+                "hidden": bool(grid.hidden),
+                "merged": [list(b) for b in grid.merged_bounds()],
+                "cells": [_cell_to_json(c) for c in grid.text_cells()],
+                "uncached": [list(rc) for rc in sorted(self.uncached_formulas.get(grid.name, ()))],
+            })
+        return {
+            "version": SNAPSHOT_VERSION,
+            "date1904": bool(self.date1904),
+            "sheets": sheets,
+            # 画像は「どのシートのどこに何件あるか」だけ（detect_images が返すもの。画像の中身は読んでいない）
+            "images": [dict(img) for img in self.images_in(self.sheet_names)],
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_snapshot(), ensure_ascii=False, separators=(",", ":"))
+
+    @classmethod
+    def from_snapshot(cls, data: dict) -> WorkbookInfo:
+        """to_snapshot の dict から戻す。セルの比較用の項目（norm など）は make_cell が同じ決まりで作り直す。"""
+        grids: dict[str, SheetGrid] = {}
+        uncached: dict[str, set[tuple[int, int]]] = {}
+        for sheet in data.get("sheets") or []:
+            name = str(sheet.get("name") or "")
+            cells = [c for c in (_cell_from_json(item) for item in sheet.get("cells") or []) if c is not None]
+            grids[name] = SheetGrid.from_cells(name, sheet.get("hidden", False), sheet.get("merged") or [], cells)
+            formulas = {(int(r), int(c)) for r, c in sheet.get("uncached") or []}
+            if formulas:
+                uncached[name] = formulas
+        images = [dict(img) for img in data.get("images") or [] if isinstance(img, dict) and img.get("sheet") in grids]
+        return cls(path=None, grids=grids, images=images, date1904=bool(data.get("date1904")),
+                   uncached_formulas=uncached)
+
+    @classmethod
+    def from_json(cls, text: str) -> WorkbookInfo:
+        return cls.from_snapshot(json.loads(text))
+
 
 def load_workbook_info(path: str | Path | io.BytesIO) -> WorkbookInfo:
     """ブックを読む。パスのほか、メモリの中のブック（BytesIO）も渡せる。
@@ -840,7 +1009,8 @@ def load_workbook_info(path: str | Path | io.BytesIO) -> WorkbookInfo:
         warnings.simplefilter("ignore")
         wb = load_workbook(source(), data_only=True)
     try:
-        grids = {ws.title: SheetGrid(ws) for ws in wb.worksheets}
+        fill_groups: dict[str, int] = {}   # 塗りの色 → 番号。ブックの中で共有し、開き終わったら捨てる
+        grids = {ws.title: SheetGrid(ws, fill_groups) for ws in wb.worksheets}
         date1904 = wb.epoch == MAC_EPOCH
     finally:
         wb.close()

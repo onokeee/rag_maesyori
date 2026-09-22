@@ -1080,12 +1080,15 @@ def forms_legacy(doc_id: int):
 # pattern.clicks が見本の値から決めるので、画面には出さない。
 # 保存しても使用中にはしない。使用中になるのは［使用開始］を押したときだけ。
 #
-# 置いた Excel はサーバーに残さない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ
-# 保持するようにしてほしい」）。受け取った要求の中で読み取り、中身はそのまま捨てる。ブラウザは
-# 選んだファイルを持ったままなので、セルのクリック・項目の作り直し・読み取りテストのたびに同じ
-# Excel を送り直してくる。開き直すのが遅いので、読み取った結果だけを core.workbook_cache が
-# 短い間メモリに覚えておく（ディスクには書かない）。
-# 残すのは設定だけ: シート名・見出しのセル・値のセル・読み取る向き・項目名。
+# 置いた Excel のファイルはサーバーに残さない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ
+# 保持するようにしてほしい」）。受け取った要求の中で読み取り、中身（bytes）はそのまま捨てる。
+# その代わり、読み取ったシートの中身（セルの番地と文字・結合・太字・塗りの有る無し）を帳票の種類と一緒に
+# DB が覚える（database.pattern_books。利用者の指示 2026-09-22「再度シートを置かなくても、登録したときに
+# シートのセル番地と文字情報を記憶しておけばだせるはず」）。開き直したときはそれでシートを出し、同じ
+# クリックの操作で直せる。セルの色は覚えない（同日の指示「セル色の情報は不要」）。
+# 置いた直後の操作（セルのクリック・項目の作り直し・読み取りテスト）ではブラウザが同じ Excel を送り直して
+# くることがある。開き直すのが遅いので、読み取った結果だけを core.workbook_cache が短い間メモリに覚えておく。
+# 残すのは設定（シート名・見出しのセル・値のセル・読み取る向き・項目名）と覚えたシートだけ。
 # ====================================================================================================
 
 form_types_bp = Blueprint("form_types", __name__, url_prefix="/form-types")
@@ -1110,17 +1113,65 @@ def _confirmed_count(pattern_id: int) -> int:
     return row[0] if row else 0
 
 
-# ---- ブラウザが置いた Excel（保存しない） -----------------------------------------------
-# 置かれた Excel は、この要求の中で読み取って中身を捨てる。次の操作のときはブラウザが同じ
-# ファイルを送り直してくるので、2回目からは読み取った結果（core.workbook_cache）を使い回す。
+# ---- ブラウザが置いた Excel（ファイルは保存しない。シートの中身だけ覚える） -------------------
+# 置かれた Excel は、この要求の中で読み取って中身を捨てる。読み取ったシートの中身は帳票の種類と
+# 一緒に DB が覚える（_remember_book）。次の操作のときはブラウザが同じファイルを送り直してくることが
+# あるので、2回目からは読み取った結果（core.workbook_cache）を使い回す。送ってこなければ覚えたシートで出す。
 
 BOOK_FIELD = "book"            # ブラウザが送ってくる Excel（<input type=file name=book>）
 BOOK_HASH_FIELD = "book_hash"  # 送り直さずに、さっき読んだブックを指すとき（sha256）
-NO_BOOK_ERROR = "この帳票のExcelをもう一度置いてください（サーバーには残していません）"
+# 覚えたシートが無い種類（覚える前に登録したもの）で、Excel も送られてこなかったとき
+NO_BOOK_ERROR = ("この帳票のExcelをもう一度置いてください（この種類は登録したときのシートを覚えていません。"
+                 "置くとシートを覚えて、次からは置かずに開けます）")
 # ここで受け取る Excel の大きさの上限。保存せずにメモリで読む（数人が同時に置く）ので、
 # 取り込みの上限（MAX_CONTENT_LENGTH＝まとめ置きの合計）より小さくしておく。
 # 帳票は1枚の紙なので、写真付きでもこの大きさに収まる（見本のいちばん大きいもので約0.1MB）。
 BOOK_MAX_BYTES = 50 * 1024 * 1024
+# 覚えるシートの中身（JSON）の上限。帳票は1枚の紙なので、ふつうは数KB〜数十KB（見本の修理報告書で約4KB）。
+# 何万セルもある一覧表のようなブックは帳票ではないので、覚えずに断る（画面に減らし方を書く）。
+SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
+# 覚えない、と画面に書くもの。読み取りに要らないものは覚えない（利用者の指示 2026-09-22「セル色の情報は不要」）
+SNAPSHOT_NOTE = ("Excel のファイルは保存しません。登録したときのシートの中身（セルの番地と文字）だけを覚えておき、"
+                 "あとから開いたときにその画面を出します。セルの色は覚えません"
+                 "（塗りの有る無しだけを、見出しの判定のために覚えます）。")
+
+
+def _snapshot_json(book: Book) -> str:
+    """覚えるシートの中身（JSON）。大きすぎるブックは UploadError（帳票ではない大きさ）。"""
+    text = book.info.to_json()
+    size = len(text.encode("utf-8"))
+    if size > SNAPSHOT_MAX_BYTES:
+        raise UploadError(
+            f"このExcelはシートの中身が大きすぎて覚えられません（{size / (1024 * 1024):.1f}MB。"
+            f"上限 {SNAPSHOT_MAX_BYTES // (1024 * 1024)}MB）。帳票の様式だけの Excel（記入例が1件のもの）にするか、"
+            "使わないシート・値の入った余分な行や列を消して、置き直してください")
+    return text
+
+
+def _remember_book(pattern_id: int, book: Book, book_json: str | None = None) -> None:
+    """置かれた Excel のシートの中身を、この種類の「覚えたシート」にする（前のものと入れ替える）。"""
+    db.save_pattern_book(pattern_id, book.file_name, book.file_hash, book_json or _snapshot_json(book))
+    book.saved_at = db.now()
+
+
+def _stored_book(pattern_id: int) -> Book | None:
+    """この種類が覚えているシート。開いた結果は core.workbook_cache にも置く（クリックのたびに JSON を読み直さない）。"""
+    row = db.load_pattern_book(pattern_id)
+    if row is None:
+        return None
+    known = get(current_session_id(), row["file_hash"])
+    if known is not None and known.file_name == row["file_name"]:
+        known.saved_at = row["saved_at"]
+        return known
+    try:
+        info = WorkbookInfo.from_json(row["book_json"])
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        current_app.logger.warning("覚えたシートを読めませんでした（pattern %s）: %s", pattern_id, exc.__class__.__name__)
+        return None
+    if not info.grids:
+        return None
+    return put(current_session_id(), Book(file_name=row["file_name"], file_hash=row["file_hash"],
+                                          size=len(row["book_json"]), info=info, saved_at=row["saved_at"]))
 
 
 def _read_book(storage) -> Book:
@@ -1150,11 +1201,12 @@ def _read_book(storage) -> Book:
                                    size=memory.size, info=info))
 
 
-def _request_book() -> tuple[Book | None, str]:
+def _request_book(pattern_id: int | None = None) -> tuple[Book | None, str]:
     """この操作で見ている Excel。戻り値: (ブック, エラー文)。
 
-    ブラウザが送ってきたファイルを読む。ファイルが無いときは、さっき読んだブック（sha256）を探す。
-    どちらも無ければ (None, "")＝Excel を置いていない画面（項目の一覧と見出しの手直しはできる）。
+    順に探す: ブラウザが送ってきたファイル → さっき読んだブック（sha256。core.workbook_cache）→
+    その種類が覚えているシート（database.pattern_books）。
+    どれも無ければ (None, "")＝シートの無い画面（覚える前に登録した種類。項目の一覧と見出しの手直しはできる）。
     """
     storage = request.files.get(BOOK_FIELD)
     if storage is not None and storage.filename:
@@ -1164,7 +1216,11 @@ def _request_book() -> tuple[Book | None, str]:
             return None, upload_error_text(storage, exc)
     file_hash = (request.form.get(BOOK_HASH_FIELD) or request.args.get(BOOK_HASH_FIELD) or "").strip()
     if file_hash:
-        return get(current_session_id(), file_hash), ""
+        known = get(current_session_id(), file_hash)
+        if known is not None:
+            return known, ""
+    if pattern_id is not None:
+        return _stored_book(pattern_id), ""
     return None, ""
 
 
@@ -1176,7 +1232,7 @@ def form_types_page():
     # 作業場所のクッキーだけは、ここで開いたときにも決めておく（ほかの画面での取り違えを防ぐ）
     current_session_id()
     return render_template("form_types.html", list_html=_list_html(),
-                           max_mb=BOOK_MAX_BYTES // (1024 * 1024))
+                           max_mb=BOOK_MAX_BYTES // (1024 * 1024), snapshot_note=SNAPSHOT_NOTE)
 
 
 def _list_html() -> str:
@@ -1199,7 +1255,8 @@ def form_types_legacy(pattern_id: int | None = None):
 def create():
     """Excel を1つ置いて帳票の種類を作る（fetch）。名前は画面でファイル名から入れてある。
 
-    作るのは設定だけ。置かれた Excel は読み取るだけで、サーバーには残さない。
+    作るのは設定と、覚えたシート（置かれた Excel のシートの中身）。Excel のファイルはサーバーに残さない。
+    覚えられない大きさのブックなら種類も作らない（半端な種類を残さない）。
     """
     storage = request.files.get(BOOK_FIELD)
     if storage is None or not storage.filename:
@@ -1209,48 +1266,69 @@ def create():
         return jsonify(error="帳票の種類の名前を入れてください"), 400
     try:
         book = _read_book(storage)
+        book_json = _snapshot_json(book)
     except UploadError as exc:
         return jsonify(error=upload_error_text(storage, exc)), 400
     pattern_id = db.create_pattern(name)
+    _remember_book(pattern_id, book, book_json)
     return jsonify(pattern_id=pattern_id, html=_build_html(pattern_id, book), list_html=_list_html(),
-                   message=f"「{name}」を作りました。読み取りたい欄の見出しと値をクリックしてください")
+                   message=f"「{name}」を作りました。読み取りたい欄の見出しと値をクリックしてください"
+                           "（Excel のファイルは保存せず、シートの中身だけを覚えました）")
 
 
 # ---- 読み取る欄をクリックして決める ＋ 読み取りテスト ------------------------------------
 
 def _build_html(pattern_id: int, book: Book | None = None, notes: list[str] | None = None) -> str:
-    """登録中の帳票の種類の欄（HTML の断片）。book が無ければシートの無い（設定だけの）画面。"""
+    """登録中の帳票の種類の欄（HTML の断片）。book が無ければシートの無い（設定だけの）画面。
+
+    remembered は覚えたシートの見出し（ファイル名・置いた日時）。いま出しているブックがそれなら画面に書く。
+    """
     pattern = _get_pattern(pattern_id)
     info = book.info if book is not None else None
     grids = _sheet_grids(info, list(info.grids)) if info is not None else []
     for g in grids:
         g["click_cells"] = table_cells(info.grids[g["name"]])
+    remembered = db.pattern_book_meta(pattern_id)
+    if remembered is not None and (book is None or book.file_hash != remembered["file_hash"]):
+        remembered = None   # 覚えたシートとは別の Excel を見ている（置き替えの途中）
     return render_part("form_types.html", "part_build", pattern=pattern,
         book=book,
         grids=grids,
+        remembered=remembered,
         rows=_field_view_rows(pattern, info),
         test=_test_result(pattern, book),
         confirmed_count=_confirmed_count(pattern_id),
         notes=notes or [],
+        snapshot_note=SNAPSHOT_NOTE,
     )
 
 
 @form_types_bp.get("/<int:pattern_id>/panel")
 @form_types_bp.post("/<int:pattern_id>/panel")
 def build_fragment(pattern_id: int):
-    """項目の一覧を出す（GET）。Excel を一緒に置くと（POST）、そのシートを見ながら直せる。
+    """項目の一覧とシートを出す（GET）。Excel を一緒に置くと（POST）、そのシートに置き替えて覚え直す。
 
-    保存済みの種類を開き直したときは Excel が無いので、項目の一覧と見出しの手直しだけができる。
-    同じ帳票の Excel をもう一度置くと、シートが出てセルをクリックできるようになる（種類は増えない）。
+    保存済みの種類を開き直したときは、登録したときに覚えたシートで同じ画面を出す（Excel は要らない）。
+    別の Excel（書き方の違う同じ帳票）を置くと、シートが替わり、覚えたシートもそれに入れ替わる（種類は増えない）。
+    覚える前に登録した種類（覚えたシートが無い）は、Excel を置くまでシートが出ない。
     """
     _get_pattern(pattern_id)
-    book, error = _request_book()
+    book, error = _request_book(pattern_id)
     if error:
         return jsonify(error=error), 400
     message = ""
-    if request.method == "POST" and book is not None:
+    placed = request.files.get(BOOK_FIELD)
+    # 覚えたシートを入れ替えるのは、ファイルを実際に置いたときだけ。名前の無い空の部品（ファイルを選ばずに送った form）と
+    # 合図（book_hash）だけの要求では、いま見ているブックが別のものでも覚えは変えない
+    if request.method == "POST" and book is not None and placed is not None and placed.filename:
+        remembered = db.pattern_book_meta(pattern_id)
+        if remembered is None or remembered["file_hash"] != book.file_hash or remembered["file_name"] != book.file_name:
+            try:
+                _remember_book(pattern_id, book)
+            except UploadError as exc:
+                return jsonify(error=str(exc)), 400
         message = (f"「{book.file_name}」を読み込みました。読み取りたい欄の見出しと値をクリックしてください"
-                   "（このExcelはサーバーに残しません）")
+                   "（Excel のファイルは保存せず、シートの中身だけを覚えました。次からは置かずに開けます）")
     return jsonify(html=_build_html(pattern_id, book), list_html=_list_html(), message=message)
 
 
@@ -1308,11 +1386,11 @@ def _test_result(pattern: PatternDef, book: Book | None) -> dict | None:
 def add_field(pattern_id: int):
     """クリックした見出しセル（と値セル）から項目を1つ作る（fetch）。
 
-    どのセルを指しているかは、ブラウザが一緒に送ってくる Excel を読み直して確かめる
-    （サーバーには置いていないため）。
+    どのセルを指しているかは、ブラウザが一緒に送ってくる Excel か、その種類が覚えているシートで確かめる
+    （Excel のファイルはサーバーに置いていないため）。
     """
     pattern = _get_pattern(pattern_id)
-    book, error = _request_book()
+    book, error = _request_book(pattern_id)
     if error:
         return jsonify(error=error), 400
     if book is None:
@@ -1389,8 +1467,8 @@ def delete_field(pattern_id: int, field_name: str):
     message = "項目を削除しました"
     if stopped:
         message += "。読み取る項目が無くなったので、この種類の使用を停止しました（帳票取り込みの候補に出なくなります）"
-    # ブラウザが Excel を一緒に送ってきていれば、シートを出したままにする
-    return jsonify(html=_build_html(pattern_id, _request_book()[0]), list_html=_list_html(), message=message)
+    # 覚えたシート（またはブラウザが一緒に送ってきた Excel）で、シートを出したままにする
+    return jsonify(html=_build_html(pattern_id, _request_book(pattern_id)[0]), list_html=_list_html(), message=message)
 
 
 @form_types_bp.post("/<int:pattern_id>/fields/<field_name>/label")
@@ -1418,7 +1496,7 @@ def rename_field(pattern_id: int, field_name: str):
     target["display_name"] = name
     target["renamed"] = True   # このあと別の欄をクリックしても、手で付けた見出しに戻さない
     _save_rows(pattern, sheet_rows, field_rows)
-    return jsonify(html=_build_html(pattern_id, _request_book()[0]), list_html=_list_html(),
+    return jsonify(html=_build_html(pattern_id, _request_book(pattern_id)[0]), list_html=_list_html(),
                    message=f"見出しを「{name}」にしました")
 
 
@@ -1461,9 +1539,9 @@ def change_status(pattern_id: int):
     if not pattern.fields:
         return jsonify(error="読み取る項目がありません。シートで見出しのセルと値のセルをクリックしてください"), 400
     db.set_pattern_status(pattern_id, status)
-    # 残すのは設定だけ（Excel はもともと置いていない）。画面はそのまま続けて使える
+    # 残すのは設定と覚えたシートだけ（Excel のファイルはもともと置いていない）。画面はそのまま続けて使える
     message = f"「{pattern.name}」の使用を開始しました。帳票取り込みの候補に出ます"
-    return jsonify(ok=True, status=status, html=_build_html(pattern_id, _request_book()[0]),
+    return jsonify(ok=True, status=status, html=_build_html(pattern_id, _request_book(pattern_id)[0]),
                    list_html=_list_html(), message=message)
 
 

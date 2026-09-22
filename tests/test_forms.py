@@ -3888,11 +3888,11 @@ def test_deleting_one_of_several_fields_keeps_the_type_in_use(app, client, sampl
 
 # ---- Excel を置いていないときの文言（サーバーには残していない） ------------------------------------
 
-def test_the_panel_without_a_book_says_the_excel_is_not_kept(app, client, sample_dir):
-    """Excel を置いていない画面では、「見つかりません」「項目を1つ以上作ると」とは言わない。
+def test_the_panel_without_a_book_shows_the_remembered_sheet(app, client, sample_dir):
+    """Excel を送らずに開き直しても、登録したときに覚えたシートで同じ画面（値・読み取りテスト）が出る。
 
-    置いた Excel は残さないので、種類を開き直したときはシートも読み取りテストも出せない。
-    そのことと「設定は残っている」ことを画面で言う。
+    Excel のファイルは残さないが、シートの中身（セルの番地と文字）は種類と一緒に覚えている
+    （利用者の指示 2026-09-22）。そのことを画面で言い、「置いていないのでできません」とは言わない。
     """
     path = sample_dir / "standard.xlsx"
     pattern_id = create_type(client, path, "設備修理報告書")
@@ -3907,13 +3907,16 @@ def test_the_panel_without_a_book_says_the_excel_is_not_kept(app, client, sample
     assert "1項目中 <strong>1</strong>項目が見つかりました" in res.get_json()["html"]
     assert "見本のExcelはサーバーから消しました" not in res.get_json()["message"]
 
-    # 開き直したとき（Excel を置いていない）は、設定だけの画面になる
+    # 開き直したとき（Excel を送らない・覚えも切れた）は、覚えたシートで同じ画面になる
+    core.clear()
     panel = _panel_form_types_fixes7(client, pattern_id)
     assert "—（見つかりません）" not in panel
-    assert "—（左にExcelを置くと、この設定で読んだ値が出ます）" in panel
-    assert "項目を1つ以上作ると、ここに読み取り結果が出ます。" not in panel
-    assert "いま Excel を置いていないので、読み取りテストはできません" in panel
-    assert "サーバーには保存しません" in panel
+    assert "—（左にExcelを置くと" not in panel
+    assert "読み取りテストはできません" not in panel
+    assert "1項目中 <strong>1</strong>項目が見つかりました" in panel
+    assert "登録したときに覚えたシートです（standard.xlsx、" in panel
+    assert "セルの色は覚えません" in panel
+    assert "サーバーには保存しません" not in panel      # 「何も残さない」とは言わない（シートの中身は覚えている）
 
 
 # ---- 置いた Excel を替えたあと、項目を削除しても表示が戻らない ---------------------------------------
@@ -3937,16 +3940,17 @@ def test_deleting_a_field_keeps_the_book_that_is_being_looked_at(app, client, tm
 
 # ====================================================================================================
 # 元 tests/test_form_types_no_excel_kept.py
-# 帳票登録は Excel を預からない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ保持する」）。
+# 帳票登録は Excel のファイルを預からない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ保持する」）。
 #
-# 置いた Excel は受け取った要求の中で読み取るだけで、uploads/ にも DB にも残さない。
-# 次の操作（セルのクリック・項目の削除・見出しの手直し・読み取りテスト）では、ブラウザが同じ
-# ファイルを送り直す。サーバーは読み取った結果だけを core.workbook_cache に短い間だけ覚えておく
-# （メモリの中だけ。ディスクには何も書かない）。
+# 置いた Excel は受け取った要求の中で読み取るだけで、ファイル（bytes）は uploads/ にも DB にも残さない。
+# 読み取ったシートの中身（セルの番地と文字）だけを種類と一緒に DB が覚える（pattern_books。2026-09-22。
+# 詳しくは tests/test_form_books.py）。次の操作（セルのクリック・項目の削除・見出しの手直し・読み取りテスト）
+# では、ブラウザが同じファイルを送り直すこともあるし、送らなければ覚えたシートを使う。サーバーは読み取った
+# 結果を core.workbook_cache に短い間だけメモリに覚えておく（ディスクには何も書かない）。
 #
 # ここで確かめること:
 #   - 置いても・クリックしても・使用開始しても、Excel のバイトはどこにも残らない
-#   - 残った設定だけで、開き直した画面の項目一覧と見出しの手直しができる
+#   - 残った設定と覚えたシートだけで、開き直した画面（シート・項目一覧・見出しの手直し）ができる
 #   - 同じ帳票の Excel をもう一度置けば、シートを見てクリックする作業に戻れる（種類は増えない）
 #   - 覚えている結果は、その人のもの・短い間だけ・数に上限がある
 # ====================================================================================================
@@ -3988,7 +3992,10 @@ def _tables(app) -> set[str]:
 # ---- 置いても残らない ---------------------------------------------------------------------
 
 def test_dropping_an_excel_keeps_no_file_and_no_row(app, client, tmp_path):
-    """Excel を置いて種類を作っても、ファイルは1つも保存されず、控えの行もできない。"""
+    """Excel を置いて種類を作っても、ファイルは1つも保存されず、ファイルを指す控えの行もできない。
+
+    できるのは覚えたシート（pattern_books。JSON の文字。tests/test_form_books.py）だけ。
+    """
     path = _report(tmp_path / "設備修理報告書.xlsx")
     pattern_id = create_type(client, path, "設備修理報告書")
     add_field(client, pattern_id, "報告書", "A1", "B1")
@@ -4050,28 +4057,63 @@ def test_activation_does_not_claim_to_delete_anything(app, client, tmp_path):
 
 # ---- 設定だけで開き直せる -----------------------------------------------------------------
 
-def test_reopening_a_type_without_the_excel_shows_the_settings(app, client, tmp_path):
-    """Excel を置いていない画面でも、項目の一覧と見出しの手直しはできる。"""
+def test_reopening_a_type_without_the_excel_shows_the_remembered_sheet(app, client, tmp_path):
+    """Excel を送らずに開き直しても、覚えたシートが左に出て、登録のときと同じ画面で直せる。"""
     path = _report(tmp_path / "点検表.xlsx")
     pattern_id = create_type(client, path, "点検表")
     add_field(client, pattern_id, "報告書", "A1", "B1")
-    core.clear()                       # 時間がたって忘れたあと
+    core.clear()                       # 時間がたって忘れたあと（メモリの覚えは切れている）
 
     panel = panel_html(client, pattern_id)
     assert "報告番号" in panel                   # 項目は残っている
-    # 左の欄が Excel の置き場になる（登録のときと同じ見た目・同じ操作で直せる。利用者の指示 2026-09-22）
+    # 左にシートがそのまま出る（置き場は出ない。利用者の指示 2026-09-22「再度シートを置かなくても…だせるはず」）
+    assert 'data-cell="A1"' in panel and "R-001" in panel
+    assert "この帳票のExcelをここにドラッグ＆ドロップ" not in panel
+    assert 'id="drop-book-edit"' not in panel
+    assert "読み取りテストはできません" not in panel
+    assert "—（左にExcelを置くと" not in panel
+    assert "別のExcelに替える" in panel          # 置き替えはできる
+    assert "登録したときに覚えたシートです（点検表.xlsx、" in panel
+
+    # 見出しは直せる（Markdown に書く名前だけが変わる）。直したあともシートは出たまま
+    res = client.post(f"/form-types/{pattern_id}/fields/report_id/label", json={"name": "受付番号"})
+    assert res.status_code == 200 and "見出しを「受付番号」にしました" in res.get_json()["message"]
+    assert 'data-cell="A1"' in res.get_json()["html"]
+    with app.app_context():
+        field = db.load_pattern(pattern_id).fields[0]
+    assert field.display_name == "受付番号" and field.candidates[0] == "報告番号" and field.cell == "B1"
+
+
+def test_a_type_registered_before_sheets_were_remembered_shows_the_drop_zone(app, client, tmp_path):
+    """覚えたシートが無い種類（覚える前に登録したもの）だけ、左の欄が Excel の置き場になる。
+
+    置くとシートを覚えて、次からは置かずに開ける。
+    """
+    path = _report(tmp_path / "点検表.xlsx")
+    pattern_id = create_type(client, path, "点検表")
+    add_field(client, pattern_id, "報告書", "A1", "B1")
+    with app.app_context():
+        db.delete_pattern_book(pattern_id)      # 覚える前に登録した種類と同じ状態にする
+    core.clear()
+
+    panel = panel_html(client, pattern_id)
+    assert "報告番号" in panel                   # 項目は残っている
     assert "この帳票のExcelをここにドラッグ＆ドロップ" in panel
     assert 'data-book-form=' in panel and 'id="drop-book-edit"' in panel   # 「新しく登録する」の置き場と id が重ならない
-    assert "サーバーには保存しません" in panel
-    assert "いま Excel を置いていないので、読み取りテストはできません" in panel
-    assert "—（左にExcelを置くと、この設定で読んだ値が出ます）" in panel
+    assert "シートを覚えるようになる前に登録したものです" in panel
+    assert "Excel のファイルは保存しません。登録したときのシートの中身（セルの番地と文字）だけを覚えておき" in panel
+    assert "読み取りテストはできません" in panel
+    assert "—（左にExcelを置くと、この設定で読んだ値が出ます" in panel
 
     # Excel が無くても見出しは直せる（Markdown に書く名前だけが変わる）
     res = client.post(f"/form-types/{pattern_id}/fields/report_id/label", json={"name": "受付番号"})
     assert res.status_code == 200 and "見出しを「受付番号」にしました" in res.get_json()["message"]
-    with app.app_context():
-        field = db.load_pattern(pattern_id).fields[0]
-    assert field.display_name == "受付番号" and field.candidates[0] == "報告番号" and field.cell == "B1"
+
+    # 同じ帳票を置くとシートを覚え、次からは置かずに開ける
+    assert 'data-cell="A1"' in panel_html(client, pattern_id, book=path)
+    core.clear()
+    again = panel_html(client, pattern_id)
+    assert 'data-cell="A1"' in again and 'id="drop-book-edit"' not in again
 
 
 def test_dropping_the_same_excel_again_shows_the_sheet(app, client, tmp_path):
@@ -4087,7 +4129,7 @@ def test_dropping_the_same_excel_again_shows_the_sheet(app, client, tmp_path):
     body = res.get_json()
     assert "点検表.xlsx" in body["html"] and 'data-cell="A1"' in body["html"]
     assert "R-001" in body["html"]                 # 置いた帳票での値も出る
-    assert "サーバーに残しません" in body["message"]
+    assert "Excel のファイルは保存せず、シートの中身だけを覚えました" in body["message"]
     with app.app_context():
         assert len(db.list_patterns()) == 1        # 置き直しで新しい種類は作らない
     assert _stored_files(app) == []
@@ -4096,18 +4138,33 @@ def test_dropping_the_same_excel_again_shows_the_sheet(app, client, tmp_path):
     assert "「設備番号」を項目にしました" in add_field(client, pattern_id, "報告書", "A2", "B2")["message"]
 
 
-def test_a_click_without_the_excel_asks_for_it_again(app, client, tmp_path):
-    """Excel を送らずにセルのクリックだけ届いたら、置き直してくださいと断る。"""
+def test_a_click_without_the_excel_uses_the_remembered_sheet(app, client, tmp_path):
+    """Excel を送らずにセルのクリックだけ届いても、覚えたシートで項目を作れる。
+
+    覚えたシートが無い種類（覚える前に登録したもの）だけ、置き直してくださいと断る。
+    """
     path = _report(tmp_path / "点検表.xlsx")
     pattern_id = create_type(client, path, "点検表")
     core.clear()
 
     res = client.post(f"/form-types/{pattern_id}/fields",
                       data={"sheet": "報告書", "label_cell": "A1", "value_cell": "B1"})
+    assert res.status_code == 200, res.get_data(as_text=True)
+    assert "「報告番号」を項目にしました" in res.get_json()["message"]
+    assert 'data-cell="A1"' in res.get_json()["html"]     # シートは出たまま
+    with app.app_context():
+        field = db.load_pattern(pattern_id).fields[0]
+        assert (field.sheet_name, field.label_cell, field.cell) == ("報告書", "A1", "B1")
+        db.delete_pattern_book(pattern_id)      # 覚える前に登録した種類と同じ状態にする
+    core.clear()
+
+    res = client.post(f"/form-types/{pattern_id}/fields",
+                      data={"sheet": "報告書", "label_cell": "A2", "value_cell": "B2"})
     assert res.status_code == 400
     assert "もう一度置いてください" in res.get_json()["error"]
+    assert "覚えていません" in res.get_json()["error"]
     with app.app_context():
-        assert db.load_pattern(pattern_id).fields == []
+        assert len(db.load_pattern(pattern_id).fields) == 1
 
 
 def test_a_big_excel_is_refused(app, client, tmp_path, monkeypatch):
@@ -4154,16 +4211,30 @@ def test_the_sheet_can_be_asked_for_by_the_hash_of_the_book(app, client, tmp_pat
                             "book_hash": book_hash})
     assert res.status_code == 200 and "「報告番号」を項目にしました" in res.get_json()["message"]
 
-    # 忘れたあとは合図だけでは足りない（ブラウザが持っているファイルを送り直す）
+    # 忘れたあとは、合図の指すブックが覚えたシートと同じなので、そちらで続けられる
     core.clear()
     res = client.post(f"/form-types/{pattern_id}/fields",
                       data={"sheet": "報告書", "label_cell": "A2", "value_cell": "B2",
                             "book_hash": book_hash})
+    assert res.status_code == 200 and "「設備番号」を項目にしました" in res.get_json()["message"]
+    assert core.count() == 1        # 覚えたシートを開いた結果も、短い間だけメモリに置く（次のクリックで読み直さない）
+
+    # 覚えたシートの無い種類（覚える前に登録したもの）では、忘れたあとの合図だけでは足りない
+    with app.app_context():
+        db.delete_pattern_book(pattern_id)
+    core.clear()
+    res = client.post(f"/form-types/{pattern_id}/fields",
+                      data={"sheet": "報告書", "label_cell": "A3", "value_cell": "B3",
+                            "book_hash": book_hash})
     assert res.status_code == 400 and "もう一度置いてください" in res.get_json()["error"]
 
 
-def test_another_browser_cannot_use_the_book_of_the_first_one(app, tmp_path):
-    """覚えているブックはその作業場所（ブラウザ）のもの。ほかの人の合図では出てこない。"""
+def test_another_browser_cannot_use_the_cached_book_but_sees_the_remembered_sheet(app, tmp_path):
+    """メモリに覚えているブックはその作業場所（ブラウザ）のもの。ほかの人の合図では出てこない。
+
+    いっぽう帳票の種類が覚えているシートは「設定」なのでみんなのもの。ほかのブラウザで開いても
+    同じシートが出て、クリックで直せる（種類そのものが共有なのと同じ）。
+    """
     from app.views import SESSION_ID_KEY
 
     path = _report(tmp_path / "点検表.xlsx")
@@ -4176,8 +4247,22 @@ def test_another_browser_cannot_use_the_book_of_the_first_one(app, tmp_path):
     panel = panel_html(first, pattern_id, book=path)
     book_hash = panel.split('data-book="')[1].split('"')[0]
 
+    # メモリの置き場は作業場所ごと
+    assert core.get("a" * 32, book_hash) is not None
+    assert core.get("b" * 32, book_hash) is None
+
+    # 別のブラウザが合図だけ送ってきても、種類が覚えているシートで同じ画面になり、クリックできる
     res = second.post(f"/form-types/{pattern_id}/fields",
                       data={"sheet": "報告書", "label_cell": "A1", "value_cell": "B1",
+                            "book_hash": book_hash})
+    assert res.status_code == 200 and "「報告番号」を項目にしました" in res.get_json()["message"]
+    # 覚えたシートを開いた結果は、そのブラウザの分としてメモリに置かれる（最初の人の分とは別）
+    assert core.get("b" * 32, book_hash) is not None
+    with app.app_context():
+        db.delete_pattern_book(pattern_id)      # 覚えたシートが無ければ、ほかの人の合図では出てこない
+    core.clear()
+    res = second.post(f"/form-types/{pattern_id}/fields",
+                      data={"sheet": "報告書", "label_cell": "A2", "value_cell": "B2",
                             "book_hash": book_hash})
     assert res.status_code == 400 and "もう一度置いてください" in res.get_json()["error"]
 
@@ -4717,11 +4802,18 @@ def test_every_page_says_what_happens_when_you_leave(client, path):
     assert "捨てられます" in html
 
 
-def test_the_form_type_page_says_the_excel_is_never_kept(client):
-    """帳票登録は預からない: 置いた Excel はその場で読むだけ（2026-09-21 の利用者の指示）。"""
+def test_the_form_type_page_says_what_is_kept(client):
+    """帳票登録は Excel のファイルを預からない（2026-09-21）が、シートの中身は覚える（2026-09-22）。
+
+    画面はそのとおりに言う。「何も残さない」とは言わず、覚えるもの（セルの番地と文字）と
+    覚えないもの（セルの色）を書く。
+    """
     html = client.get("/form-types", follow_redirects=True).get_data(as_text=True)
-    assert "サーバーに残しません" in html
-    assert "残るのは登録した帳票の種類（読み取りの設定）だけです" in html
+    assert "Excel のファイルは保存しません。" in html
+    assert "登録したときのシートの中身（セルの番地と文字）だけを覚えておき、あとから開いたときにその画面を出します。" in html
+    assert "セルの色は覚えません（塗りの有る無しだけを、見出しの判定のために覚えます）" in html
+    assert "残るのは登録した帳票の種類（読み取りの設定と覚えたシート）だけです" in html
+    assert "サーバーに残しません" not in html and "サーバーには保存しません" not in html
 
 
 @pytest.mark.parametrize("path,url", [("/forms", "/forms/discard"), ("/tables", "/tables/discard")])

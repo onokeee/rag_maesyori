@@ -432,12 +432,33 @@ def _m13_ai_connections(conn: sqlite3.Connection) -> None:
     )""")
 
 
+def _m14_pattern_books(conn: sqlite3.Connection) -> None:
+    """帳票の種類に、登録したときのシートの中身（覚えたシート）を持たせる（利用者の指示 2026-09-22）。
+
+    利用者の指示:「再度シートを置かなくても、登録したときにシートのセル番地と文字情報を記憶しておけばだせるはず」。
+    Excel のファイルは今までどおり保存しない（2026-09-21「見本のExcelは置かずに、設定だけ保持する」）。
+    覚えるのはシートの中身だけ: シート名・セルの番地と文字（型のある値）・結合・太字・塗りの有る無し。
+    セルの色は覚えない（同日の指示「セル色の情報は不要」。塗りの有る無しと「同じ塗りか」の番号だけ。
+    forms.fill_group）。書き方は forms.WorkbookInfo.to_json。種類1つにつき1つ（最後に置いた Excel の分）で、
+    種類を消せば一緒に消える（ON DELETE CASCADE）。この表は「設定」なので、取り込みを捨てる片付けの
+    対象にしない（core.SETTINGS_TABLES）。
+    """
+    conn.execute("""CREATE TABLE IF NOT EXISTS pattern_books (
+        pattern_id INTEGER PRIMARY KEY REFERENCES patterns(id) ON DELETE CASCADE,
+        file_name TEXT NOT NULL,                       -- 置いた Excel のファイル名（表示用。ファイルそのものは無い）
+        file_hash TEXT NOT NULL,                       -- その Excel の sha256（ブラウザが送る book_hash と同じもの）
+        book_json TEXT NOT NULL,                       -- 覚えたシートの中身（forms.WorkbookInfo.to_json）
+        saved_at TEXT NOT NULL                         -- 置いた日時
+    )""")
+
+
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _m3_tables, _m4_form_batches,
                                                           _m5_purge_scope, _m6_ai_items_per_import,
                                                           _m7_llm_calls_owner, _m8_session_scope, _m9_import_spec,
                                                           _m10_drop_unused, _m11_document_touch,
-                                                          _m12_drop_pattern_samples, _m13_ai_connections]
+                                                          _m12_drop_pattern_samples, _m13_ai_connections,
+                                                          _m14_pattern_books]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -663,7 +684,39 @@ def delete_pattern(pattern_id: int) -> None:
 
 
 # 見本の Excel は保存しないので、その控え（add_sample / list_samples …）は持たない。
-# 帳票の種類が持つのは設定だけ（シート名・見出しのセル・値のセル・読み取る向き・項目名）。
+# 帳票の種類が持つのは設定（シート名・見出しのセル・値のセル・読み取る向き・項目名）と、
+# 登録したときのシートの中身（pattern_books。下）だけ。
+
+
+# ---- pattern_books（覚えたシート）-------------------------------------------------------
+# 帳票の種類1つにつき、最後に置いた Excel のシートの中身（forms.WorkbookInfo.to_json）を1つ持つ。
+# Excel のファイルではない（セルの番地と文字・結合・太字・塗りの有る無しだけ。色は無い）。
+
+def save_pattern_book(pattern_id: int, file_name: str, file_hash: str, book_json: str) -> None:
+    """覚えたシートを入れる（前のものがあれば入れ替える）。"""
+    _exec(
+        """INSERT INTO pattern_books (pattern_id, file_name, file_hash, book_json, saved_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(pattern_id) DO UPDATE SET file_name = excluded.file_name, file_hash = excluded.file_hash,
+                                                book_json = excluded.book_json, saved_at = excluded.saved_at""",
+        (pattern_id, file_name, file_hash, book_json, now()),
+    )
+
+
+def load_pattern_book(pattern_id: int | None) -> dict | None:
+    """覚えたシート（book_json を含む行）。無ければ None（覚える前に登録した種類）。"""
+    return _one("SELECT * FROM pattern_books WHERE pattern_id = ?", (pattern_id,))
+
+
+def pattern_book_meta(pattern_id: int | None) -> dict | None:
+    """覚えたシートの見出し（ファイル名・sha256・置いた日時・JSON の大きさ）。中身は読まない。"""
+    return _one("SELECT pattern_id, file_name, file_hash, saved_at, LENGTH(book_json) AS size "
+                "FROM pattern_books WHERE pattern_id = ?", (pattern_id,))
+
+
+def delete_pattern_book(pattern_id: int) -> None:
+    """覚えたシートだけを捨てる（種類は残る。テスト・覚える前の状態に戻すとき用）。"""
+    _exec("DELETE FROM pattern_books WHERE pattern_id = ?", (pattern_id,))
 
 
 # ---- documents --------------------------------------------------------------
