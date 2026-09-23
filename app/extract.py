@@ -7515,10 +7515,20 @@ def run_checks(records, spec, stats) -> list[Issue]:
         rate = errors / total
         col = spec.column(key)
         label = col.display if col else key
-        if rate > block:
+        # 日付の列は確定を止めない。読めない行を「日付なし」のファイルに入れる決まりが既にあるので、
+        # ここで止めると逃げ道が「列を使わないにする」＝正しく読めている行の日付まで捨てる、しか無くなる。
+        # 日付欄に「不明」「2025年」が混じる表は現場では普通なので、警告にとどめる（2026-09-23）。
+        if bool(spec.date_key) and key == spec.date_key:
+            if rate >= warn:
+                issues.append(Issue("warning", "type_error_rate",
+                                    f"列「{label}」で日付として読めない行があります（{errors}/{total}件、{rate:.0%}）。"
+                                    "その行は「日付なし」のファイルに入れます（元の値はそのまま残します）", column=label))
+        elif rate > block:
+            # 指示は画面でできることだけを書く（列の型は見出しと値からサーバーが決めるので、利用者は変えられない）
             issues.append(Issue("error", "type_error_rate",
                                 f"列「{label}」で値を変換できない行が多すぎます（{errors}/{total}件、{rate:.0%}）。"
-                                "列の型か見出しの位置を確認してください", column=label))
+                                "見出し行の指定が合っているか確かめ、合っていれば元の表を直すか、"
+                                "この列を「使わない」にしてください", column=label))
         elif rate >= warn:
             issues.append(Issue("warning", "type_error_rate",
                                 f"列「{label}」で値を変換できない行があります（{errors}/{total}件、{rate:.1%}）", column=label))
@@ -8877,6 +8887,33 @@ def _bullet_groups(body: list[str]) -> list[list[str]]:
     return groups
 
 
+# 1行の長い値を切るときの区切り。上から順に試し、その区切りで収まらなければ弱いほうへ下げる。
+# 「。」だけで切っていたころは、読点しかない和文・英文・ログの貼り付けが1つの塊のまま残り、
+# 5万字が推定55,000トークンの1ブロックになっていた（上限 RECORD_TOKEN_BUDGET の137倍。2026-09-23）。
+_SPLIT_PATTERNS = (r"(?<=。)", r"(?<=[．！？!?])", r"(?<=[、，])", r"(?<=[.,;:])", r"(?<=\s)")
+
+
+def _text_pieces(text: str, budget: int) -> list[str]:
+    """長い1行の値を、budget に収まる塊へ切る。文字は1つも消さない（区切りの直後で切るだけ）。"""
+    pieces = [text]
+    for pat in _SPLIT_PATTERNS:
+        if all(estimate_tokens(x) <= budget for x in pieces):
+            return pieces
+        out: list[str] = []
+        for x in pieces:
+            out += [y for y in re.split(pat, x) if y] if estimate_tokens(x) > budget else [x]
+        pieces = out
+    # 区切りが1つも無い塊（長いURL・改行も空白も無いログ）は、最後は文字数で切る
+    out = []
+    for x in pieces:
+        if estimate_tokens(x) <= budget:
+            out.append(x)
+            continue
+        step = max(1, len(x) * budget // max(1, estimate_tokens(x)))
+        out += [x[i:i + step] for i in range(0, len(x), step)]
+    return out
+
+
 def _split_group(group: list[str], budget: int) -> list[list[str]]:
     """1つの箇条書きが budget に収まらないときに小分けにする（行も文も消さない）。"""
     if _tokens(group) <= budget:
@@ -8897,7 +8934,7 @@ def _split_group(group: list[str], budget: int) -> list[list[str]]:
         return [group]  # 項目名が読めない1行。切らずにそのまま出す
     # 1行の長い値。「。」の後ろで分け、項目名を「（続き）」で繰り返す
     label, text = m.group(1), head[m.end():]
-    pieces = [p for p in re.split(r"(?<=。)", text) if p]
+    pieces = _text_pieces(text, max(1, budget - estimate_tokens(f"- {label}（続き）: ")))
     out, cur = [], ""
     for piece in pieces:
         if cur and estimate_tokens(f"- {label}（続き）: {cur}{piece}") > budget:
