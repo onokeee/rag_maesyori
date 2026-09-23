@@ -2353,7 +2353,11 @@ window.ragAiHeader = (() => {
     warnings.replaceChildren(...info.warnings.map((w) => el("li", { text: w })));
     const crosstab = info.table_kind === "crosstab";
     root.querySelector("[data-crosstab]").hidden = !crosstab;
-    root.querySelector("[data-layout-submit]").disabled = crosstab;
+    const errors = info.errors || [];
+    const errorBox = root.querySelector("[data-layout-error]");
+    errorBox.textContent = errors.join("\u3000");
+    errorBox.hidden = errors.length === 0;
+    root.querySelector("[data-layout-submit]").disabled = crosstab || errors.length > 0;
     const headerInput = root.querySelector("[data-header-input]");
     if (!headerInput.value.trim()) headerInput.value = info.header_rows.join(",");
     root.querySelector("[data-end-input]").placeholder = `自動（${info.data_end}行目）`;

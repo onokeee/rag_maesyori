@@ -203,26 +203,26 @@ def label_parts(text) -> tuple[str, ...]:
 
 
 def split_combined_value(text, count: int) -> list[str] | None:
-    """「L6／STI-CMP」を count 個に分ける。区切りの数が合わなければ None。"""
+    """「L6／組立」を count 個に分ける。区切りの数が合わなければ None。"""
     parts = [p.strip() for p in re.split(r"[/／]", str(text or ""))]
     return parts if len(parts) == count and all(parts) else None
 
 
-# 設備番号らしい記号: 英字と数字を両方含む空白なしの英数字（CMP-108, ROB-821, EQ001）
+# 番号らしい記号（設備番号・車両番号・案件番号など）: 英字と数字を両方含む空白なしの英数字（VH-203, ROB-821, EQ001）
 _CODE_TOKEN = r"(?=[A-Za-z0-9\-_.#]*[A-Za-z])(?=[A-Za-z0-9\-_.#]*\d)[A-Za-z0-9][A-Za-z0-9\-_.#]{2,19}"
 _CODE_NAME_PATTERNS = (
-    (re.compile(rf"^({_CODE_TOKEN})\s*\((.+)\)$"), 1, 2),        # CVD-202（TEOS CVD 2号機）
-    (re.compile(rf"^(.+?)\s*\(({_CODE_TOKEN})\)$"), 2, 1),        # TEOS CVD 2号機（CVD-202）
-    (re.compile(rf"^({_CODE_TOKEN})(?:\s*[/:]\s*|\s+)(.+)$"), 1, 2),  # CMP-108　STI-CMP 8号機 / CMP-108：STI-CMP
-    (re.compile(rf"^(.+?)(?:\s*[/:]\s*|\s+)({_CODE_TOKEN})$"), 2, 1),  # W-CMP 3号機　CMP-103
+    (re.compile(rf"^({_CODE_TOKEN})\s*\((.+)\)$"), 1, 2),        # VH-203（冷凍車 2号車）
+    (re.compile(rf"^(.+?)\s*\(({_CODE_TOKEN})\)$"), 2, 1),        # 冷凍車 2号車（VH-203）
+    (re.compile(rf"^({_CODE_TOKEN})(?:\s*[/:]\s*|\s+)(.+)$"), 1, 2),  # VH-204　配送車4号車 / VH-204：配送車4号車
+    (re.compile(rf"^(.+?)(?:\s*[/:]\s*|\s+)({_CODE_TOKEN})$"), 2, 1),  # 配送車3号車　VH-203
 )
 _FORM_CODE_ONLY = re.compile(rf"^{_CODE_TOKEN}$")
 
 
 def split_code_name(text) -> tuple[str, str] | None:
-    """「CMP-108　STI-CMP 8号機」「ROB-821（ウェーハソーター 1号機）」→ (設備番号, 設備名)。分けられなければ None。
+    """「VH-203　冷凍車 2号車」「ROB-821（仕分けロボット）」→ (番号, 名前)。分けられなければ None。
 
-    1つのセルに「対象設備」「使用設備」として番号と名前をまとめて書く帳票用。名前の側が番号だけ（「CMP-101 / CMP-102」）なら分けない。
+    1つのセルに「対象設備」「使用設備」として番号と名前をまとめて書く帳票用。名前の側が番号だけ（「VH-203 / VH-204」）なら分けない。
     """
     s = unicodedata.normalize("NFKC", str(text or "")).strip()
     if not s or "\n" in s:
@@ -355,6 +355,17 @@ def format_unit(number_format) -> str:
             or not any(ch.isalpha() or ch in "¥$€℃%" for ch in literal)):
         return ""
     return normalize_unit(literal)
+
+
+def cell_format_unit(number_format) -> str:
+    """セルの表示形式から読み取れる単位。「0.0%」→ %、「#,##0"分"」→ 分、手がかりが無ければ ""。
+
+    パーセント書式は Excel が値を 0.035 のまま持ち、画面だけ 3.5% と見せる。
+    書式の % は引用符で囲まれないので format_unit では拾えないため、ここで先に見る。
+    """
+    if "%" in str(number_format or ""):
+        return "%"
+    return format_unit(number_format)
 
 
 def numeric_unit(text, unit: str = "") -> str:
@@ -1098,9 +1109,9 @@ def _uncached_in_sheet(xml: bytes) -> set[tuple[int, int]]:
 
 # ====================================================================================================
 # 元 excel/tables.py
-# 帳票の中の明細表（交換部品・時系列・チェックシートなど）を読む。
+# 帳票の中の明細表（内訳・時系列・チェックシートなど）を読む。
 #
-# 見出しのセル（アンカー: 「■ 交換部品」「使用部品」など）の下、または縦に結合した見出しの右にある
+# 見出しのセル（アンカー: 「■ 明細」「使用部品」など）の下、または縦に結合した見出しの右にある
 # 「列見出しの行」を見つけ、その下の行を空行・見出し欄（列見出しと同じ塗りつぶし色のセル）まで読む。
 # 1行 = 1明細。値は {"columns": [列見出し...], "rows": [[セルの文字列...], ...]} で持つ。
 # ====================================================================================================
@@ -1128,7 +1139,7 @@ TOTAL_LABEL_RE = re.compile(r"^(?:合計|小計|総計|総合計|合計数|計|.
                             r".{0,6}(?:費|工数|個数|件数|台数|本数|枚数|金額|額)計)$")
 _NONE_MARKS = {"なし", "無し", "該当なし", "特になし", "-", "ー", "―", "‐", "/", "〃"}
 # 「上の行と同じ」の記号（″ は NFKC で ′′ になる）。明細表の値では上の行の同じ列の値に置き換える
-_DITTO_MARKS = {"〃", "′′", "同上", "仝"}
+_DITTO_MARKS = {"〃", "′′", "同上", "同左", "仝", '"', "”", "“", "ヽ", "ゝ"}
 # 見出しらしい書き出し: 「■ 交換部品」「【時系列】」「▼ 回答欄」「1. 時系列」「A. 機構部」
 _HEADING_START = re.compile(r"^(?:[■□◆◇●▼▽▶►【\[]|\d{1,2}[.)、](?!\d)|[a-z][.)、](?![a-z])|d[1-8](?=\D))")
 
@@ -1139,6 +1150,7 @@ class Table:
     header: list[Cell]
     rows: list[list[Cell | None]]
     blank_rows: int = 0  # 飛ばした「No だけの空き行」の数
+    truncated: bool = False  # 上限（MAX_TABLE_ROWS 行）で切り、続きを読んでいない
 
     @property
     def has_room(self) -> bool:
@@ -1228,16 +1240,71 @@ def find_table(grid: SheetGrid, anchor: Cell, direction: str = "auto", stop_labe
 
 
 def header_cells(grid: SheetGrid, row: int, start_col: int) -> list[Cell]:
-    """row 行目の start_col から右へ、すき間なく並ぶ見出しらしいセル（高さが先頭のセルと同じもの）。"""
+    """row 行目の start_col から右へ、すき間なく並ぶ見出しらしいセル（高さが先頭のセルと同じもの）。
+
+    途中の1列だけ列見出しが空のときは「列N」という仮の名前で埋めて先へ進む（その列の値を落とさないため）。
+    埋めるのは、その真下に値があり、すぐ右に同じ高さの列見出しが続いているときだけ。
+    """
     cells: list[Cell] = []
     col = start_col
     while col <= grid.max_col:
         cell = grid.cells.get((row, col))
         if cell is None or not _header_like(cell) or (cells and cell.max_row != cells[0].max_row):
-            break
+            filler = _blank_header_filler(grid, row, col, cells)
+            if filler is None:
+                break
+            cells.append(filler)
+            col += 1
+            continue
         cells.append(cell)
         col = cell.max_col + 1
     return cells
+
+
+def _blank_header_filler(grid: SheetGrid, row: int, col: int, cells: list[Cell]) -> Cell | None:
+    """列見出しが空の1列を埋める仮の見出し。埋められない形なら None。"""
+    if not cells or grid.cells.get((row, col)) is not None:
+        return None
+    if grid.cell_at(row + 1, col) is None:  # 真下に値が無い＝表の外
+        return None
+    right = grid.cells.get((row, col + 1))
+    if right is None or not _header_like(right) or right.max_row != cells[0].max_row:
+        return None
+    first = cells[0]
+    return make_cell(row, col, cells[0].max_row, col, f"列{col}", f"列{col}",
+                     bold=first.bold, filled=first.filled, fill=first.fill)
+
+
+def _second_header_level(grid: SheetGrid, header: list[Cell], row: int) -> list[Cell] | None:
+    """列見出しのすぐ下が2段目の列見出しなら、上段とつないだ1組の列見出しを返す。無ければ None。
+
+    寸法測定の表のように「部位｜寸法（結合）｜判定」の下に「実測｜規格」が来る様式は珍しくない。
+    2段目を値の行として読むと、値が1行も無い表として捨てられ、列見出しが項目の値になっていた。
+    """
+    if not any(h.max_col > h.col for h in header):
+        return None  # 上段に横の結合が無ければ2段ではない
+    fills = {h.fill for h in header if h.fill}
+    right = max(h.max_col for h in header)
+    # 2段目は表の幅の中にだけあればよい（「部位」の下は空で、結合した「寸法」の下にだけ2つ並ぶ形）
+    lower = [grid.cells[(row, c)] for c in range(header[0].col, right + 1) if (row, c) in grid.cells]
+    if len(lower) < MIN_COLUMNS or max(c.max_col for c in lower) > right:
+        return None
+    if not all(_header_like(c) and c.filled == header[0].filled
+               and (not fills or not c.fill or c.fill in fills) for c in lower):
+        return None
+    if not any(h.col <= c.col <= h.max_col for h in header if h.max_col > h.col for c in lower):
+        return None  # 2段目が、横に結合した上段の下に来ていない
+    out: list[Cell] = []
+    for h in header:
+        under = [c for c in lower if h.col <= c.col <= h.max_col]
+        if not under:
+            out.append(h)  # 2段目が無い列（「部位」「判定」）はそのまま使う（位置も変えない）
+            continue
+        for c in under:
+            text = f"{h.text} {c.text}" if h.max_col > h.col else c.text
+            out.append(make_cell(c.row, c.col, c.max_row, c.max_col, text, text,
+                                 bold=c.bold, filled=c.filled, fill=c.fill))
+    return _contiguous(out) if len(out) >= MIN_COLUMNS else None
 
 
 def read_table(grid: SheetGrid, anchor: Cell | None, header: list[Cell], stop_labels: set[str],
@@ -1249,6 +1316,11 @@ def read_table(grid: SheetGrid, anchor: Cell | None, header: list[Cell], stop_la
     """
     fills = {h.fill for h in header if h.fill}
     row = max(h.max_row for h in header) + 1
+    lower = _second_header_level(grid, header, row)
+    if lower is not None:
+        # 2段の列見出し（「寸法」の下に「実測｜規格」）。上段と下段をつないで1組の列見出しにする
+        header = lower
+        row = max(h.max_row for h in header) + 1
     end = min(grid.max_row, last_row or grid.max_row, row + MAX_TABLE_ROWS - 1)
     rows: list[list[Cell | None]] = []
     blank_rows = 0
@@ -1281,7 +1353,11 @@ def read_table(grid: SheetGrid, anchor: Cell | None, header: list[Cell], stop_la
         if total and any(c.filled for c in fresh):
             break
         row = min(c.max_row for c in fresh) + 1
-    return Table(anchor, header, rows, blank_rows)
+    # 上限（MAX_TABLE_ROWS 行）で切ったのに、その次の行にまだ値がある＝続きを読んでいない
+    truncated = bool(row > end and len(rows) >= MAX_TABLE_ROWS
+                     and any(grid.cell_at(end + 1, c) is not None
+                             for h in header for c in range(h.col, h.max_col + 1)))
+    return Table(anchor, header, rows, blank_rows, truncated)
 
 
 def detect_tables(grid: SheetGrid) -> list[Table]:
@@ -1295,20 +1371,31 @@ def detect_tables(grid: SheetGrid) -> list[Table]:
         return cached
     tables: list[Table] = []
     used: set[tuple[int, int]] = set()
-    for cell in grid.text_cells():
-        if (cell.row, cell.col) in used or not cell.filled or not _header_like(cell):
-            continue
-        # 行の先頭の縦結合セル（「使用部品」）は列見出しにならず（高さが違う）、右隣からの並びのアンカーになる
-        header = _contiguous([c for c in header_cells(grid, cell.row, cell.col) if c.filled])
-        if len(header) < MIN_COLUMNS:
-            continue
-        used.update((c.row, c.col) for c in header)
-        anchor, last_row = _find_anchor(grid, header)
-        table = read_table(grid, anchor, header, set(), last_row=last_row)
-        if anchor is not None and table.rows:
-            tables.append(table)
-        elif len(header) >= MIN_COLUMNS_WITHOUT_ANCHOR and len(table.rows) >= MIN_ROWS_WITHOUT_ANCHOR:
-            tables.append(table)
+    # 1回目は塗りのある列見出し（今までどおり）。2回目は塗りが無く太字だけの列見出しを、
+    # 「下に2行以上そろっている」ことを条件に拾う（罫線だけで組んだ明細表が読めなかった）
+    for filled_only in (True, False):
+        for cell in grid.text_cells():
+            if (cell.row, cell.col) in used or not _header_like(cell):
+                continue
+            if filled_only and not cell.filled:
+                continue
+            if not filled_only and (cell.filled or not cell.bold):
+                continue
+            # 行の先頭の縦結合セル（「使用部品」）は列見出しにならず（高さが違う）、右隣からの並びのアンカーになる
+            same = (lambda c: c.filled) if filled_only else (lambda c: c.bold and not c.filled)
+            header = _contiguous([c for c in header_cells(grid, cell.row, cell.col) if same(c)])
+            if len(header) < MIN_COLUMNS:
+                continue
+            anchor, last_row = _find_anchor(grid, header)
+            table = read_table(grid, anchor, header, set(), last_row=last_row)
+            if not filled_only and len(table.rows) < MIN_ROWS_WITHOUT_ANCHOR:
+                continue  # 塗りが無い分は「下に2行以上そろっている」ことで確かめる
+            used.update((c.row, c.col) for c in header)
+            if anchor is not None and table.rows:
+                tables.append(table)
+            elif len(header) >= MIN_COLUMNS_WITHOUT_ANCHOR and len(table.rows) >= MIN_ROWS_WITHOUT_ANCHOR:
+                tables.append(table)
+    tables.sort(key=lambda t: (t.header[0].row, t.header[0].col))
     grid._tables = tables
     return tables
 
@@ -1794,7 +1881,7 @@ def _form_one_line(text) -> str:
 
 MAX_RIGHT_STEPS = 10
 MAX_TEXT_ROWS = 30
-# 様式番号の記載（「様式MT-031(1) Rev.1」「製造部 設備保全課 様式MT-031 Rev.2」）。欄外の注記で、項目の値ではない。
+# 様式番号の記載（「様式MT-031(1) Rev.1」「総務部 契約課 様式MT-031 Rev.2」）。欄外の注記で、項目の値ではない。
 # 先頭に無くても注記なので途中でも見るが、長い本文の中の「様式」で値を打ち切らないよう短い1行のセルだけ。
 _FORM_NUMBER_RE = re.compile(r"様式\s*[:：]?\s*[A-Za-z0-9]")
 MAX_FORM_NUMBER_CHARS = 60
@@ -1943,6 +2030,10 @@ def _extract_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str], sto
             result.warning = f"{EXCEL_ERROR_WARNING}（{error}）です。元のファイルで数式を確かめて、値を入力してください"
             return result
         result.value, result.warning = _convert(fd.data_type, values, inline_value, info.date1904, fd.unit)
+        if getattr(values, "truncated", False) and not result.warning:
+            # 1つの欄から読む行数の上限。黙って切らずに知らせる（元のファイルで欄を分けてもらう）
+            result.warning = (f"この欄は {MAX_TEXT_ROWS} 行までしか読めません（続きがあります）。"
+                              "元のファイルで欄を分けるか、1つのセルにまとめてください")
         if fd.data_type == "date" and inline_value is None and len(values) == 1:
             _join_clock_beside(grid, values[0], stop_labels, result)
         if fd.data_type == "number":
@@ -2102,6 +2193,9 @@ def _extract_table_field(info: WorkbookInfo, fd: FieldDef, sheet_names: list[str
         result.sheet, result.label_cell, result.value_cell = name, anchor.coord, table.coord
         result.value = value
         result.table_blocks = 1 + len(blocks)
+        if table.truncated or any(b.truncated for b in blocks):
+            result.warning = (f"明細表が{MAX_TABLE_ROWS}行を超えたため、{MAX_TABLE_ROWS + 1}行目から先は読んでいません。"
+                              "元のファイルで表を分けるか、一覧表として取り込んでください")
         return result
     if not result.label_found:
         result.warning = "ラベルが見つかりません"
@@ -2222,7 +2316,7 @@ def _label_sets(grid: SheetGrid, fd: FieldDef) -> list[tuple[set[str], list[Cell
     label_sets = [(primary, False), (norms - primary, False),
                   (grid.label_variants(fd.label_norms()) - norms, True)]
     if fd.field_name in COMBINED_EQUIPMENT_PARTS:
-        # 設備番号・設備名: 最後に「対象設備：CMP-108　STI-CMP 8号機」のような番号と名前をまとめた欄も見る
+        # 設備番号・設備名: 最後に「対象設備：VH-203　冷凍車 2号車」のような番号と名前をまとめた欄も見る
         label_sets.append((COMBINED_EQUIPMENT_NORMS - norms - label_sets[2][0], True))
     found_sets: list[tuple[set[str], list[Cell]]] = []
     for label_set, variant in label_sets:
@@ -2281,13 +2375,13 @@ def _value_at(grid: SheetGrid, fd: FieldDef, cell: Cell, norms: set[str], stop_l
         if values and _combined_equipment(fd, cell.label_keys):
             values = _code_name_part(fd, values[0])
         if values and part is not None:
-            # 「ライン／工程」→「L6／STI-CMP」: 値も同じ数に分かれるときだけ、その部分を値にする
+            # 「ライン／工程」→「L6／組立」: 値も同じ数に分かれるときだけ、その部分を値にする
             pieces = split_combined_value(values[0].text, len(cell.part_norms))
             if pieces is None:
                 return None
             values = [replace(values[0], value=pieces[part], text=pieces[part])]
         return (cell, values, None) if values else None
-    # 「設備番号　：IMP-603」のように1つのセルに見出しと値が入った版もある。見本で右・下をクリックして
+    # 「設備番号　：EQ-603」のように1つのセルに見出しと値が入った版もある。見本で右・下をクリックして
     # いても、その向きに値が無ければセル内の値を読む（版によって書き方が変わる帳票があるため）
     if not allow_gap and cell.inline is not None and cell.inline[0] in norms:
         if _combined_equipment(fd, cell.inline[:1]):
@@ -2303,7 +2397,7 @@ def _combined_equipment(fd: FieldDef, keys) -> bool:
 
 
 def _code_name_part(fd: FieldDef, cell: Cell) -> list[Cell]:
-    """「CMP-108　STI-CMP 8号機」から項目に当たる部分（番号 or 名前）。分けられない値なら []（このラベルは使わない）。"""
+    """「VH-204　配送車4号車」から項目に当たる部分（番号 or 名前）。分けられない値なら []（このラベルは使わない）。"""
     pieces = split_code_name(cell.text)
     if pieces is None:
         return []
@@ -2325,29 +2419,85 @@ def scan_right(grid: SheetGrid, label: Cell, stop_labels: set[str]) -> list[Cell
     return []
 
 
-def scan_below(grid: SheetGrid, label: Cell, stop_labels: set[str], multi: bool, allow_gap: bool = True) -> list[Cell]:
-    """ラベルの下の値を探す。文章型(multi)は空行か別ラベルまでの連続セルをまとめて取る。
+class ScanResult(list):
+    """scan_below の戻り値。行数の上限で打ち切ったかを truncated で持つ。"""
+
+    truncated = False
+
+
+def scan_below(grid: SheetGrid, label: Cell, stop_labels: set[str], multi: bool,
+               allow_gap: bool = True) -> ScanResult:
+    """ラベルの下の値を探す。文章型(multi)は別ラベルまでの連続セルをまとめて取る。
 
     allow_gap: ラベルの直下が空のとき、1行空けた下を見るか。
+
+    文章型では、**途中の空行1つは読み飛ばして続きを読む**（段落の区切りに空行を入れる帳票が
+    珍しくないため）。空行が2つ以上続いたら、そこが欄の終わりとみなして止める。
+    空行1つで止めていたころは、「対応内容」の下10行のうち後半5行が黙って消えていた
+    （2026-09-23 の利用者の指摘で実測。「読んだ文字は1つも削らない」方針に合っていなかった）。
     """
     col, row = label.col, label.max_row + 1
-    values: list[Cell] = []
-    skipped_empty = False
+    values = ScanResult()
+    # ラベルの右が空なら「ラベル｜値」の様式。押印欄（承認｜確認｜作成 の下に印）のように
+    # 右隣も見出しの様式では、下の行が値なので、下の行を見出し扱いしない
+    label_value_style = grid.cell_at(label.row, label.max_col + 1) is None
+    skipped_empty = False      # ラベルの直下の空行を1つ飛ばしたか（値を取り始める前）
+    blanks = 0                 # 値を取り始めたあとの、続いている空行の数
     while row <= grid.max_row and len(values) < MAX_TEXT_ROWS:
         _, _, bottom, _ = grid.bounds(row, col)
         cell = grid.cell_at(row, col)
         if cell is None:
-            if values or skipped_empty or not allow_gap:
-                break
-            skipped_empty = True
+            if not values:
+                if skipped_empty or not allow_gap:
+                    break
+                skipped_empty = True
+            else:
+                blanks += 1
+                if not multi or blanks >= 2:
+                    break
         else:
-            if is_stop_cell(cell, label, stop_labels) or _value_of_left_label(grid, cell, label, stop_labels):
+            if is_stop_cell(cell, label, stop_labels) or _value_of_left_label(grid, cell, label, stop_labels)                     or (not values and label_value_style and _label_with_own_value(grid, cell, label)):
                 break
+            blanks = 0
             values.append(cell)
             if not multi:
                 break
         row = bottom + 1
+    if multi and len(values) >= MAX_TEXT_ROWS:
+        # 上限で打ち切った可能性がある。まだ続きがあるなら呼び出し元で「要確認」にする
+        values.truncated = _has_value_below(grid, col, row, label, stop_labels)
     return values
+
+
+def _has_value_below(grid: SheetGrid, col: int, row: int, label: Cell, stop_labels: set[str]) -> bool:
+    """打ち切った行より下に、まだこの欄の値が続いているか（空行2つか別ラベルまで見る）。"""
+    blanks = 0
+    while row <= grid.max_row and blanks < 2:
+        _, _, bottom, _ = grid.bounds(row, col)
+        cell = grid.cell_at(row, col)
+        if cell is None:
+            blanks += 1
+        elif is_stop_cell(cell, label, stop_labels) or _value_of_left_label(grid, cell, label, stop_labels):
+            return False
+        else:
+            return True
+        row = bottom + 1
+    return False
+
+
+def _label_with_own_value(grid: SheetGrid, cell: Cell, label: Cell) -> bool:
+    """ラベルの下で見つけたセルが、じつは自分の右に値を持つ別の見出しか。
+
+    「報告者」の値が空の帳票で、その下の「立会区分｜A班」の"立会区分"を報告者の値にしていた。
+    色も太字も付けない見出しの帳票があるので、色ではなく「同じ列にあって、右に自分の値がある」ことで見分ける。
+    値を取り違えて黙って書くより、「ラベルはありますが値が空です」と出すほうが直せる。
+    """
+    if cell.col != label.col or not isinstance(cell.value, str) or not cell.norm:
+        return False
+    if len(cell.norm) > MAX_LABEL_LENGTH or _NUMBER_LIKE.match(cell.norm):
+        return False
+    right = grid.cell_at(cell.row, cell.max_col + 1)
+    return right is not None and right.col > cell.max_col and bool(str(right.text or "").strip())
 
 
 def _value_of_left_label(grid: SheetGrid, cell: Cell, label: Cell, stop_labels: set[str]) -> bool:
@@ -2367,7 +2517,7 @@ def _value_of_left_label(grid: SheetGrid, cell: Cell, label: Cell, stop_labels: 
 
 
 def is_form_number_note(text) -> bool:
-    """欄外の様式番号の注記（「様式MT-031 Rev.1」「製造部 設備保全課 様式MT-031 Rev.2」）か。項目の値にしない。"""
+    """欄外の様式番号の注記（「様式MT-031 Rev.1」「総務部 契約課 様式MT-031 Rev.2」）か。項目の値にしない。"""
     s = str(text or "")
     return "\n" not in s and len(s.strip()) <= MAX_FORM_NUMBER_CHARS and bool(_FORM_NUMBER_RE.search(s))
 
@@ -2532,8 +2682,9 @@ STANDARD_FIELDS = [
     StandardField("subject", "件名", "string", ("件名", "タイトル", "表題")),
     StandardField("equipment_id", "設備番号", "string",
                   ("設備番号", "装置番号", "設備No", "装置No", "設備コード", "装置コード", "設備ID", "機番", "号機",
-                   "Equipment ID")),
-    StandardField("equipment_name", "設備名", "string", ("設備名", "装置名", "設備名称", "装置名称", "機器名")),
+                   "Equipment ID", "対象番号", "対象No", "対象NO", "対象コード", "対象ID", "車両番号", "車両No", "車両コード", "号車", "機器番号", "機器No", "機器コード", "機器ID", "資産番号", "資産No", "資産コード", "物件番号", "物件No", "物件コード", "拠点コード", "拠点番号", "店舗コード", "店舗番号", "現場番号", "現場コード", "製造番号", "製番", "シリアル番号", "車台番号")),
+    StandardField("equipment_name", "設備名", "string",
+                  ("設備名", "装置名", "設備名称", "装置名称", "機器名", "対象名", "車両名", "機器名称", "資産名", "物件名", "拠点名", "店舗名", "現場名")),
     StandardField("process", "工程", "string", ("工程", "発生工程", "工程名")),
     StandardField("location", "発生場所", "string", ("発生場所", "設置場所", "場所", "ライン", "生産ライン", "設置ライン")),
     StandardField("department", "部署", "string", ("部署", "所属", "担当部署", "部署名", "起票部署", "発行部署", "発行元",
@@ -2568,9 +2719,10 @@ LOOKUP: dict[str, StandardField] = {
 DICTIONARY_NORMS: set[str] = set(LOOKUP)
 BY_FIELD_NAME: dict[str, StandardField] = {sf.field_name: sf for sf in STANDARD_FIELDS}
 
-# 設備番号と設備名を1つのセルにまとめて書く見出し（「対象設備：CMP-108　STI-CMP 8号機」）。
+# 設備番号と設備名を1つのセルにまとめて書く見出し（「対象設備：VH-203　冷凍車 2号車」）。
 # 値が「番号＋名前」に分けられるときだけ、設備番号（番号の部分）と設備名（名前の部分）のラベルとして使う
-COMBINED_EQUIPMENT_LABELS = ("対象設備", "使用設備", "対象装置", "使用装置", "設備", "装置")
+COMBINED_EQUIPMENT_LABELS = ("対象設備", "使用設備", "対象装置", "使用装置", "設備", "装置",
+                             "対象", "対象物", "対象機器", "対象車両", "対象物件", "使用車両", "使用機器")
 COMBINED_EQUIPMENT_NORMS: set[str] = {normalize_label(label) for label in COMBINED_EQUIPMENT_LABELS}
 # 分けた値のどちらを使うか（0: 番号, 1: 名前）
 COMBINED_EQUIPMENT_PARTS = {"equipment_id": 0, "equipment_name": 1}
@@ -2645,7 +2797,7 @@ def is_person_label(display_name: str) -> bool:
 # 複数サンプルを渡すと、セル位置が違っても同じラベルが全サンプルにあるかで確度を上げる。
 # ====================================================================================================
 
-_VALUE_LIKE = re.compile(r"^[\x20-\x7e]+$")  # 英数字記号のみ（EQ-001, CMP, 2026/09/14 など）
+_VALUE_LIKE = re.compile(r"^[\x20-\x7e]+$")  # 英数字記号のみ（EQ-001, VH-203, 2026/09/14 など）
 # 注記・凡例の書き出し（「※判定　○」「※故障発生日時…は事後保全時に記入」）
 _NOTE_START = re.compile(r"^\s*[※＊*]")
 # 「－」だけの値（記入なしの印）
@@ -2820,7 +2972,9 @@ def _label_candidates(grid: SheetGrid) -> dict[str, _Suggestion]:
     # 明細表の見出し・列見出しは、1つの値の項目の候補にしない（列見出しの項目は1行目の値しか読めない）
     table_cells = {(c.row, c.col) for t, _ in tables if t.has_room for c in (t.anchor, *t.header)}
     # 表の連番の列見出し（No）は、報告書の「No.」欄の候補にしない
-    table_cells |= {key for key in table_header_keys(grid) if seq_header(grid.cells[key])}
+    # 列見出しが空の1列を埋めた仮の見出しは grid.cells に無いので get で引く
+    table_cells |= {key for key in table_header_keys(grid)
+                    if key in grid.cells and seq_header(grid.cells[key])}
     found: list[tuple[Cell, _Suggestion, list[Cell]]] = []
     for cell in grid.text_cells():
         if (cell.row, cell.col) in table_cells:
@@ -2933,7 +3087,7 @@ def _dict_entry(norm: str):
 
 
 def _equipment_parts(norm: str, label_text: str, value_text: str, cell: Cell) -> list[_Suggestion]:
-    """「対象設備：CMP-108　STI-CMP 8号機」のような番号と名前をまとめた欄から、設備番号・設備名の候補を作る。"""
+    """「対象：VH-204　配送車4号車」のような番号と名前をまとめた欄から、対象の番号・名前の候補を作る。"""
     if norm not in COMBINED_EQUIPMENT_NORMS:
         return []
     pieces = split_code_name(value_text)
@@ -3125,7 +3279,7 @@ def _label_row(grid: SheetGrid, label, value_key, direction: str, used: set[str]
 def split_rows(row: dict, used_names=()) -> list[dict]:
     """クリックで作った項目行を、必要なら複数の項目行にする。
 
-    「使用設備：ROB-821（ウェーハソーター 1号機）」のように番号と名前を1つのセルにまとめた欄は、
+    「使用設備：ROB-821（仕分けロボット）」のように番号と名前を1つのセルにまとめた欄は、
     設備番号・設備名の2項目にする。文字は1つも消さず、同じセルの読む場所を分けるだけ
     （帳票ごとに「対象設備」「使用設備」「設備」と書き方が違うので、探す見出しは全部入れる）。
     """
@@ -3663,7 +3817,7 @@ def _similar(a: set[int], b: set[int]) -> bool:
 # 推定式が実トークン以上になったので、1,200 未満の帳票＝1断片に収まる帳票には識別子を入れない。
 HEADING_IDENTIFIER_TOKENS = 1200
 # 明細表の1節（`## 見出し` から次の見出しまで）の推定トークン数の上限。
-# これを超えると、明細表の途中で切れた断片に識別番号も設備名も1文字も入らないことがあるので、
+# これを超えると、明細表の途中で切れた断片に識別番号も対象の名前も1文字も入らないことがあるので、
 # 識別子を入れる帳票では「（続き）」の見出しで分ける（固定窓 1,200 に対して余裕を取った値）。
 TABLE_SECTION_TOKENS = 800
 # 値が見出し語かどうかを見るのは短い値だけ（長い本文にたまたま同じ語が入っていても消さない）
@@ -3697,7 +3851,7 @@ def build_markdown(doc: dict, extraction: dict) -> str:
         title = f"{type_name} {'｜'.join(title_texts)}"
     else:
         # タイトルに帳票自身の番号（報告番号）が入らないときは、番号らしい項目（作業No. など）と
-        # 日付を拾って足す。設備と日付だけでは、同じ設備の同じ日の作業が見分けられず、
+        # 日付を拾って足す。対象と日付だけでは、同じ対象の同じ日の記録が見分けられず、
         # 番号で探したときに先頭の断片しか当たらない（2026-09-23 のレビューで実測）
         has_report_id = any(f["field_name"] == "report_id" for f in title_fields)
         has_date = any(f["data_type"] == "date" for f in title_fields)
@@ -3706,7 +3860,7 @@ def build_markdown(doc: dict, extraction: dict) -> str:
         if extras:
             title_texts, heading_texts = [*title_texts, *extras], [*heading_texts, *extras]
         elif _has_equipment_only(title_fields):
-            # 設備だけで、番号らしい項目も日付も読めなかった。元ファイル名で見分ける
+            # 対象だけで、番号らしい項目も日付も読めなかった。元ファイル名で見分ける
             # （足さないと、同じ設備の帳票がすべて同じタイトル・同じ見出しになる）
             title_texts, heading_texts = [*title_texts, stem], [*heading_texts, stem]
         elif not _has_identifier(title_fields):
@@ -3730,8 +3884,8 @@ def build_markdown(doc: dict, extraction: dict) -> str:
         marked = bool(with_identifier and identifier)
         blocks = [head, basics]
         if marked:
-            # 基本情報も分ける。短い項目が何十件もある点検表では、ここが1つの塊のままだと
-            # 途中で切られた断片に帳票番号も設備名も入らない（2026-09-23 のレビューで実測）
+            # 基本情報も分ける。短い項目が何十件もある帳票（在庫の棚卸表など）では、ここが1つの塊のままだと
+            # 途中で切られた断片に帳票番号も対象の名前も入らない（2026-09-23 のレビューで実測）
             blocks = [head]
             for i, part in enumerate(_split_section_lines(basics, identifier)):
                 blocks.append(part if i == 0
@@ -3760,7 +3914,7 @@ def build_markdown(doc: dict, extraction: dict) -> str:
         return _join_blocks(blocks)
 
     text = render(False)
-    # 長文・明細表の節が無い帳票（短い項目が何十件もある点検表）でも、窓を超えるなら識別子を入れて分ける。
+    # 長文・明細表の節が無い帳票（短い項目が何十件も並ぶだけの帳票）でも、窓を超えるなら識別子を入れて分ける。
     # 以前は long_fields があるときだけだったので、基本情報だけで窓を超える帳票が素通りしていた
     if identifier and _estimate_tokens(text) > HEADING_IDENTIFIER_TOKENS:
         text = render(True)
@@ -3771,7 +3925,7 @@ def _split_section_lines(lines: list[str], identifier: str = "") -> list[list[st
     """節の行を、1節が TABLE_SECTION_TOKENS に収まるまとまりに分ける。
 
     分けないと、節の行だけで埋まった断片（LightRAG のチャンク）ができ、
-    その断片の中に識別番号も設備名も日付も1文字も無くなる（docs/research.md 2章（LightRAG オフライン評価）8.5）。
+    その断片の中に識別番号も対象の名前も日付も1文字も無くなる（docs/research.md 2章（LightRAG オフライン評価）8.5）。
     2つ目以降の見出しに識別子を書き足すので、その分を上限から引く（引かないと、
     識別子が長い帳票で1つの節が窓を超えることがある）。
     """
@@ -3850,7 +4004,7 @@ def _title_fields(pattern: dict, all_fields: list[dict], shown: list[dict]) -> l
 
 
 def _has_identifier(fields: list[dict]) -> bool:
-    """タイトル項目に、その帳票を見分けられるもの（識別番号・設備）があるか。"""
+    """タイトル項目に、その帳票を見分けられるもの（識別番号・対象）があるか。"""
     return any(f["field_name"] in ("report_id", "equipment_id", "equipment_name") for f in fields)
 
 
@@ -3900,7 +4054,7 @@ def _fallback_field(filled: list[dict], title_fields: list[dict]) -> dict | None
     return found[0] if found else None
 
 
-# タイトル・識別子に出す1つの値の上限（字）。設備名のセルの隣の注記まで1つの値として読んだ帳票では、
+# タイトル・識別子に出す1つの値の上限（字）。対象の名前のセルの隣の注記まで1つの値として読んだ帳票では、
 # 識別子1つが推定254トークンになり、見出しの繰り返しだけで md の3割を占めていた（2026-09-23 のレビュー）
 TITLE_VALUE_CHARS = 40
 
@@ -3923,6 +4077,16 @@ def _title_texts(fields: list[dict], heading: bool) -> list[str]:
     return [t for t in texts if t]
 
 
+def _entity_bullet_name(display_name: str) -> str:
+    """番号と名前をまとめた1行の項目名。番号の項目名から「番号・No・コード・ID」を落として作る。
+
+    「設備番号」→ 設備、「車両番号」→ 車両、「店舗コード」→ 店舗。落とすものが無ければそのまま。
+    対象は業種によって設備・車両・店舗・物件などさまざまなので、「設備」に決め打ちしない。
+    """
+    stem = _ENTITY_ID_SUFFIX.sub("", str(display_name or "").strip()).strip()
+    return stem or str(display_name or "").strip() or "対象"
+
+
 def _basic_lines(filled: list[dict]) -> list[str]:
     short = [f for f in filled if f["data_type"] not in ("text", "table")]
     names = {f["field_name"]: f for f in short}
@@ -3934,7 +4098,7 @@ def _basic_lines(filled: list[dict]) -> list[str]:
             if not done_pair:
                 eq_id, eq_name = names["equipment_id"], names["equipment_name"]
                 value = f"{_plain_value(eq_name)}（{_plain_value(eq_id)}）"
-                lines += _md_bullet("設備", value)
+                lines += _md_bullet(_entity_bullet_name(eq_id["display_name"]), value)
                 done_pair = True
             continue
         lines += _md_bullet(_md_one_line(f["display_name"]), _format_value(f))
@@ -4029,7 +4193,7 @@ def _md_one_line(value) -> str:
 def md_value_text(text) -> str:
     """値の正規化（NFKC＋空白の畳み込み）。丸数字などの囲み文字（①②Ⓐ㋐）は原文どおり残す。
 
-    ①→1 にすると「①破損ウェーハ片を回収」が「1破損ウェーハ片を回収」になり、番号と本文の区切りが消える。
+    ①→1 にすると「①申込書を回収」が「1申込書を回収」になり、番号と本文の区切りが消える。
     ㈱→(株)、⑴→(1) のように区切りが残る表記は今までどおり正規化する（core/mdtext.nfkc_keep_enclosed）。
     """
     s = "" if text is None else str(text).replace("_x000D_", "")
@@ -4088,6 +4252,7 @@ class CellInfo:
     strike: bool = False
     fill: bool = False
     merged_anchor: tuple[int, int] | None = None  # 結合範囲の左上 (行, 列)。1始まり。左上セル自身も自分を指す
+    link: str = ""  # セルに貼られたリンク先（Excel のハイパーリンク）。CSV には無いので常に ""
 
 
 @dataclass
@@ -4349,11 +4514,19 @@ def _detect_encoding(path: Path, head: bytes) -> tuple[str, bool, int | None]:
         if even_nul > 0.3 and odd_nul < 0.05:
             return "utf-16-be", False, _full_decode_error_line(path, "utf-16-be")
 
+    iso_line = _iso2022_line(path)
+    if iso_line is not None:
+        # ISO-2022-JP（JIS コード）はすべて 7bit ASCII の範囲なので、utf-8 として素通りしてしまう。
+        # エスケープの並び（ESC $ B など）は普通の文章に出ないので、これを見つけたら迷わずこの文字コードにする
+        return "iso2022_jp", False, _full_decode_error_line(path, "iso2022_jp")
+
     best: tuple[int, str, int] | None = None  # (失敗位置, 文字コード, 行)
     cp932_line: int | None = None
-    for enc in ("utf-8", "cp932", "shift_jis_2004"):
+    for enc in ("utf-8", "cp932", "shift_jis_2004", "euc_jp"):
         err = _full_decode_error(path, enc)
         if err is None:
+            if enc in ("cp932", "shift_jis_2004") and _looks_like_euc_jp(path, head):
+                return "euc_jp", False, _full_decode_error_line(path, "euc_jp")
             if enc == "shift_jis_2004" and cp932_line is not None and _has_cp932_only_chars(path):
                 # CP932 の拡張文字（髙・﨑 など）を含むファイルに読めないバイトが混じっただけ。
                 # Shift_JIS-2004 で読むと 髙→郄 のように別の字に化けるので、CP932 のまま読めない行を知らせる
@@ -4366,6 +4539,49 @@ def _detect_encoding(path: Path, head: bytes) -> tuple[str, bool, int | None]:
             best = (pos, enc, line)
     assert best is not None
     return best[1], False, best[2]
+
+
+_ISO2022_ESCAPES = (b"\x1b$B", b"\x1b$@", b"\x1b$(D", b"\x1b(J", b"\x1b(I")
+_HALFWIDTH_KANA = re.compile(r"[｡-ﾟ]")
+_HIRAGANA = re.compile(r"[ぁ-ゖ]")
+
+
+def _iso2022_line(path: Path) -> int | None:
+    """ISO-2022-JP（JIS コード）の切り替えエスケープが最初に出る物理行。無ければ None。"""
+    line = 0
+    tail = b""
+    with path.open("rb") as f:
+        while chunk := f.read(_CHUNK):
+            buf = tail + chunk
+            for esc in _ISO2022_ESCAPES:
+                at = buf.find(esc)
+                if at >= 0:
+                    return line + buf[:at].count(b"\n") + 1
+            line += chunk.count(b"\n")
+            tail = buf[-4:]  # チャンクの境目でエスケープが割れても拾えるように持ち越す
+    return None
+
+
+def _looks_like_euc_jp(path: Path, head: bytes) -> bool:
+    """CP932 として読めてしまうが、中身は EUC-JP か。
+
+    EUC-JP の漢字・かなは2バイトとも 0xA1〜0xFE で、CP932 では半角カタカナ2文字として
+    エラーにならずに読めてしまう。「読めた」だけでは見分けられないので中身で判断する。
+    　条件1: CP932 として読むと非 ASCII がほぼ全部半角カタカナになる（EUC-JP 誤読の特徴）
+    　条件2: EUC-JP として全文が読めて、ひらがなが相応に出てくる（日本語の文章なら必ず出る）
+    半角カタカナだけで書かれた本物の CP932 のファイルを取り違えないよう、条件2を必ず確かめる。
+    """
+    if head.isascii():
+        return False
+    as_cp932 = head.decode("cp932", errors="replace")
+    non_ascii = sum(1 for ch in as_cp932 if ord(ch) > 0x7F)
+    if not non_ascii or len(_HALFWIDTH_KANA.findall(as_cp932)) / non_ascii < 0.9:
+        return False
+    if _full_decode_error(path, "euc_jp") is not None:
+        return False
+    as_euc = head.decode("euc_jp", errors="replace")
+    euc_non_ascii = sum(1 for ch in as_euc if ord(ch) > 0x7F)
+    return bool(euc_non_ascii) and len(_HIRAGANA.findall(as_euc)) / euc_non_ascii >= 0.1
 
 
 def _has_cp932_only_chars(path: Path) -> bool:
@@ -4659,7 +4875,10 @@ def _reject_binary(path: Path) -> None:
         odd_nul = head[1::2].count(0) / max(1, len(head[1::2]))
         if (odd_nul > 0.3 and even_nul < 0.05) or (even_nul > 0.3 and odd_nul < 0.05):
             return  # BOMなしの UTF-16
-    control = sum(1 for b in head if b < 0x20 and b not in (0x09, 0x0A, 0x0D))
+    allowed = {0x09, 0x0A, 0x0D}
+    if any(esc in head for esc in _ISO2022_ESCAPES):
+        allowed.add(0x1B)  # ISO-2022-JP（JISコード）は文字の切り替えに ESC を使う。これはバイナリではない
+    control = sum(1 for b in head if b < 0x20 and b not in allowed)
     if head and control > 0.1 * len(head):
         raise UploadError("テキストのCSVではありません（中身がバイナリです）。CSV・TSV・テキストのファイルを選んでください")
 
@@ -4763,6 +4982,24 @@ def _split_sheet_xml(f) -> bytes:
         if not chunk:
             return before + empty  # 閉じタグがない（openpyxl でも読めない形）
         rest = rest[-64:] + chunk
+
+
+MAX_LINK_CHARS = 500  # md に書くリンク先の上限（これより長いリンクは切る）
+
+
+def _cell_link(cell) -> str:
+    """セルに貼られたリンク先（ハイパーリンク）。無ければ ""。
+
+    社内の一覧表では、備考の欄に報告書や図面へのリンクを貼ることがよくある。
+    セルに見えている文字は「報告書」だけなので、リンク先を捨てると手がかりが消える。
+    """
+    link = getattr(cell, "hyperlink", None) if cell is not None else None
+    if link is None:
+        return ""
+    target = getattr(link, "target", None) or ""
+    location = getattr(link, "location", None) or ""
+    joined = f"{target}#{location}" if target and location else str(target or location or "")
+    return joined[:MAX_LINK_CHARS]
 
 
 def _sheet_extras(wb, zf: zipfile.ZipFile, ws_ro, shared_strings, table_names: set[str]) -> dict:
@@ -5235,7 +5472,8 @@ class ExcelSource:
                             row_cells.append(CellInfo(value=None, text="", merged_anchor=anchor))
                             continue
                         row_cells.append(CellInfo(value=value, text=table_cell_text(value), number_format=number_format,
-                                                  bold=bold, strike=strike, fill=fill, merged_anchor=anchor))
+                                                  bold=bold, strike=strike, fill=fill, merged_anchor=anchor,
+                                                  link=_cell_link(m)))
                     done = r
                     yield SourceRow(index=r, cells=row_cells, hidden=_row_hidden(attrs))
         except (UploadError, GeneratorExit):
@@ -5268,6 +5506,7 @@ HEADER_SEARCH_ROWS = 40  # 見出し行の候補にする先頭行数
 PREVIEW_ROWS = 60  # row_classes に全行を載せる先頭行数
 MAX_ROW_CLASSES = 500
 BLANK_ROWS_END = 3
+BLANK_GAP_NEW_TABLE = 2  # これだけ空行が続いたあとの行は、別の表の始まりかを確かめる
 LOOKAHEAD_ROWS = 300
 KEY_SAMPLE_ROWS = 50
 
@@ -5318,6 +5557,7 @@ class LayoutGuess:
     header_levels: list[list[str]] = field(default_factory=list)  # 見出しの段ごとの元の文字列（表示用）
     key_columns: list[int] = field(default_factory=list)  # 継続行の判定に使う列（0始まり）
     counts: dict[str, int] = field(default_factory=dict)  # データ範囲内の行の種類ごとの件数
+    errors: list[str] = field(default_factory=list)  # これがあると先に進めない（見出し行が無い表など）
 
 
 # ---- 公開関数 ----
@@ -5384,7 +5624,8 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
     width, split_warning = _table_width(by_index, rows_h, levels)
     if split_warning:
         warnings.append(split_warning)
-    header_is_data = _header_looks_like_data(by_index.get(rows_h[-1]), width)
+    below_rows = [by_index[i] for i in sorted(by_index) if i > rows_h[-1] and not by_index[i].is_blank][:12]
+    header_is_data = _header_looks_like_data(by_index.get(rows_h[-1]), width, below_rows)
     headers = _dedupe((headers + [""] * width)[:width])
     levels = [(lv + [""] * width)[:width] for lv in levels]
     data_start = rows_h[-1] + 1
@@ -5419,10 +5660,24 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
         table_kind = "form_like"
     else:
         table_kind = "unknown"
+    errors: list[str] = []
     if header_is_data and table_kind != "crosstab":
-        # 見出し行のないCSVでは1行目の値が見出し（＝取り込み設定に残る列名）になり、その記録も md に出ない
-        warnings.append("見出し行がデータのように見えます（日付・数値や長い文章が並んでいます）。"
-                        "見出し行のない表には対応していません。1行目に列名を入れてから取り込み直してください")
+        # 見出し行が無い表では1行目の値が列名になり、その1件は md に出ない（黙って1件消える）
+        chosen_by_hand = bool(header_rows or header_row)
+        above = None if chosen_by_hand else _header_row_above(by_index, rows_h[0], width)
+        if above is not None:
+            # 上に「見出しになれる行」（項番だけの行・空白だけの行など）がある。そこを見出しにすれば1件も落ちない
+            again = guess_layout(source, sheet, anchors, header_row=above, data_end=data_end,
+                                 max_scan_rows=max_scan_rows, scan_memo=scan_memo)
+            again.warnings.insert(0, f"{rows_h[-1]}行目は値が並んでいるのでデータとして扱い、{above}行目を"
+                                     "見出し行として読みました。違うときは見出し行を指定し直してください")
+            return again
+        if chosen_by_hand:
+            warnings.append(f"{rows_h[-1]}行目を見出しとして読みました。この行の値（日付・番号など）は列名になり、"
+                            "記録としては取り込みません。データの1行目なら、上に列名の行を足してください")
+        else:
+            errors.append("見出し行が見つかりません（1行目から値が並んでいます）。見出し行のない表には対応していません。"
+                          "1行目に列名を入れて取り込み直すか、見出し行の番号を指定してください")
     if table_kind in ("form_like", "unknown"):
         warnings.append("一覧表の形に見えません（見出しの下に同じ形の行が続いていません）")
 
@@ -5433,7 +5688,7 @@ def guess_layout(source, sheet, anchors: list[str] | None = None, header_row: in
     confidence = round(max(0.0, min(1.0, score)) * min(1.0, data_rows / 5), 3)
     return LayoutGuess(
         sheet=sheet, table_kind=table_kind, header_rows=rows_h, data_start=data_start, data_end=end,
-        headers=headers, row_classes=classes, confidence=confidence, warnings=warnings,
+        headers=headers, row_classes=classes, confidence=confidence, warnings=warnings, errors=errors,
         header_levels=levels, key_columns=ctx.key_cols, counts=counts,
     )
 
@@ -5669,7 +5924,8 @@ def _pair_is_header(top: SourceRow, bottom: SourceRow, after: SourceRow | None, 
     top_cells = [c for c in top.cells[:width] if c.text] if width else [c for c in top.cells if c.text]
     bottom_cells = [c for c in bottom.cells[:width] if c.text] if width else [c for c in bottom.cells if c.text]
     if len(bottom_cells) < 2:
-        return False
+        # 見出しの下に単位だけを書いた行（D列だけ「(分)」など）。2段目として取り込む
+        return _unit_only_row(bottom, top, width)
     if len(top_cells) < 2 and not _spans_whole_width(top, width):
         # 上段が1セルだけならタイトル行とみなす。ただし、それが幅いっぱいの横結合なら
         # 2段見出しの上段（「使用部品」＋品番/数量/単価）なので通す（2026-09-23 のレビューで実測）
@@ -5694,6 +5950,33 @@ def _pair_is_header(top: SourceRow, bottom: SourceRow, after: SourceRow | None, 
         # 結合した2段見出しを書き出したCSV: 上段の見出しは横に広がる列の左端にだけあり、右隣の空欄の下に下段がある
         return _csv_spanned_pair(top, bottom)
     return False
+
+
+def _unit_only_row(bottom: SourceRow, top: SourceRow, width: int) -> bool:
+    """下の行の埋まっているセルが単位だけで、その真上に見出しの文字があるか。
+
+    「日付/設備/作業内容/停止時間/担当」の下に「(分)」だけを書く表は普通にある。
+    2段見出しと見なさないと、この行が1件のデータになり、日付も数値も読めず error で止まっていた。
+    """
+    cells = bottom.cells[:width] if width else bottom.cells
+    positions = [i for i, c in enumerate(cells) if c.text]
+    if not positions:
+        return False
+    for i in positions:
+        if not _unit_token(cells[i].text):
+            return False
+        above = top.cell(i)
+        if above is None or not above.text:
+            return False  # 単位の真上に見出しが無い（別の行かもしれない）
+    return True
+
+
+def _unit_token(text: str) -> str:
+    """「(分)」「分」のように単位だけのセルなら、その単位。違えば ""。"""
+    s = unicodedata.normalize("NFKC", str(text or "")).strip()
+    inner = s[1:-1].strip() if s.startswith("(") and s.endswith(")") else s
+    # normalize_unit は知らない語もそのまま返すので、単位かどうかは _unit_like で確かめる
+    return normalize_unit(inner) if inner and len(inner) <= 6 and _unit_like(inner) else ""
 
 
 def _csv_spanned_pair(top: SourceRow, bottom: SourceRow) -> bool:
@@ -5750,8 +6033,19 @@ def _build_headers(by_index: dict[int, SourceRow], rows_h: list[int], is_csv: bo
         for lv in levels:
             if lv[i] and (not parts or parts[-1] != lv[i]):
                 parts.append(lv[i])
-        headers.append("_".join(parts))
+        headers.append(_join_header_parts(parts))
     return levels, headers
+
+
+def _join_header_parts(parts: list[str]) -> str:
+    """見出しの段をつなぐ。下の段が単位だけなら「所要時間(分)」と続けて書く（「所要時間_(分)」にしない）。"""
+    out = ""
+    for part in parts:
+        if out and _unit_token(part):
+            out += part if part.startswith("(") else f"({part})"
+        else:
+            out = f"{out}_{part}" if out else part
+    return out
 
 
 def _clean_header(text: str) -> str:
@@ -5814,17 +6108,75 @@ def _table_width(by_index: dict[int, SourceRow], rows_h: list[int], levels: list
     return last, ""
 
 
-def _header_looks_like_data(row: SourceRow | None, width: int) -> bool:
-    """見出し行の値の半分以上が日付・数値か、40字を超える文章があるか。"""
+def _header_looks_like_data(row: SourceRow | None, width: int, below: list[SourceRow] | None = None) -> str:
+    """見出し行として選んだ行が、じつはデータの1行目か。当てはまれば理由（"date"/"code"/"number"/"same"）。
+
+    決め手は「下の行と列ごとの形（日付・数値・文字）がそろっているか」。見出し行は下の行と形が違う。
+    値の見た目だけで決めていたころは、長い列名（設問文）や「①②③」の見出しにも出て、直しようのない案内になっていた。
+    逆に、日付と数値が半分に届かない一覧表（日付・取引先・内容・分・担当）では1行目がデータでも気づけず、
+    1件を黙って落としていた（2026-09-23 の形の総ざらいで実測）。
+    """
     if row is None:
-        return False
+        return ""
     filled = [c for c in (row.cells[:width] if width else row.cells) if c.text]
     if len(filled) < 2:
+        return ""
+    texts = [c.text for c in filled]
+    if any(len(t) <= 20 and (lookup_header(t) or (None, ""))[1] == "dictionary" for t in texts):
+        return ""  # 辞書に当たる列名が1つでもあれば見出し
+    if sum(1 for t in texts if len(t) > 40) * 2 >= len(texts):
+        return ""  # 半分以上が長い文章＝設問文を列名にした表（1つだけなら値の可能性がある）
+    rows_below = [r for r in (below or []) if not r.is_blank]
+    if not rows_below or not _same_column_shape(row, rows_below, width):
+        return ""
+    kinds = [value_kind(c.value, c.text) for c in filled]
+    if any(k in ("date", "datetime") for k in kinds):
+        return "date"  # 見出しが日付のことはない
+    if sum(1 for k in kinds if k in ("number", "date", "datetime")) * 2 >= len(kinds):
+        return "number"
+    if sum(1 for t in texts if _looks_like_code_value(t)) >= 2:
+        return "code"
+    return "same"
+
+
+def _header_row_above(by_index: dict[int, SourceRow], first: int, width: int) -> int | None:
+    """選んだ見出し行の上に、見出しとして使える行があればその行番号。
+
+    「1,2,3,4,5」の項番行や空白だけの行は点数が低くて見出しに選ばれないが、
+    そこを見出しにすればデータの1行目を落とさずに読める（列名は「列1」などになる）。
+    """
+    for index in range(first - 1, max(0, first - HEADER_SEARCH_ROWS), -1):
+        row = by_index.get(index)
+        if row is None or row.is_blank:
+            continue
+        below = [by_index[i] for i in sorted(by_index) if i > index and not by_index[i].is_blank][:12]
+        return None if _header_looks_like_data(row, width, below) else index
+    return None
+
+
+def _looks_like_code_value(text: str) -> bool:
+    """「P-1000」「SUS304」のような、値にしか見えない英数字の並びか（列名なら「品番」のような語になる）。"""
+    s = str(text or "").strip()
+    return bool(s) and len(s) <= 24 and s.isascii() and any(ch.isdigit() for ch in s) \
+        and any(ch.isalpha() for ch in s)
+
+
+def _same_column_shape(row: SourceRow, below: list[SourceRow], width: int, need: float = 0.8) -> bool:
+    """その行と下の行が、列ごとに同じ形（日付・数値・文字）でそろっているか。"""
+    cols = [i for i, c in enumerate(row.cells[:width] if width else row.cells) if c.text]
+    if len(cols) < 2:
         return False
-    if any(len(c.text) > 40 for c in filled):
-        return True
-    data_like = sum(1 for c in filled if value_kind(c.value, c.text) in ("number", "date", "datetime"))
-    return data_like * 2 >= len(filled)
+    same = 0
+    for i in cols:
+        mine = value_kind(row.cells[i].value, row.cells[i].text)
+        theirs = Counter()
+        for r in below[:12]:
+            cell = r.cell(i)
+            if cell is not None and cell.text:
+                theirs[value_kind(cell.value, cell.text)] += 1
+        if theirs and theirs.most_common(1)[0][0] == mine:
+            same += 1
+    return same >= need * len(cols)
 
 
 # ---- 内部: 行の分類 ----
@@ -5936,7 +6288,7 @@ def _keys_merged_from_above(row: SourceRow, ctx: _Ctx) -> bool:
     """キー列がすべて上のデータ行からの縦結合（または空）で、この行だけの値が文字だけか。
 
     管理No・日付を縦に結合して1件の対応内容を複数行に書いた表を、1件にまとめるため。
-    数値・日付がこの行にあるなら別の記録（同じ日の部品交換の2件目など）として扱う。
+    数値・日付がこの行にあるなら別の記録（同じ日の2件目など）として扱う。
     """
     top = ctx.header_rows[-1] if ctx.header_rows else 0
     merged = 0
@@ -5994,6 +6346,18 @@ def _auto_key_columns(source, sheet, data_start: int, ctx: _Ctx) -> list[int]:
     return [col for _, col in sorted(candidates)[:3]]
 
 
+def _other_table_starts(row: SourceRow, ctx: _Ctx) -> bool:
+    """空行をはさんだ先の行が、別の表の始まりに見えるか（本体よりずっと狭い、または見出しらしい）。"""
+    width = ctx.width
+    cells = row.cells[:width] if width else row.cells
+    filled = [c for c in cells if c.text]
+    if not filled or not width:
+        return False
+    if width >= 3 and len(filled) <= max(1, width // 3):
+        return True
+    return bool(width >= 2 and len(filled) < width and _headerish(row, width))
+
+
 def _scan(source, sheet, head: list[SourceRow], ctx: _Ctx, data_start: int, data_end: int | None,
           max_scan_rows: int | None):
     """先頭からデータの終わりまで分類する。戻り値: (row_classes, counts, data_end, warnings)"""
@@ -6024,6 +6388,7 @@ def _scan(source, sheet, head: list[SourceRow], ctx: _Ctx, data_start: int, data
         record(RowClass(row.index, kind, "表の上" if kind in ("title", "note") else ""))
 
     last_nonblank = data_start - 1
+    below_row = 0
     blank_run = 0
     blank_total = 0
     end: int | None = None
@@ -6059,6 +6424,13 @@ def _scan(source, sheet, head: list[SourceRow], ctx: _Ctx, data_start: int, data
             end = last_nonblank
             after_rows.append(row)
             stop_reason = rc.kind
+            continue
+        if blank_run >= BLANK_GAP_NEW_TABLE and _other_table_starts(row, ctx):
+            # 空行をはさんだ先が別の表の始まり（集計表など）。右にある表と同じく、最初の表だけを読む
+            end = last_nonblank
+            below_row = row.index
+            after_rows.append(row)
+            stop_reason = "below"
             continue
         blank_total += blank_run  # 途中の空行はデータ範囲に数える
         blank_run = 0
@@ -6108,6 +6480,9 @@ def _scan(source, sheet, head: list[SourceRow], ctx: _Ctx, data_start: int, data
         )
     if stop_reason == "header":
         warnings.append(f"{end + 1}行目で見出しが再び出たので、そこで読み取りを止めました")
+    if stop_reason == "below":
+        warnings.append(f"下側（{below_row}行目以降）に別の表があるようです。最初の表（{data_start}〜{end}行目）だけを"
+                        "読み取ります。残りは範囲を指定して1つずつ取り込んでください")
     if counts.get("excluded"):
         warnings.append(f"除外した行が{counts['excluded']}行あります（非表示・取り消し線など）")
     classes.sort(key=lambda rc: rc.index)
@@ -6194,10 +6569,13 @@ STANDARD_COLUMNS: list[StdColumn] = [
     _c("completed_at", "完了日", "datetime", "attribute", ["完了日", "完了日時", "復旧日時", "復旧日", "終了日", "終了日時"]),
     _c("due_date", "期限", "date", "attribute", ["期限", "対策期限", "完了予定日", "予定日"]),
     # 設備・場所
+    # 「対象」＝その記録が何についてのものか。設備はその一例なので、ほかの業種の言い方も当てる
     _c("equipment_id", "設備番号", "code", "entity",
        ["設備番号", "設備No", "設備NO", "設備コード", "設備ID", "装置番号", "装置No", "装置ID", "装置コード",
-        "機番", "号機", "対象設備", "設備"]),
-    _c("equipment_name", "設備名", "string", "entity_label", ["設備名", "装置名", "設備名称", "装置名称", "機器名"]),
+        "機番", "号機", "対象設備", "設備",
+        "対象番号", "対象No", "対象NO", "対象コード", "対象ID", "車両番号", "車両No", "車両コード", "号車", "機器番号", "機器No", "機器コード", "機器ID", "資産番号", "資産No", "資産コード", "物件番号", "物件No", "物件コード", "拠点コード", "拠点番号", "店舗コード", "店舗番号", "現場番号", "現場コード", "製造番号", "製番", "シリアル番号", "車台番号"]),
+    _c("equipment_name", "設備名", "string", "entity_label",
+       ["設備名", "装置名", "設備名称", "装置名称", "機器名", "対象名", "車両名", "機器名称", "資産名", "物件名", "拠点名", "店舗名", "現場名"]),
     _c("equipment_class", "設備分類", "enum", "attribute", ["設備分類", "設備分類コード", "設備区分", "装置区分", "設備種別"]),
     _c("line", "ライン", "string", "attribute", ["ライン", "ラインコード", "ライン名", "製造ライン"]),
     _c("process", "工程", "string", "attribute", ["工程", "工程名", "工程コード"]),
@@ -7201,9 +7579,9 @@ def spec_from_suggestions(name: str, layout, suggestions, options: dict | None =
 
 # ====================================================================================================
 # 元 tables/records.py
-# 記録の値の見方（設備の列、日付の月、数値の書き方）。
+# 記録の値の見方（対象の列、日付の月、数値の書き方）。
 #
-# `tables/summaries.py`（月次集計・設備別年度集計・データセット説明）から、記録ファイルの作成に必要な
+# `tables/summaries.py`（月次集計・対象別年度集計・データセット説明）から、記録ファイルの作成に必要な
 # 共通の処理だけを残したもの。集計は 2026-09-20 に外した（docs/design.md 6.3）。
 # 書き方（桁区切り・単位）を1か所にまとめて、同じデータから同じ md が出るようにする。
 # ====================================================================================================
@@ -7271,7 +7649,7 @@ def is_month(text) -> bool:
             and 1 <= int(s[5:7]) <= 12 and 1 <= int(s[:4]) <= 9999)
 
 
-# ---- 設備の列 --------------------------------------------------------------------------
+# ---- 対象の列 --------------------------------------------------------------------------
 
 def entity_columns(spec: TableSpec):
     entity = spec.first_role("entity")
@@ -7281,26 +7659,26 @@ def entity_columns(spec: TableSpec):
 
 _CODE_NAME_PAREN = re.compile(r"^([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]*[（(][ 　]*(.+?)[ 　]*[)）]$")
 _CODE_NAME_SPACE = re.compile(r"^([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]+(\S.*)$")
-# 「名前（番号）」の並び（「Oxideエッチャ 2号機（ETC-302）」）。番号が後ろにあっても同じ設備として扱う。
+# 「名前（番号）」の並び（「4tトラック 2号車（ETC-302）」）。番号が後ろにあっても同じ対象として扱う。
 _NAME_CODE_PAREN = re.compile(r"^(.+?)[ 　]*[（(][ 　]*([0-9A-Za-z][0-9A-Za-z\-_/.]{0,19})[ 　]*[)）]$")
 _HAS_DIGIT = re.compile(r"\d")
 _HAS_ALPHA = re.compile(r"[A-Za-z]")
 _TABLE_CODE_ONLY = re.compile(r"^[0-9A-Za-z][0-9A-Za-z\-_/.]*$")
 # 番号の後ろの括弧が名前ではなく但し書きのとき（「IMP-602（推定）」）。番号だけを残す
 _QUALIFIERS = {"推定", "仮", "予定", "調査中", "不明", "未定", "確認中", "暫定", "候補", "要確認", "代替", "予備", "旧", "新"}
-# 設備の列の値がこれだけなら、設備が決まっていない（設備ごとのファイル分けに入れない）
+# 対象の列の値がこれだけなら、対象が決まっていない（対象ごとのファイル分けに入れない）
 _PLACEHOLDER_ENTITIES = {"推定", "仮", "予定", "調査中", "不明", "未定", "確認中", "暫定", "要確認",
-                         "〃", "′′", "同上", "々", "仝"}  # 補えなかった「上と同じ」の記号も設備ではない
+                         "〃", "′′", "同上", "々", "仝"}  # 補えなかった「上と同じ」の記号も対象ではない
 
 
 def split_entity_code(text) -> tuple[str, str]:
-    """「ETC-302(OXIDEエッチャ 2号機)」「CVD-203 W-CVD 3号機」「Oxideエッチャ 2号機（ETC-302）」→ (設備番号, 名前)。
+    """「ETC-302(4tトラック 2号車)」「KJ-118 新橋支店 改装工事」「4tトラック 2号車（ETC-302）」→ (番号, 名前)。
 
     「IMP-602（推定）」のように括弧が但し書きなら (番号, "")。分けられなければ (原文, "")。設備名の列がない台帳で、同じ設備が「番号だけ」「番号＋名前」「名前＋番号」と
     揺れるとファイル分けが割れるため、番号にそろえる。
     """
     s = " ".join(str(text or "").split())
-    # 後ろの括弧の番号を先に見る: 「Fab1 OHTシステム（OHT-801）」の番号は Fab1 ではなく OHT-801
+    # 後ろの括弧の番号を先に見る: 「B2 立体駐車場（PK-801）」の番号は B2 ではなく PK-801
     for pattern in (_NAME_CODE_PAREN, _CODE_NAME_PAREN, _CODE_NAME_SPACE):
         m = pattern.match(s)
         if not m:
@@ -7312,21 +7690,21 @@ def split_entity_code(text) -> tuple[str, str]:
         if not name or not _HAS_DIGIT.search(code) or not _HAS_ALPHA.search(code):
             continue
         if pattern is _CODE_NAME_PAREN and name in _QUALIFIERS:
-            return code, ""  # 番号は残し、但し書きは設備名にしない
+            return code, ""  # 番号は残し、但し書きは名前にしない
         if all(_TABLE_CODE_ONLY.match(p) for p in re.split(r"[\s,、/]+", name) if p):
-            continue  # 名前の側も番号だけ（「CMP-101 / CMP-102」）なら分けない
+            continue  # 名前の側も番号だけ（「VH-203 / VH-204」）なら分けない
         return code, name
     return s, ""
 
 
 def entity_value(values: dict, spec: TableSpec) -> tuple[str, str]:
-    """(設備番号, 設備名)。設備名の列がない code 列では「番号(名前)」を分ける（ファイル分けの単位をそろえる）。"""
+    """(対象の番号, 対象の名前)。名前の列がない code 列では「番号(名前)」を分ける（ファイル分けの単位をそろえる）。"""
     entity, label = entity_columns(spec)
     if entity is None:
         return "", ""
     raw = " ".join(str(values.get(entity.key) or "").split())
     if unicodedata.normalize("NFKC", raw).strip("（）() ") in _PLACEHOLDER_ENTITIES:
-        return "", ""  # 「調査中」だけの値は設備ではない（記録の本文には原文のまま出る）
+        return "", ""  # 「調査中」だけの値は対象ではない（記録の本文には原文のまま出る）
     if label is not None:
         return raw, " ".join(str(values.get(label.key) or "").split())
     if entity.type == "code" and raw:
@@ -7337,7 +7715,7 @@ def entity_value(values: dict, spec: TableSpec) -> tuple[str, str]:
 
 
 def entity_display(values: dict, spec: TableSpec) -> tuple[str, str, str]:
-    """(設備番号, 設備名, 表示「設備名（設備番号）」)。"""
+    """(対象の番号, 対象の名前, 表示「名前（番号）」)。"""
     eid, name = entity_value(values, spec)
     if eid and name and name != eid:
         return eid, name, f"{name}（{eid}）"
@@ -7388,9 +7766,11 @@ def suggest_columns(headers: list[str], sample_rows) -> list[ColumnSuggestion]:
     見出しも値も無い列（表がA列から始まらないときの左の空列など）は、列の一覧に出さない。
     """
     grid = [_row_values(r) for r in sample_rows]
+    formats = _column_formats(sample_rows)
     out: list[ColumnSuggestion] = []
     for i, header in enumerate(headers):
-        unit = split_header_unit(header)[1]
+        # 見出しに単位が書いていなければ、セルの表示形式から補う（「0.0%」の列を裸の数値にしない）
+        unit = split_header_unit(header)[1] or cell_format_unit(formats.get(i, ""))
         values = [row[i] if i < len(row) else (None, "") for row in grid]
         if _is_empty_column(header, values):
             continue
@@ -7457,6 +7837,16 @@ def _display_name(header: str) -> str:
     lower = header.rsplit("_", 1)[-1] if "_" in header else header
     name = split_header_unit(lower)[0]
     return name or header
+
+
+def _column_formats(sample_rows) -> dict[int, str]:
+    """列ごとの表示形式（値の入っているセルでいちばん多いもの）。単位の手がかりに使う。"""
+    seen: dict[int, Counter] = {}
+    for row in sample_rows:
+        for i, cell in enumerate(getattr(row, "cells", None) or []):
+            if (cell.text or cell.value is not None) and cell.number_format:
+                seen.setdefault(i, Counter())[cell.number_format] += 1
+    return {i: c.most_common(1)[0][0] for i, c in seen.items()}
 
 
 def _row_values(row) -> list[tuple[object, str]]:
@@ -7633,6 +8023,8 @@ def run_checks(records, spec, stats) -> list[Issue]:
     st = stats if isinstance(stats, dict) else stats.to_dict()
     issues: list[Issue] = []
 
+    for message in st.get("layout_errors") or []:
+        issues.append(Issue("error", "layout", message))
     for display in st.get("missing_required") or []:
         issues.append(Issue("error", "required_missing", f"必須の列「{display}」の見出しが見つかりません"))
 
@@ -7692,6 +8084,35 @@ def run_checks(records, spec, stats) -> list[Issue]:
             if empty:
                 issues.append(Issue("warning", "required_empty",
                                     f"必須の列「{col.display}」が空の行が{empty}件あります", column=col.display))
+    for col in spec.columns:
+        # 単位の手がかりがどこにも無い数値列に、辞書の既定単位を当てたとき（95 を「95時間」と読むなど）
+        if col.type != "number" or not col.unit or (st.get("unit_written") or {}).get(col.key):
+            continue
+        if any(split_header_unit(h)[1] for h in (col.headers or [])):
+            continue
+        hint = ambiguous_unit_hint(col.key or "", col.display)
+        if hint and (st.get("positions") or {}).get(col.key) is not None:
+            issues.append(Issue("warning", "unit_assumed",
+                                f"列「{col.display}」には単位が書かれていないため、{col.unit} として読みました"
+                                f"（{hint}）。違うときは見出しに単位を書いて取り込み直してください", column=col.display))
+    for col in spec.columns:
+        # 見出し（## の行）に使う列に長文が入っていると、記録が細かく分かれて md がふくらむ
+        if col.role not in ("key", "entity", "entity_label") or not records:
+            continue
+        long_rows = [(_get(r, "source") or {}).get("row") for r in records
+                     if len(str(_values(r).get(col.key) or "")) > TITLE_ENTITY_CHARS]
+        if long_rows:
+            listed = "、".join(f"{n}行目" for n in long_rows[:5] if n) + ("など" if len(long_rows) > 5 else "")
+            issues.append(Issue("warning", "long_title_value",
+                                f"見出しに使う列「{col.display}」に{TITLE_ENTITY_CHARS}字を超える値があります"
+                                f"（{len(long_rows)}件: {listed}）。見出しは先頭{TITLE_ENTITY_CHARS}字までにし、"
+                                "残りは本文に書きます", column=col.display))
+    links = st.get("cell_links") or {}
+    if links:
+        names = {c.key: c.display for c in spec.columns}
+        detail = "、".join(f"{names.get(k, k)} {n}件" for k, n in sorted(links.items()))
+        issues.append(Issue("warning", "cell_link",
+                            f"セルに貼られたリンク先を値の後ろに書き足しました（{detail}）"))
     if st.get("year_inferred"):
         issues.append(Issue("warning", "year_inferred",
                             f"年のない日付に、年を補った行が{st['year_inferred']}件あります（{st.get('year_context_label') or '年度'}から）"))
@@ -7809,6 +8230,8 @@ _TIME_DIGITS = re.compile(r"^(\d{2})(\d{2})(\d{2})?$")
 _NUMBER = re.compile(
     r"^(?P<sign>[△▲\-−+])?\s*[¥￥]?\s*(?P<int>\d{1,3}(?:,\d{3})+|\d+)?(?P<dec>\.\d+)?(?:[eE](?P<exp>[+\-]?\d+))?"
     r"\s*(?P<tail>-)?\s*(?P<unit>[^\d\s,.\-+]{1,6})?$")
+# 会計表記の「(1,000)」「(1,000円)」。数字で始まるものだけを負数として読む
+_PAREN_MINUS = re.compile(r"^\(\s*([\d,]+(?:\.\d+)?)\s*([^()\d]{0,6})\)$")
 _TABLE_ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988, "昭和": 1925, "S": 1925}
 
 # 単位の換算表（列の単位ごと。値は「元の単位1つが列の単位でいくつか」）
@@ -7842,8 +8265,9 @@ class RecordRow:
                 "source": self.source, "warnings": self.warnings}
 
 
-# 「上と同じ」の記号。セル全体がこれだけなら直前のデータ行の値で補う（NFKC で ″ は ′′ になる）
-DITTO_MARKS = {"〃", "″", "′′", "同上", "々", "仝"}
+# 「上と同じ」の記号。セル全体がこれだけなら直前のデータ行の値で補う（NFKC で ″ は ′′ になる）。
+# ASCII の " と全角の ” は、Excel のオートコレクトで 〃 のつもりの入力から変わって入ることが多い
+DITTO_MARKS = {"〃", "″", "′′", "同上", "同左", "々", "仝", '"', "”", "“", "ヽ", "ゝ"}
 # 記録番号（key）と担当者（person）も補う。key が「〃」のままだと見出し・出典・記録キーが「〃」になる
 DITTO_ROLES = ("key", "date", "entity", "entity_label", "category", "attribute", "person")
 _ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -7869,6 +8293,8 @@ class ImportStats:
     included_hidden: int = 0
     type_errors: dict = field(default_factory=dict)
     type_checked: dict = field(default_factory=dict)
+    unit_written: dict = field(default_factory=dict)  # 列キー → 単位がセル自身に書かれていた数
+    cell_links: dict = field(default_factory=dict)  # 列キー → セルのリンク先を値に添えた数
     year_inferred: int = 0
     year_missing: int = 0
     year_context: dict = field(default_factory=dict)
@@ -7890,6 +8316,7 @@ class ImportStats:
     date_max: str | None = None
     months: dict = field(default_factory=dict)
     layout_warnings: list = field(default_factory=list)
+    layout_errors: list = field(default_factory=list)
     row_issues_truncated: int = 0
     key_columns: list = field(default_factory=list)
     elapsed_sec: float = 0.0
@@ -8109,10 +8536,15 @@ def _clean_number(v: float) -> int | float:
 
 
 def parse_number_text(text: str) -> tuple[float | None, str]:
-    """数値の文字列。戻り値: (値, 末尾の単位)。△▲・末尾マイナス・桁区切り・全角数字に対応。"""
+    """数値の文字列。戻り値: (値, 末尾の単位)。△▲・括弧のマイナス・末尾マイナス・桁区切り・全角数字に対応。"""
     s = _nfkc(text).strip().replace(" ", "")
     if not s:
         return None, ""
+    paren = _PAREN_MINUS.match(s)
+    if paren:
+        # 会計でよく使う「(1,000)」はマイナス1000。△▲ と同じ意味なので同じように読む。
+        # 「(注1)」のような注記は数字から始まらないので、ここには当たらない
+        s = "-" + paren.group(1) + paren.group(2)
     m = _NUMBER.match(s)
     if not m or (m.group("int") is None and m.group("dec") is None):
         return None, ""
@@ -8138,9 +8570,9 @@ _NON_ASCII = re.compile(r"[^\x00-\x7f]")
 
 
 def _upper_code(text: str) -> str:
-    """code 列の upper。同じセルに「番号＋設備名」が入っている台帳があるので、番号の部分だけ大文字にする。
+    """code 列の upper。同じセルに「番号＋名前」が入っている台帳があるので、番号の部分だけ大文字にする。
 
-    「Oxideエッチャ 2号機（ETC-302）」→「Oxideエッチャ 2号機（ETC-302）」（設備名はそのまま）。
+    「4tトラック 2号車（ETC-302）」→「4tトラック 2号車（ETC-302）」（名前はそのまま）。
     英数字だけの値は今までどおり全体を大文字にする（「etc-302」→「ETC-302」）。
     """
     if not _NON_ASCII.search(text):
@@ -8200,6 +8632,27 @@ def convert_cell(value, text: str, col, cctx: ConvertContext, number_format: str
     return (out or None), None, None
 
 
+_YEAR_MONTH_RE = re.compile(r"^(\d{4})\s*[-/年.]\s*(\d{1,2})\s*月?$")
+
+
+def month_only_text(value) -> str | None:
+    """日のない年月（「2025-04」「2025/4」「2025年4月」「202504」）を "YYYY-MM" にする。違えば None。
+
+    年月の列は現場では普通にある。日が無いだけで「日付に変換できません」と言うと、
+    ひと月ごとのファイル分けが効いているのに警告だけが並ぶ。
+    「250401」のような年2桁の日付と取り違えないよう、6桁のときは年が1900〜2199の範囲にあることを確かめる。
+    """
+    s = "".join(unicodedata.normalize("NFKC", str(value or "")).split())
+    m = _YEAR_MONTH_RE.match(s)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+    elif len(s) == 6 and s.isdigit() and 1900 <= int(s[:4]) <= 2199:
+        year, month = int(s[:4]), int(s[4:])
+    else:
+        return None
+    return f"{year:04d}-{month:02d}" if 1 <= month <= 12 else None
+
+
 def _convert_date(value, text, type_, cctx):
     label = _TYPE_LABELS[type_]
     if isinstance(value, date) and value.year < 1900:
@@ -8215,6 +8668,9 @@ def _convert_date(value, text, type_, cctx):
             d, tm, _ = parse_date_text(str(int(value)), cctx)
             if d:
                 return _join_dt(d, tm, type_), None, None
+        month = month_only_text(value if isinstance(value, int) else int(value))             if float(value).is_integer() else None
+        if month:
+            return month, None, None
         dt = _excel_serial_date(float(value), cctx.date1904)
         if dt is not None:
             tm = _fmt_time(dt.time()) if dt.time() != time(0) else None
@@ -8225,6 +8681,9 @@ def _convert_date(value, text, type_, cctx):
     d, tm, flag = parse_date_text(text, cctx)
     if d:
         return _join_dt(d, tm, type_), None, flag
+    month = month_only_text(text)
+    if month:
+        return month, None, None
     if flag == "year_missing":
         return nfkc_text(text), f"「{text}」は年がないため{label}にできません", flag
     return nfkc_text(text), f"「{_short(text)}」を{label}に変換できません", None
@@ -8253,6 +8712,20 @@ def _convert_time(value, text):
     if parsed:
         return parsed, None, None
     return nfkc_text(text), f"「{_short(text)}」を時刻に変換できません", None
+
+
+def _unit_is_written(value, text, number_format) -> bool:
+    """このセル自身に単位の手がかりがあるか（値に書かれた単位・表示形式の単位・時間のセル）。
+
+    どこにも手がかりが無い数値に辞書の既定単位を当てたときだけ知らせるための判定。
+    """
+    if isinstance(value, (time, timedelta)):
+        return True
+    if cell_format_unit(number_format):
+        return True
+    if _duration_minutes(text) is not None:
+        return True
+    return bool(parse_number_text(str(text or ""))[1])
 
 
 def _convert_number(value, text, col, number_format, header_unit):
@@ -8336,7 +8809,8 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
     file_name = opts.get("file_name") or getattr(source, "file_name", "") or ""
     is_csv = getattr(source, "kind", "") == "csv"
     stats = ImportStats(file=file_name, sheet="" if is_csv else sheet,
-                        layout_warnings=list(getattr(layout, "warnings", []) or []))
+                        layout_warnings=list(getattr(layout, "warnings", []) or []),
+                        layout_errors=list(getattr(layout, "errors", []) or []))
     issues: list[Issue] = []
 
     res = resolve_columns(spec, list(layout.headers))
@@ -8393,6 +8867,8 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
 
     def convert(col, raw, row_index: int, record_warnings: list[str], originals: dict, header_unit: str = ""):
         value, text, number_format = raw
+        if col.type == "number" and col.unit and _unit_is_written(value, text, number_format):
+            stats.unit_written[col.key] = stats.unit_written.get(col.key, 0) + 1
         out, error, flag = convert_cell(value, text, col, cctx, number_format, header_unit)
         if col.type in ("date", "datetime", "time", "number"):
             if value is not None or text:
@@ -8515,6 +8991,12 @@ def read_records(source, source_opts: dict | None, layout, spec: TableSpec, on_p
                 continue  # 空欄は変換しても値・問題・件数が増えない
             out = convert(col, raw, row.index, record_warnings, originals, header_units.get(col.key, ""))
             if out is not None:
+                cell = row.cell(pos)
+                link = cell.link if cell is not None else ""
+                if link and col.type in ("string", "text") and col.md != "omit" and isinstance(out, str)                         and link not in out:
+                    # セルに見えている文字（「報告書」）だけでは行き先が分からないので、リンク先も書き残す
+                    out = f"{out}（{link}）"
+                    stats.cell_links[col.key] = stats.cell_links.get(col.key, 0) + 1
                 values[col.key] = out
         src = {"file": file_name, "sheet": stats.sheet, "row": row.index}
 
@@ -8616,7 +9098,7 @@ def _assign_keys(records: list[RecordRow], spec: TableSpec, stats: ImportStats) 
 # 決まり（docs/design.md 6章）: 同じ入力から同じバイト列。生成日時・取込ID・行番号の一覧を本文に書かない。
 # レコード内に空行を入れない。パイプ表を使わない。出す列の中身は1文字も削らない（人名・コードの列も出す）。
 # 「経過の記録」の列（role=log）は logproc のルール出力（対応の時系列）＋ AI 照合に通った要点だけを出す。
-# 大きい記録は「（続きn/m）」に分けて、どの部分にも管理No・設備・日付を書く（切られても身元が分かるように）。
+# 大きい記録は「（続きn/m）」に分けて、どの部分にも管理No・対象・日付を書く（切られても身元が分かるように）。
 # ====================================================================================================
 
 # 記録1件の上限（推定トークン）。これを超えたら「（続きn/m）」に分ける。
@@ -8624,6 +9106,8 @@ def _assign_keys(records: list[RecordRow], spec: TableSpec, stats: ImportStats) 
 # オフライン評価（T1・T2・T5 × F1200/100・F600/50・P2000）で 300/400/600 を比べて 400 を選んだ（docs/design.md 6.5）。
 RECORD_TOKEN_BUDGET = 400
 TITLE_TEXT_CHARS = 40
+TITLE_ENTITY_CHARS = 60  # 見出しに出す対象の名前の上限（長文が入っている列でも md をふくらませない）
+TITLE_LINE_CHARS = 200   # 見出し1行の上限（どの列が長くても、ここで必ず止まる）
 
 
 @dataclass
@@ -8647,7 +9131,7 @@ def people_index_for(spec: TableSpec, records: list[dict]):
     person_keys = [c.key for c in spec.columns if c.role == "person"]
     names = sorted({str(r.get("values", {}).get(k)) for r in records for k in person_keys
                     if r.get("values", {}).get(k)})
-    # 「不明」「調査中」「未定」だけの担当欄は人名ではない。設備の列と同じふるいをかける
+    # 「不明」「調査中」「未定」だけの担当欄は人名ではない。対象の列と同じふるいをかける
     # （入れてしまうと本文の「不明な異音が…」が記入者に化ける。2026-09-23 のレビューで実測）。
     # AI側（ai.people_index）と同じ関数を使う。片方だけだと分割・マスク・記入者がずれる
     names = drop_placeholder_names(names)
@@ -8776,11 +9260,20 @@ def _date_text(value, time_value=None) -> str:
     return s
 
 
+_ENTITY_ID_SUFFIX = re.compile(r"(?:番号|ナンバー|コード|ID|Id|id|No\.?|NO\.?|no\.?)$")
+
+
 def _entity_label_name(spec: TableSpec) -> str:
+    """番号と名前をまとめた1行の項目名。元の表の言い方から作る（「車両番号」の表を「設備」と書かない）。
+
+    番号の列の名前から「番号・No・コード・ID」を落とした言い方にする
+    （設備番号＋設備名 →「設備」、店舗コード＋店舗名 →「店舗」、車両番号＋車両名 →「車両」）。
+    """
     entity, _label = entity_columns(spec)
     if entity is None:
-        return "設備"
-    return "設備" if entity.key.startswith("equipment") else entity.display
+        return "対象"
+    stem = _ENTITY_ID_SUFFIX.sub("", entity.display).strip()
+    return stem or entity.display
 
 
 def _is_hidden(col, spec: TableSpec) -> bool:
@@ -8832,24 +9325,27 @@ def _clip_title_text(text: str, limit: int) -> str:
 _TITLE_LABEL = re.compile(r"^(?![\d０-９])[^\s:：、。]{1,8}[ 　]*[:：][ 　]*")
 
 
-def _title_text_line(raw) -> str:
+def _title_text_line(raw, entity_words: tuple[str, ...] = ("設備",)) -> str:
     """見出しに使う文章。1行目の「【発生】」「発生日時:」などの札と、それに続く日付・時刻を外した残り。
 
     「【発生】R05.04.01 11:45(休日)」のように日付だけの1行目は使わず（見出しの日付と同じものを繰り返さない）、
-    次の行（「設備:」の行は飛ばす）の札・項目名・日付を外した残りを使う。
+    次の行（対象の行は飛ばす）の札・項目名・日付を外した残りを使う。
+    entity_words: 飛ばす項目名（その表の対象の列の名前。「設備」以外の表もあるので呼ぶ側から渡す）。
     """
     lines = str(raw).split("\n")
     first = _table_one_line(lines[0])
     body = _strip_lead_date(_TITLE_TAG.sub("", first).strip()).strip()
     if body or not first:
         return body
-    # 1行目が札と日付だけ（「発生:2024-04-28 14:50」）なら、次の行から探す。「設備:」の行は見出しの設備と重なるので飛ばす
+    # 1行目が札と日付だけ（「発生:2024-04-28 14:50」）なら、次の行から探す。
+    # 対象の行（「設備:」「店舗:」など）は見出しの対象と重なるので飛ばす
     for line in lines[1:]:
         line = _table_one_line(line)
         tag = _TITLE_TAG.match(line)
         text = _strip_lead_date(_TITLE_TAG.sub("", line).strip()).strip()
         label = _TITLE_LABEL.match(text)
-        if (tag and "設備" in tag.group(0)) or (label and "設備" in label.group(0)):
+        if any((tag and word in tag.group(0)) or (label and word in label.group(0))
+               for word in entity_words if word):
             continue
         text = _strip_lead_date(_TITLE_LABEL.sub("", text).strip()).strip()
         if text:
@@ -8857,8 +9353,21 @@ def _title_text_line(raw) -> str:
     return ""
 
 
-def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> str:
-    """見出し: 【管理No】設備名（設備番号）現象の先頭40字｜日付"""
+def _title_skip_words(spec: TableSpec) -> tuple[str, ...]:
+    """見出しに使う文章で飛ばす行の項目名（その表の対象の列の名前と、その言い換え）。"""
+    entity, label = entity_columns(spec)
+    words = {"設備"}  # 経過の記録に「設備:」と書く表が多いので、対象の列の名前が違っても飛ばす
+    for col in (entity, label):
+        if col is not None and col.display:
+            words.add(col.display)
+            stem = _ENTITY_ID_SUFFIX.sub("", col.display).strip()
+            if stem:
+                words.add(stem)
+    return tuple(sorted(words))
+
+
+def record_title(values: dict, spec: TableSpec, source: dict | None = None, suffix: str = "") -> str:
+    """見出し: 【管理No】対象の名前（番号）本文の先頭40字｜日付。suffix は同じ見出しが重なるときの区別。"""
     md = spec.markdown or {}
     pieces: list[str] = []
     title_columns = list(md.get("title_columns") or [])
@@ -8868,10 +9377,10 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
             key, _, length = str(item).partition(":")
             col = spec.column(key)
             if entity is not None and key in (entity.key, label.key if label else None):
-                text = entity_display(values, spec)[2]
+                text = _clip_title_text(entity_display(values, spec)[2], TITLE_ENTITY_CHARS)
             else:
                 raw = values.get(key)
-                text = _title_text_line(raw) if raw not in (None, "") else ""
+                text = _title_text_line(raw, _title_skip_words(spec)) if raw not in (None, "") else ""
                 limit = int(length) if length.isdigit() else TITLE_TEXT_CHARS
                 if col is not None and col.type in ("text", "string") and len(text) > limit:
                     text = _clip_title_text(text, limit)
@@ -8883,12 +9392,12 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
         key_col = spec.first_role("key")
         if key_col is not None and values.get(key_col.key):
             pieces.append(f"【{_table_one_line(values[key_col.key])}】")
-        display = entity_display(values, spec)[2]
+        display = _clip_title_text(entity_display(values, spec)[2], TITLE_ENTITY_CHARS)
         if display:
             pieces.append(display)
         text_col = spec.column("symptom") or spec.first_role("text")
         if text_col is not None and values.get(text_col.key):
-            first = _title_text_line(values[text_col.key])
+            first = _title_text_line(values[text_col.key], _title_skip_words(spec))
             if first:
                 pieces.append(_clip_title_text(first, TITLE_TEXT_CHARS))
     if not pieces:
@@ -8904,9 +9413,9 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
     date_value = values.get(spec.date_key)
     if date_value:
         title += f"｜{str(date_value)[:10]}" if title else str(date_value)[:10]
-    title = _table_one_line(title)
+    title = _clip_title_text(_table_one_line(title), TITLE_LINE_CHARS)
     if title:
-        return title
+        return f"{title}{suffix}"
     row = (source or {}).get("row")
     return f"{row}行目の記録" if row else "（見出しなし）"
 
@@ -8927,12 +9436,13 @@ def _title_fallback_pieces(values: dict, spec: TableSpec) -> list[str]:
     return parts
 
 
-def record_blocks(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None) -> list[list[str]]:
+def record_blocks(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None,
+                  suffix: str = "") -> list[list[str]]:
     """1件分のブロック。推定トークンが RECORD_TOKEN_BUDGET を超えたら「（続きn/m）」に分ける。
 
-    分けても文字は1つも消さない。2つ目以降には管理No・設備・日付を書き直す（その部分だけで身元が分かるように）。
+    分けても文字は1つも消さない。2つ目以降には管理No・対象・日付を書き直す（その部分だけで身元が分かるように）。
     """
-    lines, repeat = _record_lines(record, spec, ai_results, people)
+    lines, repeat = _record_lines(record, spec, ai_results, people, suffix)
     joined = "\n".join(lines)
     # 推定は1文字あたり最大1.1トークン。それでも上限以下なら数えずに済む（大半の記録。判定の結果は同じ）
     if len(joined) * 11 <= RECORD_TOKEN_BUDGET * 10 or estimate_tokens(joined) <= RECORD_TOKEN_BUDGET:
@@ -8945,11 +9455,12 @@ def record_block(record: dict, spec: TableSpec, ai_results: dict | None = None, 
     return [line for block in record_blocks(record, spec, ai_results, people) for line in block]
 
 
-def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people) -> tuple[list[str], list[str]]:
-    """1件分の行と、分けたときに書き直す行（管理No・設備・日付）。"""
+def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people,
+                  suffix: str = "") -> tuple[list[str], list[str]]:
+    """1件分の行と、分けたときに書き直す行（管理No・対象・日付）。"""
     values = record.get("values", {}) or {}
     key = record.get("key", "")
-    lines = [f"## {record_title(values, spec, record.get('source'))}"]
+    lines = [f"## {record_title(values, spec, record.get('source'), suffix)}"]
     entity, label = entity_columns(spec)
     key_col = spec.first_role("key")
     time_col = _time_column(spec)
@@ -8960,7 +9471,7 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
     status, result = _ai_item(ai_results, key)
 
     def add(col, bullet: list[str]) -> None:
-        """行を足す。管理No・設備・日付の行は、記録を分けたときに書き直すので控えておく。"""
+        """行を足す。管理No・対象・日付の行は、記録を分けたときに書き直すので控えておく。"""
         lines.extend(bullet)
         if col is not None and (col.key == date_key or (key_col is not None and col.key == key_col.key)
                                 or (entity is not None and col.key in (entity.key, label.key if label else ""))):
@@ -8984,7 +9495,7 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
                     add(c, md_bullet(c.display, format_value(c, values.get(c.key))))
             continue
         if entity is not None and label is None and col.key == entity.key:
-            # 設備名の列がない台帳。見出し・集計と同じ「設備名（設備番号）」の書き方にそろえる（列の名前はそのまま）
+            # 対象の名前の列がない台帳。見出し・集計と同じ「名前（番号）」の書き方にそろえる（列の名前はそのまま）
             _eid, name, display = entity_display(values, spec)
             if name and display:
                 add(col, md_bullet(col.display, display))
@@ -9132,7 +9643,10 @@ def _split_group(group: list[str], budget: int) -> list[list[str]]:
 
 def _split_record(title: str, body: list[str], repeat: list[str]) -> list[list[str]]:
     """見出し・本文を、1つあたり RECORD_TOKEN_BUDGET に収まるブロックの並びにする。"""
-    # 2つ目以降は「見出し（続きn/m）」＋管理No・設備・日付を書き直すので、その分を引いた残りが中身に使える
+    # 2つ目以降は「見出し（続きn/m）」＋管理No・対象・日付を書き直すので、その分を引いた残りが中身に使える。
+    # 書き直す行は短くする（対象の名前の欄に長文が入っていると、続きの数だけ長文が増えて md がふくらむ。
+    # 5KB の xlsx から 9MB の md ができていた。2026-09-23 の形の総ざらいで実測）
+    repeat = [_short_repeat_line(ln) for ln in repeat]
     overhead = estimate_tokens(f"{title}（続き00/00）") + _tokens(repeat)
     budget = max(_MIN_PART_TOKENS, RECORD_TOKEN_BUDGET - overhead)
     groups = [g for group in _bullet_groups(body) for g in _split_group(group, budget)]
@@ -9154,6 +9668,16 @@ def _split_record(title: str, body: list[str], repeat: list[str]) -> list[list[s
         again = [] if i == 1 else [ln for ln in repeat if ln not in part]
         out.append([head] + again + part)
     return out
+
+
+def _short_repeat_line(line: str) -> str:
+    """続きのブロックに書き直す行を、身元が分かる長さに切る（元の値は1つ目のブロックにそのまま残る）。"""
+    if len(line) <= TITLE_ENTITY_CHARS * 2:
+        return line
+    label, sep, value = line.partition(": ")
+    if not sep:
+        return _clip_title_text(line, TITLE_ENTITY_CHARS * 2)
+    return f"{label}: {_clip_title_text(value, TITLE_ENTITY_CHARS)}"
 
 
 # ---- 経過の記録の列の行 ---------------------------------------------------------------
@@ -9189,16 +9713,21 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people)
 
 
 def _table_source_text(values: dict, spec: TableSpec, source: dict) -> str:
+    """出典: ファイル名（管理番号 NO-001・シート「一覧」5行目）。
+
+    識別番号が重複する表では、番号だけだとどの行の記録か分からなくなるので、行番号も必ず残す。
+    """
     file_name = str(source.get("file") or "")
-    key_col = spec.first_role("key")
-    if key_col is not None and values.get(key_col.key):
-        return f"{file_name}（{key_col.display} {_table_one_line(values[key_col.key])}）"
     row = source.get("row")
     sheet = source.get("sheet")
+    where = ""
     if row:
         where = f"シート「{sheet}」{row}行目" if sheet else f"{row}行目"
-        return f"{file_name}（{where}）"
-    return file_name
+    key_col = spec.first_role("key")
+    if key_col is not None and values.get(key_col.key):
+        key_text = f"{key_col.display} {_table_one_line(values[key_col.key])}"
+        return f"{file_name}（{key_text}・{where}）" if where else f"{file_name}（{key_text}）"
+    return f"{file_name}（{where}）" if where else file_name
 
 
 # ---- ファイルの組み立て ---------------------------------------------------------------------
@@ -9269,10 +9798,30 @@ def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names:
             parts.append(eid or "設備不明")
         parts.append(month or "日付なし")
         blocks: list[list[str]] = [_record_file_header(spec, recs, month, eid)]
+        suffixes = _title_suffixes(recs, spec)
         for r in recs:
-            blocks += record_blocks(r, spec, ai_results, people)
+            blocks += record_blocks(r, spec, ai_results, people, suffixes.get(id(r), ""))
         files.append(MdFile(names.make(parts), join_file(blocks), "records"))
     return files
+
+
+def _title_suffixes(recs: list[dict], spec: TableSpec) -> dict[int, str]:
+    """1つのファイルの中で見出しが重なる記録に足す区別（「（5行目）」）。
+
+    日付も識別番号も無い表や、識別番号が全部同じ表では、見出しが全件同じになってどの行の記録か分からなくなる。
+    重なったものだけに足す（重なっていない見出しは今までどおり）。
+    """
+    titles: dict[str, int] = Counter()
+    for r in recs:
+        titles[record_title(r.get("values", {}) or {}, spec, r.get("source"))] += 1
+    out: dict[int, str] = {}
+    for r in recs:
+        title = record_title(r.get("values", {}) or {}, spec, r.get("source"))
+        if titles[title] < 2:
+            continue
+        row = (r.get("source") or {}).get("row")
+        out[id(r)] = f"（{row}行目）" if row else f"（{r.get('key', '')}）"
+    return out
 
 
 def _record_file_header(spec: TableSpec, group: list[dict], month: str, eid: str) -> list[str]:
@@ -9280,7 +9829,8 @@ def _record_file_header(spec: TableSpec, group: list[dict], month: str, eid: str
     scope_month = month_label(month) if month else "日付なし"
     entity_disp = ""
     if eid:
-        entity_disp = entity_display(group[0].get("values", {}), spec)[2] or eid
+        entity_disp = _clip_title_text(entity_display(group[0].get("values", {}), spec)[2] or eid,
+                                       TITLE_ENTITY_CHARS)
     title = f"# {name}"
     if entity_disp:
         title += f" {entity_disp}"

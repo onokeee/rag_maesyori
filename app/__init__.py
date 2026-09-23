@@ -789,7 +789,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode = WAL")
     # 消した行の中身をその場でゼロ埋めする（design.md 3.3）。これが無いと、行を消しても解放された
-    # ページに帳票の値・設備名・人名が平文で残り、DBファイル（と app.db-wal）から読めてしまう。
+    # ページに帳票の値・対象の名前・人名が平文で残り、DBファイル（と app.db-wal）から読めてしまう。
     # VACUUM は他の接続があると失敗することがあるので、消し方そのものを安全側にしておく。
     conn.execute("PRAGMA secure_delete = ON")
     return conn
@@ -4376,7 +4376,7 @@ NO_BOOK_ERROR = ("この帳票のExcelをもう一度置いてください（こ
 # 取り込みの上限（MAX_CONTENT_LENGTH＝まとめ置きの合計）より小さくしておく。
 # 帳票は1枚の紙なので、写真付きでもこの大きさに収まる（見本のいちばん大きいもので約0.1MB）。
 BOOK_MAX_BYTES = 50 * 1024 * 1024
-# 覚えるシートの中身（JSON）の上限。帳票は1枚の紙なので、ふつうは数KB〜数十KB（見本の修理報告書で約4KB）。
+# 覚えるシートの中身（JSON）の上限。帳票は1枚の紙なので、ふつうは数KB〜数十KB（見本の報告書で約4KB）。
 # 何万セルもある一覧表のようなブックは帳票ではないので、覚えずに断る（画面に減らし方を書く）。
 SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
 # 覚えない、と画面に書くもの。読み取りに要らないものは覚えない（利用者の指示 2026-09-22「セル色の情報は不要」）
@@ -4829,7 +4829,7 @@ ISSUES_SHOWN = 200
 # 名前はどんな表にも当てはまる言い方にする（利用者の指示 2026-09-21。entity は「設備」、log は
 # 「AI整形の対象（追記ログ）」と呼んでいたが、設備の記録以外の表には当てはまらなかった）。
 # 中で使う名前（key/date/entity/log/attribute）は変えない（前に保存した取り込み設定がそのまま読める）。
-SCREEN_ROLES = [("key", "識別番号"), ("date", "日付"), ("entity", "対象（設備・製品・顧客など）"),
+SCREEN_ROLES = [("key", "識別番号"), ("date", "日付"), ("entity", "対象（顧客・案件・製品など）"),
                 ("log", "経過の記録（1つのセルに日付ごとに書き足した列）"), ("attribute", "その他")]
 SCREEN_ROLE_KEYS = {role for role, _label in SCREEN_ROLES}
 ROW_KIND_LABELS = {"header": "見出し", "data": "データ", "subtotal": "小計・合計", "note": "注記", "continuation": "継続行",
@@ -4844,6 +4844,7 @@ TABLES_DELETE_ON_DOWNLOAD_NOTE = ("zip をダウンロードすると、この�
 TABLES_DELETE_ON_DOWNLOAD_CONFIRM = ("ダウンロードすると、この取り込みのデータはサーバーから消えます。"
                               "もう一度ダウンロードすることはできません。")
 ENCODING_CHOICES = [("utf-8-sig", "UTF-8（BOM付き）"), ("utf-8", "UTF-8"), ("cp932", "CP932（Shift_JIS）"),
+                    ("euc_jp", "EUC-JP"), ("iso2022_jp", "ISO-2022-JP（JISコード）"),
                     ("shift_jis_2004", "Shift_JIS 2004"), ("utf-16", "UTF-16"),
                     ("utf-16-le", "UTF-16LE（BOMなし）"), ("utf-16-be", "UTF-16BE（BOMなし）")]
 BUSY_MESSAGE = "処理中は変更できません。終わるか中止してから変更してください"
@@ -5211,7 +5212,7 @@ def _layout_json(layout) -> dict:
         "sheet": layout.sheet, "table_kind": layout.table_kind,
         "table_kind_label": TABLE_KIND_LABELS.get(layout.table_kind, layout.table_kind),
         "header_rows": layout.header_rows, "data_start": layout.data_start, "data_end": layout.data_end,
-        "headers": layout.headers, "warnings": layout.warnings,
+        "headers": layout.headers, "warnings": layout.warnings, "errors": list(getattr(layout, "errors", [])),
         "counts": {ROW_KIND_LABELS.get(k, k): v for k, v in (layout.counts or {}).items()},
         "rows": {str(rc.index): {"kind": rc.kind, "reason": rc.reason} for rc in layout.row_classes},
     }
@@ -5265,6 +5266,8 @@ def save_layout(import_id: int):
         return _json_error(str(exc))
     if guess.table_kind == "crosstab":
         return _json_error("月別集計のようなクロス集計の表には対応していません。1行＝1件の一覧表を選んでください")
+    if guess.errors:
+        return _json_error(guess.errors[0])
     if not guess.headers:
         return _json_error("見出し行とデータの範囲が見つかりません。見出し行の番号を指定してください")
     if guess.data_end < guess.data_start:
