@@ -711,11 +711,41 @@ def key(text: str) -> str:
     return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text or "")).casefold()
 
 
+# 担当欄が埋まっていても人名ではない値（設備の列と同じ言葉づかい。extract._PLACEHOLDER_ENTITIES と同じ）
+PLACEHOLDER_NAMES = {"推定", "仮", "予定", "調査中", "不明", "未定", "確認中", "暫定", "要確認",
+                     "〃", "′′", "同上", "々", "仝"}
+
+
+def drop_placeholder_names(names):
+    """担当列の値から「不明」「調査中」だけの欄を外す。
+
+    入れてしまうと本文の「不明な異音が…」が記入者に化ける（2026-09-23 のレビューで実測）。
+    md（extract.people_index_for）と AI（people_index）の両方から呼び、同じ人物索引にする。
+    """
+    return [n for n in names
+            if unicodedata.normalize("NFKC", str(n)).strip("（）() ") not in PLACEHOLDER_NAMES]
+
+
+# 担当列から拾った名前の直後に来てよい文字（ここで終わっていれば名前とみなす）
+_NAME_BOUNDARY = set(" \t:：｜|、，,/／・（(）)［[］]【】<>《》\n\r")
+
+
+def _looks_like_person(name: str) -> bool:
+    """担当列から拾った値が「人名らしい」か。姓・イニシャル・ラテン名だけを通す。"""
+    base = re.sub(r"\(.*\)$", "", unicodedata.normalize("NFKC", name or "").strip())
+    if not base or base in _COLON_STOP:
+        return False
+    first = base.split()[0] if base.split() else base
+    return (first in COMMON_SURNAMES or base in COMMON_SURNAMES
+            or bool(_INITIALS_RE.fullmatch(base)) or bool(_LATIN_NAME_RE.fullmatch(base)))
+
+
 @dataclass
 class Person:
     name: str
     aliases: list[str] = field(default_factory=list)
     org: str = ""
+    from_column: bool = False   # 人物一覧ではなく担当列の値から拾った名前（区切りなしの照合には使わない）
 
 
 class PeopleIndex:
@@ -739,11 +769,17 @@ class PeopleIndex:
                 k = key(part)
                 if k in self._exact or k in self._surname:
                     continue
-                self._add(Person(part))
+                self._add(Person(part, from_column=True))
         self.groups = list(groups) if groups is not None else list(DEFAULT_GROUPS)
         self._group_keys = {key(g): g for g in self.groups}
-        # 本文先頭で区切りなしに照合する表記（長い順）
+        # 本文先頭で照合する表記（長い順）
         forms = {unicodedata.normalize("NFKC", f) for f in list(self._exact_forms()) + self.groups}
+        # このうち「担当列から拾っただけで姓らしくない」表記は、直後に区切りがあるときだけ当てる
+        # （known_at 参照）。担当列に「不明」「外注」「電気」のような値が1つでもあると、
+        # 区切りなしの照合が本文の先頭を記入者として食べてしまうため
+        self._loose_forms = {unicodedata.normalize("NFKC", f)
+                             for p in self.persons if p.from_column and not _looks_like_person(p.name)
+                             for f in (p.name, *p.aliases)}
         self._forms = sorted((f for f in forms if len(f) >= 2), key=len, reverse=True)
         # known_at 用に先頭の文字で引けるようにする（各リストの中は長い順のまま）
         self._forms_by_head: dict[str, list[str]] = {}
@@ -786,12 +822,25 @@ class PeopleIndex:
         return None
 
     def known_at(self, sh: str, p: int, end: int) -> str | None:
-        """p から区切りなしで始まる登録済みの名前（「4/3佐藤エンコーダ…」用）。"""
+        """p から区切りなしで始まる登録済みの名前（「4/3佐藤エンコーダ…」用）。
+
+        担当列から拾っただけで姓らしくない表記（「スズキ」「不明」「外注」）は、
+        直後に区切り（空白・「:」・行末など）が続くときだけ当てる。
+        区切りなしで当てると、本文の先頭を記入者として食べてしまう
+        （「不明な異音が発生」→「不明: な異音が発生」。2026-09-23 のレビューで実測）。
+        姓らしさだけで捨てると、今度はカタカナ・ひらがなの担当者名が
+        1件も拾えなくなり、直前の記入者が誤って引き継がれる（同レビュー）。
+        """
         if p >= end:
             return None
         for f in self._forms_by_head.get(sh[p], ()):
-            if p + len(f) <= end and sh.startswith(f, p) and not self.is_group(f):
-                return f
+            if not (p + len(f) <= end and sh.startswith(f, p)) or self.is_group(f):
+                continue
+            if f in self._loose_forms:
+                after = sh[p + len(f)] if p + len(f) < end else ""
+                if after and after not in _NAME_BOUNDARY:
+                    continue
+            return f
         return None
 
     def names(self) -> list[str]:
@@ -2549,6 +2598,8 @@ DEFAULT_FINAL_STATES = ["完了", "経過観察中", "部品待ち", "メーカ�
 DEFAULT_LIMITS = {"max_segments": 40, "max_input_tokens": 6000}
 DEFAULT_RUN_IF = {"any": [{"min_segments": 2}, {"min_chars": 60}, {"contains": ["Original Message", "訂正"]}]}
 DEFAULT_OUTPUT_TOKENS = {"base": 400, "per_segment": 40, "max": 2000, "summary": 300}
+# 要約を頼む記録の大きさ（設定 summary_if.record_tokens_over を書いたときの目安）。
+# 要約は md にも画面にも出ないので、既定では頼まない（2026-09-23 のレビュー）
 DEFAULT_SUMMARY_TOKENS = 1500
 
 
@@ -3403,7 +3454,16 @@ def _check_entries(result: dict, cx: _Ctx, rep: VerifyReport) -> list[dict]:
             _fatal(rep, f"entries[{eid}]", f"{eid} の segs が空です。", "segments")
         elif idx and idx != list(range(idx[0], idx[0] + len(idx))):
             _fatal(rep, f"entries[{eid}]", f"{eid} の segs（{', '.join(segs)}）は隣り合っていません。", "segments")
-        types_raw = e.get("t") if isinstance(e.get("t"), list) else []
+        raw_t = e.get("t")
+        if isinstance(raw_t, str) and raw_t.strip():
+            raw_t = [raw_t]     # 1つだけ文字列で返してくるモデルがある。配列として受け入れる
+        if not isinstance(raw_t, list) or not raw_t:
+            # 黙って捨てると、記録の種別が消えたまま「照合OK」になり、md から［種別］が抜ける
+            rep.issues.append(VerifyIssue("error", f"entries[{eid}].t",
+                                          f"{eid} の種別（t）を選択肢から1つ以上、配列で入れてください。", "structure"))
+            if f"entries[{eid}].t" not in rep.failed_items:
+                rep.failed_items.append(f"entries[{eid}].t")
+        types_raw = raw_t if isinstance(raw_t, list) else []
         types = []
         for t in types_raw:
             t = str(t).strip()
@@ -4093,7 +4153,8 @@ def people_index(data: ImportData, stage) -> PeopleIndex:
                 seen.add(v)
                 names.append(v)
     groups = sget(stage, "groups", []) or None
-    return PeopleIndex(sget(stage, "people", []) or [], column_names=names, groups=groups)
+    # md 側（extract.people_index_for）と同じふるいをかける。片方だけだと分割・マスク・記入者がずれる
+    return PeopleIndex(sget(stage, "people", []) or [], column_names=drop_placeholder_names(names), groups=groups)
 
 
 def _run_if(rule, parse, text: str) -> bool:
@@ -4159,9 +4220,13 @@ def _prepare_log(row: dict, data: ImportData, stage, people: PeopleIndex) -> Sta
     if not _run_if(sget(stage, "run_if", None) or DEFAULT_RUN_IF, parse, parse.text):
         work.route, work.reason = "rule_only", "短い記載（ルールのみ）"
         return work
+    # 要約（summary）は Markdown にも画面にも出ない。頼むと入力が +300トークン増え、
+    # 照合に落ちると消えない「要確認」が付くだけなので、既定では頼まない。
+    # 設定（summary_if.record_tokens_over）を明示したときだけ、今までどおり頼む（2026-09-23 のレビュー）
     summary_if = sget(stage, "summary_if", {}) or {}
-    over = int(sget(summary_if, "record_tokens_over", DEFAULT_SUMMARY_TOKENS))
-    work.want_summary = estimate_tokens("\n".join(render_timeline(parse, work.entity_label))) > over
+    over = sget(summary_if, "record_tokens_over", None)
+    work.want_summary = (over is not None
+                         and estimate_tokens("\n".join(render_timeline(parse, work.entity_label))) > int(over))
     work.messages = build_log_messages(parse, context, stage, want_summary=work.want_summary)
     work.schema = log_output_schema(stage, work.want_summary)
     work.max_tokens = log_max_tokens(stage, parse, work.want_summary)
@@ -4877,6 +4942,8 @@ def trial_stats(trials: list[dict]) -> list[dict]:
             if st.get("route") == "ai" and st.get("calls"):
                 out.append({"tokens_in": st.get("tokens_in") or 0, "tokens_out": st.get("tokens_out") or 0,
                             "latency_ms": st.get("latency_ms") or 0, "stage_id": st.get("stage_id"),
+                            # 照合に落ちた行は「再依頼」でもう1回呼ぶ。1行=1回で数えると見積もりが半分になる
+                            "calls": st.get("calls") or 1,
                             "headers": st.get("headers") or {}})
     return out
 
@@ -4926,22 +4993,29 @@ def estimate_from_counts(calls: int, trial_stats: list[dict] | None = None, *, c
         tin, tout = float(default_tokens_in), float(default_tokens_out)
         sec = DEFAULT_SEC_PER_CALL["local" if local else "cloud"]
         basis = "default"
+    # 試し実行で1行あたり何回呼んだか（再依頼を含む）。実測が無ければ1回とみなす。
+    # 掛けるのは「呼び出し回数」だけ。tin・tout・sec は試し実行の1行ぶんの合計（再依頼を含む）なので、
+    # ここにも掛けるとトークンと時間が二重になる（2026-09-23 のレビューで実測）
+    attempts = (sum(max(1, int(x.get("calls") or 1)) for x in stats) / len(stats)) if stats else 1.0
+    rows = calls                      # AI に出す行数（呼び出し回数とは別）
+    calls = int(round(rows * attempts))
     concurrency = max(1, int(concurrency or 1))
-    minutes_conc = calls * sec / concurrency / 60
+    minutes_conc = rows * sec / concurrency / 60
     minutes_tpm = None
     if tpm and (tin + tout) > 0:
         per_min = tpm / (tin + tout)
-        minutes_tpm = calls / per_min if per_min > 0 else None
+        minutes_tpm = rows / per_min if per_min > 0 else None
     minutes = max(minutes_conc, minutes_tpm or 0.0)
     return {
         "calls": int(calls),
-        "tokens_in": int(round(calls * tin)),
-        "tokens_out": int(round(calls * tout)),
+        "tokens_in": int(round(rows * tin)),
+        "tokens_out": int(round(rows * tout)),
         "minutes": round(minutes, 1),
         "duration_text": duration_text(minutes),
         "minutes_by_concurrency": round(minutes_conc, 1),
         "minutes_by_tpm": round(minutes_tpm, 1) if minutes_tpm is not None else None,
         "per_call": {"tokens_in": round(tin), "tokens_out": round(tout), "seconds": round(sec, 2)},
+        "attempts_per_row": round(attempts, 2),
         "basis": basis,
     }
 

@@ -77,13 +77,15 @@ class Config:
     DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
     # 一覧表の行データ・状態ファイルの置き場所（DATA_DIR/tables。create_app で DATA_DIR に合わせて決め直す）
     TABLES_DIR = Path(os.environ.get("TABLES_DIR", DATA_DIR / "tables"))
-    # 1回のリクエストの上限（一覧表の大きいCSV/Excelを想定）
-    MAX_CONTENT_LENGTH = 200 * 1024 * 1024
     # 帳票（1ファイル＝1件）
     ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
     # 一覧表（Excel/CSV・1行＝1件）
     TABLE_ALLOWED_EXTENSIONS = {".xlsx", ".xlsm", ".csv", ".tsv", ".txt"}
     TABLE_MAX_UPLOAD_BYTES = int(os.environ.get("TABLE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
+    # 1回のリクエストの上限（一覧表の大きいCSV/Excelを想定）。受け口はここ。
+    # 200MB 固定にしていたころは、TABLE_MAX_UPLOAD_BYTES を広げても Flask が先に 413 で断り、
+    # 設定が効かなかった（2026-09-23 のレビューで実測）
+    MAX_CONTENT_LENGTH = max(200 * 1024 * 1024, TABLE_MAX_UPLOAD_BYTES)
     # Excel のセル数の上限（これを超えるシートは読み込まない）
     EXCEL_MAX_CELLS = int(os.environ.get("EXCEL_MAX_CELLS", "500000"))
     # 読み込み・下書き・AI整形を同時に動かす本数（列ごと。core/jobs.py）。
@@ -125,7 +127,7 @@ def to_forms():
 @home_bp.get("/guide", endpoint="guide")
 def guide():
     """解説（帳票の Markdown がどう作られるか）。上部タブの4つ目。読むだけの画面で、データには触れない
-    （利用者の求め 2026-09-22）。中身は templates/guide.html。"""
+    （利用者の求め 2026-09-22）。中身は templates/base.html の screen == "guide" の節。"""
     from flask import render_template
 
     return render_template("base.html", screen="guide")
@@ -2588,6 +2590,36 @@ def recover_interrupted() -> int:
     return _with_conn(run)
 
 
+def reap_orphan_jobs() -> int:
+    """持ち主のいないジョブ（このプロセスが登録しておらず、生存印が2分以上古い）を「中断」にする。
+
+    起動をすり抜けたジョブ（止めた直後に起動し直すと、生存印がまだ新しくて recover_interrupted に
+    引っかからない）は、これまでブラウザがそのジョブを見に来たときしか閉じられなかった。
+    見に来る人がいないと「実行中」のまま残り、その取り込みが片付けの対象から外れ続けて、
+    元ファイル（最大200MB）と作った md が次の再起動まで消えなかった（2026-09-23 のレビュー）。
+    このプロセスが動かしているジョブ（_owned）は、生存印が古くても閉じない。
+    """
+    cutoff = (datetime.now() - STALE_AFTER).isoformat(timespec="seconds")
+
+    def run(conn):
+        marks = ", ".join("?" for _ in ACTIVE_STATUSES)
+        rows = conn.execute(
+            f"""SELECT id FROM jobs WHERE status IN ({marks})
+                AND COALESCE(heartbeat_at, updated_at, created_at) < ?""",
+            (*ACTIVE_STATUSES, cutoff)).fetchall()
+        with _worker_lock:
+            ids = [r[0] for r in rows if (_db_key(), r[0]) not in _owned]
+        if not ids:
+            return 0
+        conn.execute(
+            f"""UPDATE jobs SET status = 'interrupted', pause_requested = 0, message = ?, updated_at = ?
+                WHERE id IN ({", ".join("?" for _ in ids)})""",
+            (INTERRUPTED_MESSAGE, _now(), *ids))
+        conn.commit()
+        return len(ids)
+    return _with_conn(run)
+
+
 def wait_job(job_id: int, timeout: float = 30.0, statuses=TERMINAL_STATUSES) -> dict | None:
     """指定の状態になるまで待つ（テスト・同期実行用）。時間切れなら最後の状態を返す。"""
     deadline = time.monotonic() + timeout
@@ -2913,16 +2945,36 @@ def _shrink(db) -> None:
     動いている AI整形などのジョブの書き込みが「database is locked」で失敗する。なので、待機中・実行中・
     一時停止中のジョブがあるときは VACUUM をしない（消した中身は secure_delete で上書き済み。
     ファイルの大きさは、ジョブが無いときの次の削除か起動時の片付けで戻る）。
+
+    さらに、空きページが少ないうちは VACUUM をしない。帳票の取り込みはジョブを作らないので、
+    .md を1件ダウンロードするだけでも上の判定を素通りして毎回 DB 全体を書き直していた
+    （118MB で1秒、その間ほかの人の自動保存が最長0.75秒待たされた。2026-09-23 のレビューで実測）。
     """
     forget_id_counters(db)
-    statements = ["PRAGMA wal_checkpoint(TRUNCATE)"]
-    if not _jobs_active(db):
-        statements.append("VACUUM")
+    # VACUUM → checkpoint の順。逆にすると VACUUM の結果が app.db-wal に残り、
+    # instance/app.db 自体は縮まない（実測 121,260KB のまま。2026-09-23 のレビュー）
+    vacuum = not _jobs_active(db) and _worth_vacuum(db)
+    statements = (["VACUUM"] if vacuum else []) + ["PRAGMA wal_checkpoint(TRUNCATE)"]
     for statement in statements:
         try:
             db.execute(statement)
         except sqlite3.Error:
             pass
+
+
+# 空きページがこの枚数とこの割合の両方を超えたときだけ VACUUM する（小さい削除で毎回書き直さない）
+VACUUM_MIN_FREE_PAGES = 512          # 4KiB ページで約 2MB
+VACUUM_MIN_FREE_RATIO = 0.25
+
+
+def _worth_vacuum(db) -> bool:
+    """縮める価値があるか（空きページが十分たまっているか）。"""
+    try:
+        free = db.execute("PRAGMA freelist_count").fetchone()[0]
+        total = db.execute("PRAGMA page_count").fetchone()[0]
+    except (sqlite3.Error, TypeError, IndexError):
+        return True    # 数えられないときは今までどおり縮める
+    return bool(free >= VACUUM_MIN_FREE_PAGES and total and free >= VACUUM_MIN_FREE_RATIO * total)
 
 
 def _jobs_active(db) -> bool:
@@ -3050,27 +3102,53 @@ def _busy_ids(db, ref_type: str) -> set[int]:
         return set()   # 確かめられないときは何も捨てない側に倒せないので、呼び出し元で空集合＝全部対象
 
 
+def _sweep_orphan_uploads() -> int:
+    """行の無いアップロードファイル（置いたあと DB への登録が失敗したもの）を片付ける。
+
+    以前は起動時にしか見ていなかったので、動かしている間にできた孤児（最大200MB）が
+    次の再起動まで残っていた（2026-09-23 のレビュー）。
+    """
+    try:
+        db = get_db()
+        known: set[str] = set()
+        for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+            columns = {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}
+            if "stored_path" in columns:
+                known |= {row[0] for row in db.execute(f'SELECT stored_path FROM "{table}"') if row[0]}
+        return remove_orphan_uploads(current_app.config["UPLOAD_DIR"], known)
+    except (sqlite3.Error, OSError, RuntimeError, KeyError):
+        return 0     # 片付けは best effort。ここで見回り全体を止めない
+
+
 def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
     """しばらくさわられていない帳票・一覧表を捨てる。戻り値: (帳票の件数, 一覧表の件数)。
 
-    帳票も一覧表も「最後にさわった日時」（確定 → 途中保存・読み取り → 取り込み の順に見る）で切る。
+    帳票も一覧表も「最後にさわった日時」（途中保存・読み取り → 確定 → 取り込み の順に見る）で切る。
     まとめ取り込みは、そのまとまりのどれか1件でも新しければ、まとまりごと残す（50件を上から順に
     見ていくと、まだ手が届いていない帳票だけが画面から消えてしまうため）。
     動いているジョブが付いているものは、そのジョブが終わるまで残す。
     """
+    try:
+        reap_orphan_jobs()   # 書き込みなので database is locked で落ちうる。片付け全体は止めない
+    except sqlite3.Error:
+        pass
+    _sweep_orphan_uploads()
     db = get_db()
     limit = _stale_before(hours)
     busy_docs = _busy_ids(db, "document")
     busy_imports = _busy_ids(db, "table_import")
+    # 見るのは updated_at が先。confirmed_at は「最後に確定した時刻」で、そのあと直し続けても
+    # 進まない。先に見ていたころは、10:00 に確定して 12:30 まで直していた帳票が 12:05 の見回りで
+    # 消えていた（画面の説明とも逆。2026-09-23 のレビューで実測）
     forms = purge_documents([i for i in _document_ids(
         db,
-        "WHERE COALESCE(confirmed_at, updated_at, created_at) < ? "
+        "WHERE COALESCE(updated_at, confirmed_at, created_at) < ? "
         "AND (batch_id = '' OR NOT EXISTS (SELECT 1 FROM documents s WHERE s.batch_id = documents.batch_id "
-        "AND COALESCE(s.confirmed_at, s.updated_at, s.created_at) >= ?))",
+        "AND COALESCE(s.updated_at, s.confirmed_at, s.created_at) >= ?))",
         (limit, limit)) if i not in busy_docs])
     tables = 0
     for import_id in _import_ids(
-            db, "WHERE COALESCE(confirmed_at, updated_at, created_at) < ?", (limit,)):
+            db, "WHERE COALESCE(updated_at, confirmed_at, created_at) < ?", (limit,)):
         if import_id in busy_imports:
             continue
         tables += purge_table_import(import_id)
@@ -3729,7 +3807,9 @@ def forms_upload():
 @forms_bp.post("/discard", endpoint="discard")
 def forms_discard():
     """この画面（このブラウザ）の、まだダウンロードしていない帳票を捨てる。"""
-    payload = request.get_json(force=True, silent=True) or {}
+    payload = request.get_json(force=True, silent=True)
+    # sendBeacon は中身の形を選べない。辞書以外（"x" や [1,2]）が届いても 204 を返す
+    payload = payload if isinstance(payload, dict) else {}
     ids = payload.get("doc_ids") or []
     sid = current_session_id()
     try:
@@ -3745,7 +3825,9 @@ def forms_discard():
 # ---- 2 帳票の種類とシート ---------------------------------------------------------------
 
 def _id_list(raw: str) -> list[int]:
-    return [int(part) for part in raw.split(",") if part.strip().isdigit()]
+    # 桁の大きい数は SQLite に渡すと OverflowError（500）になるので、ここで落とす
+    return [n for n in (int(part) for part in raw.split(",") if part.strip().isdigit())
+            if 0 < n < 2 ** 63]
 
 
 @forms_bp.get("/type", endpoint="type_all")
@@ -3852,6 +3934,20 @@ def _type_response(docs: list[dict]):
 def read_all():
     """置かれた帳票を1つの種類・シートでまとめて読み取り、全部の読み取り結果を返す。"""
     return _read_documents(_docs_of(_id_list(request.form.get("ids", ""))))
+
+
+@forms_bp.get("/review", endpoint="review_all")
+def review_all():
+    """いま保存されている読み取り結果を描き直す（読み取りはやり直さない）。
+
+    まとめ置きから1件だけ外したときに使う。以前は残りの帳票の③まで画面から消え、
+    ［読み取る］で取り直すしかなく、手で直した値が警告なしに失われていた
+    （2026-09-23 のレビューで実測）。ここは保存済みの内容をそのまま描くので何も失われない。
+    """
+    ids = [d["id"] for d in _docs_of(_id_list(request.args.get("ids", ""))) if d.get("data_json")]
+    if not ids:
+        return jsonify(error="読み取り結果がありません。［読み取る］を押してください"), 404
+    return _review_response(ids)
 
 
 @forms_bp.post("/<int:doc_id>/read")
@@ -4982,10 +5078,17 @@ def tables_upload():
     except Exception:
         remove_upload(stored.stored_path)   # 思わぬエラーでもアップロードしたファイルを残さない（design.md 3.3）
         raise
-    import_id = create_import(stored.file_name, stored.file_hash, stored.stored_path, source=source_info,
-                                    session_id=current_session_id())
-    if source_info.get("kind") == "excel":
-        import_source(get_import(import_id), real=source).sheets()  # シート一覧を控えに入れる
+    try:
+        # DB への登録も同じ try に入れる。ここで落ちると（別の人の VACUUM 中の database is locked、
+        # ディスク満杯など）、置いたファイル（最大200MB）だけが行の無い孤児として残り、
+        # 再起動するまで消えなかった（2026-09-23 のレビュー）
+        import_id = create_import(stored.file_name, stored.file_hash, stored.stored_path, source=source_info,
+                                  session_id=current_session_id())
+        if source_info.get("kind") == "excel":
+            import_source(get_import(import_id), real=source).sheets()  # シート一覧を控えに入れる
+    except Exception:
+        remove_upload(stored.stored_path)
+        raise
     return jsonify({"import_id": import_id, "file_name": stored.file_name, "urls": _urls(import_id)})
 
 
@@ -5068,6 +5171,13 @@ def save_source(import_id: int):
     if (src.get("sheet"), src.get("encoding"), src.get("delimiter"), src.get("errors")) != before:
         src.pop("header_rows", None)
         src.pop("data_end_row", None)
+        # 置いたときの判定（文字コード・区切りの見立て）で出した注意書きと「前置き行」は、
+        # 読み方を変えたら合わなくなる。捨てないと、文字コードを直したあとも
+        # 「UTF-8 の行が混ざっています」が出続けて消せなかった（2026-09-23 のレビュー）
+        # 捨てるのは置いたときの見立ての注意書きだけ。前置き行の数（preamble_rows）は
+        # ③「表の範囲」が使う値なので残す（捨てると 0行になって実際と食い違う）
+        for stale in ("sniff_warnings", "confidence"):
+            src.pop(stale, None)
         # 見出しが変わるので、この取り込みの列の対応づけは捨てて決め直す
         columns.update(spec_json="", spec_hash="")
     update_import(import_id, **columns)
@@ -5566,6 +5676,10 @@ def ai_trial(import_id: int):
         # 試し実行の結果は下書きに入るが、zip は確定したときの md を渡す。食い違わないよう断る
         return _json_error("確定後は試し実行できません（結果が確定した Markdown に入らないため）。"
                            "試すときは列の対応づけからもう一度読み込んでください")
+    if _ai_running(import_id):
+        # 全件実行と試し実行が同じ行に書き戻すので、別の設定の結果が混ざる（2026-09-23 のレビュー）
+        return _json_error("AI整形が動いています（一時停止中を含む）。"
+                           "終わるか中止してから試し実行してください")
     payload = _tables_payload()
     row_key = str(payload.get("row_key") or "")
     try:
@@ -5808,7 +5922,11 @@ def _panel_preview(imp: dict, page: int = 1):
         page = total_pages
         data_rows, _total = load_rows_page(import_id, (page - 1) * DATA_PAGE, DATA_PAGE)
     blocking = has_blocking(issues)
-    html = render_part("base.html", "part_preview", imp=imp, spec=spec, stats=stats, issues=issues[:ISSUES_SHOWN],
+    # 確定を止めているエラーを先に出す。行番号順のまま先頭200件を切っていたころは、
+    # エラーが201件目以降だと「エラーが残っているため確定できません」と出るのに
+    # 問題一覧にはエラーが1件も無く、何を直せばよいか分からなかった（2026-09-23 のレビューで実測）
+    shown = sorted(issues, key=lambda i: 0 if i.get("level") == "error" else 1)
+    html = render_part("base.html", "part_preview", imp=imp, spec=spec, stats=stats, issues=shown[:ISSUES_SHOWN],
         issue_total=len(issues), counts=count_levels(issues), blocking=blocking, files=files, data_rows=data_rows,
         page=page, total_pages=total_pages, columns=[(c.key, _display_with_unit(c)) for c in spec.columns],
         confirmed=imp["status"] == "confirmed", delete_note=TABLES_DELETE_ON_DOWNLOAD_NOTE)
@@ -5893,20 +6011,23 @@ def download_zip(import_id: int):
     """
     imp = _load_import(import_id)
     spec = _spec_for(imp)
+    # 断る理由はこの画面に直接書く。以前は知らせ（flash）を積んで転送していたが、別の段の描画が
+    # 知らせを先に食べることがあり、理由の出ない空の画面に飛ばされていた（2026-09-23 のレビュー）
+    reason = None
     if imp["status"] != "confirmed" or spec is None:
-        flash("先に [確定してMarkdownを作成] を押してください", "error")
-        return redirect(url_for("tables.new"))
-    if not md_paths(import_id):
+        reason = "先に [確定してMarkdownを作成] を押してください"
+    elif not md_paths(import_id):
         # 確定はしたが記録が0件だった（押したばかりのボタンをもう一度押せ、とは言わない）
-        flash("作成された Markdown がありません（取り込める行がありませんでした）。表の範囲か元のファイルを見直してください",
-              "error")
-        return redirect(url_for("tables.new"))
-    if _ai_running(import_id):
-        flash("AI整形の実行中はダウンロードできません。終わるか中止してからダウンロードしてください", "error")
-        return redirect(url_for("tables.new"))
-    if _trial_running(import_id):
-        flash(TRIAL_BUSY_MESSAGE, "error")
-        return redirect(url_for("tables.new"))
+        reason = ("作成された Markdown がありません（取り込める行がありませんでした）。"
+                  "表の範囲か元のファイルを見直してください")
+    elif _ai_running(import_id):
+        reason = "AI整形の実行中はダウンロードできません。終わるか中止してからダウンロードしてください"
+    elif _trial_running(import_id):
+        reason = TRIAL_BUSY_MESSAGE
+    if reason:
+        if request.accept_mimetypes.best == "application/json" or request.is_json:
+            return jsonify(error=reason), 409
+        return render_template("base.html", code=409, reason=reason), 409
     try:
         data = build_download(import_id)
     except FileNotFoundError:
@@ -6077,6 +6198,11 @@ def create_app(overrides: dict | None = None) -> Flask:
 
     @app.errorhandler(500)
     def _server_error(_exc):
+        # 画面の中からの送信に HTML を返すと、トーストに「通信に失敗しました」としか出ず
+        # 理由が伝わらない（ほかのエラーと同じ扱いにする。2026-09-23 のレビュー）
+        if request.accept_mimetypes.best == "application/json" or request.is_json:
+            return jsonify(error="サーバー側でエラーが発生しました。画面を開き直してもう一度お試しください"
+                                 "（詳しい内容はアプリのログに記録しました）"), 500
         return render_template("base.html", code=500), 500
 
     @app.cli.command("serve")

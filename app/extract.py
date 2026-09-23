@@ -28,6 +28,7 @@ import sqlite3
 import threading
 import time as _time
 import unicodedata
+import uuid
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
@@ -1866,7 +1867,10 @@ def apply_manual_values(extraction: dict, form) -> None:
         key = f"value-{f['field_name']}"
         if key not in form:
             continue
-        text = form[key].replace("\r\n", "\n").strip()
+        # 見えない文字（ゼロ幅スペース・BOM・ソフトハイフン）を落とす。読み取りの道すじでは落として
+        # いるので、画面で貼ったときだけ残ると、見た目が同じ別の文書として LightRAG に入り、
+        # 検索語と一致しなくなる（ファイル名にも混ざる。2026-09-23 のレビューで実測）
+        text = strip_invisible(form[key].replace("\r\n", "\n")).strip()
         if f["data_type"] == "table":
             value, warning = parse_table_text(text)
             if warning:  # 形が壊れた入力では値を変えない
@@ -3684,13 +3688,27 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     heading_texts = _title_texts(title_fields, heading=True)
     stem = _md_one_line(Path(doc["file_name"]).stem)
     if not title_texts:
-        title = f"{type_name} {stem}"
+        # タイトルに使える4項目（報告番号・設備番号・設備名・発生日）が1つも読めていない帳票
+        # （「作業No.」「点検日」だけの作業日報・日常点検表など）。ここでも番号らしい項目と日付を
+        # 拾って識別子にする。拾わないと `##` に識別子が付かず、明細表も「（続き）」に分かれないので、
+        # 明細の途中で切られた断片に身元が1文字も残らない（2026-09-23 のレビューで実測）。
+        extras = _fallback_identifiers(filled, title_fields) or [stem]
+        title_texts = heading_texts = extras
+        title = f"{type_name} {'｜'.join(title_texts)}"
     else:
-        if _has_equipment_only(title_fields):
-            # 設備だけでは同じ設備の帳票が同じタイトル・同じ見出しになる。番号らしい項目・日付、
-            # それも無ければ元ファイル名を足して、1帳票だけで見分けられるようにする（design.md 6章）
-            extra = _fallback_identifier(filled, title_fields) or stem
-            title_texts, heading_texts = [*title_texts, extra], [*heading_texts, extra]
+        # タイトルに帳票自身の番号（報告番号）が入らないときは、番号らしい項目（作業No. など）と
+        # 日付を拾って足す。設備と日付だけでは、同じ設備の同じ日の作業が見分けられず、
+        # 番号で探したときに先頭の断片しか当たらない（2026-09-23 のレビューで実測）
+        has_report_id = any(f["field_name"] == "report_id" for f in title_fields)
+        has_date = any(f["data_type"] == "date" for f in title_fields)
+        extras = ([] if has_report_id
+                  else _fallback_identifiers(filled, title_fields, want_date=not has_date))
+        if extras:
+            title_texts, heading_texts = [*title_texts, *extras], [*heading_texts, *extras]
+        elif _has_equipment_only(title_fields):
+            # 設備だけで、番号らしい項目も日付も読めなかった。元ファイル名で見分ける
+            # （足さないと、同じ設備の帳票がすべて同じタイトル・同じ見出しになる）
+            title_texts, heading_texts = [*title_texts, stem], [*heading_texts, stem]
         elif not _has_identifier(title_fields):
             # 識別番号も設備も入らないタイトルは、元ファイル名を足して帳票を特定できるようにする
             title_texts = [*title_texts, stem]
@@ -3709,49 +3727,71 @@ def build_markdown(doc: dict, extraction: dict) -> str:
     long_fields = [f for f in filled if f["data_type"] in ("text", "table")]
 
     def render(with_identifier: bool) -> str:
+        marked = bool(with_identifier and identifier)
         blocks = [head, basics]
+        if marked:
+            # 基本情報も分ける。短い項目が何十件もある点検表では、ここが1つの塊のままだと
+            # 途中で切られた断片に帳票番号も設備名も入らない（2026-09-23 のレビューで実測）
+            blocks = [head]
+            for i, part in enumerate(_split_section_lines(basics, identifier)):
+                blocks.append(part if i == 0
+                              else [f"## {_escape_line(f'基本情報（続き）（{identifier}）')}", *part])
         for f in long_fields:
             heading = _md_one_line(f["display_name"])
-            if with_identifier and identifier:
+            if marked:
                 heading += f"（{identifier}）"
-            if f["data_type"] == "table":
-                lines = table_markdown_lines(f["value"])
-                if not (with_identifier and identifier):
-                    blocks.append([f"## {_escape_line(heading)}", *lines])
-                    continue
-                # 長い明細表は「（続き）」の見出しで分ける（どの断片にも識別子が入るように）
-                base = _md_one_line(f["display_name"])
-                for i, part in enumerate(_split_table_lines(lines)):
-                    part_heading = heading if i == 0 else f"{base}（続き）（{identifier}）"
-                    blocks.append([f"## {_escape_line(part_heading)}", *part])
+            base = _md_one_line(f["display_name"])
+            # 明細表の行は自分で作った箇条書きなので無効化しない。文章の行は、行の中で切ると
+            # 新しい行頭ができるので、無効化（escape）を切ったあとに当てる。先に当てていたころは、
+            # 切れ目にできた `# 注記` が md の見出しに化けた（2026-09-23 のレビュー）
+            is_table = f["data_type"] == "table"
+            lines = (table_markdown_lines(f["value"]) if is_table
+                     else [line for line in _format_value(f).split("\n") if line.strip()])
+            fix = (lambda x: x) if is_table else _escape_line
+            if not marked:
+                blocks.append([f"## {_escape_line(heading)}", *(fix(x) for x in lines)])
                 continue
-            lines = [line for line in _format_value(f).split("\n") if line.strip()]
-            blocks.append([f"## {_escape_line(heading)}", *(_escape_line(line) for line in lines)])
+            # 長い節は「（続き）」の見出しで分ける（どの断片にも識別子が入るように）。
+            # 以前は明細表だけを分けていたので、長文1項目の帳票では節の途中の断片に身元が残らなかった
+            for i, part in enumerate(_split_section_lines(lines, identifier)):
+                part_heading = heading if i == 0 else f"{base}（続き）（{identifier}）"
+                blocks.append([f"## {_escape_line(part_heading)}", *(fix(x) for x in part)])
         blocks.append(tail)
         return _join_blocks(blocks)
 
     text = render(False)
-    if long_fields and identifier and _estimate_tokens(text) > HEADING_IDENTIFIER_TOKENS:
+    # 長文・明細表の節が無い帳票（短い項目が何十件もある点検表）でも、窓を超えるなら識別子を入れて分ける。
+    # 以前は long_fields があるときだけだったので、基本情報だけで窓を超える帳票が素通りしていた
+    if identifier and _estimate_tokens(text) > HEADING_IDENTIFIER_TOKENS:
         text = render(True)
     return text
 
 
-def _split_table_lines(lines: list[str]) -> list[list[str]]:
-    """明細表の行を、1節が TABLE_SECTION_TOKENS に収まるまとまりに分ける。
+def _split_section_lines(lines: list[str], identifier: str = "") -> list[list[str]]:
+    """節の行を、1節が TABLE_SECTION_TOKENS に収まるまとまりに分ける。
 
-    分けないと、明細表の行だけで埋まった断片（LightRAG のチャンク）ができ、
+    分けないと、節の行だけで埋まった断片（LightRAG のチャンク）ができ、
     その断片の中に識別番号も設備名も日付も1文字も無くなる（docs/research.md 2章（LightRAG オフライン評価）8.5）。
+    2つ目以降の見出しに識別子を書き足すので、その分を上限から引く（引かないと、
+    識別子が長い帳票で1つの節が窓を超えることがある）。
     """
+    budget = max(_MIN_PART_TOKENS, TABLE_SECTION_TOKENS - _estimate_tokens(f"## （続き）（{identifier}）"))
     parts: list[list[str]] = []
     current: list[str] = []
     tokens = 0
-    for line in lines:
-        n = _estimate_tokens(line)
-        if current and tokens + n > TABLE_SECTION_TOKENS:
-            parts.append(current)
-            current, tokens = [], 0
-        current.append(line)
-        tokens += n
+    # `- 項目名:` とその2字下げの続きは1つの塊として扱う。塊の途中で切ると、
+    # 続きの節が「項目名の無い2字下げの行」だけになって何の値か分からなくなる
+    # （2026-09-23 のレビューで実測）。塊が1つで上限を超えるときだけ、塊の中で切る
+    for group in _bullet_groups(lines):
+        chunks = ([group] if _tokens(group) <= budget
+                  else _split_group(group, budget))
+        for chunk in chunks:
+            n = _tokens(chunk)
+            if current and tokens + n > budget:
+                parts.append(current)
+                current, tokens = [], 0
+            current += chunk
+            tokens += n
     if current or not parts:
         parts.append(current)
     return parts
@@ -3827,21 +3867,42 @@ def _has_equipment_only(fields: list[dict]) -> bool:
 _NUMBER_LABEL = re.compile(r"(?:No\.?|NO\.?|番号|№)\s*$")
 
 
-def _fallback_identifier(filled: list[dict], title_fields: list[dict]) -> str:
-    """タイトル項目で見分けられないときに足す値: 番号らしい項目 → 日付の項目の順。無ければ ""。"""
-    found = _fallback_field(filled, title_fields)
-    return _md_one_line(_plain_value(found)) if found else ""
+def _fallback_identifiers(filled: list[dict], title_fields: list[dict], *,
+                          want_date: bool = True) -> list[str]:
+    """タイトル項目で見分けられないときに足す値。番号らしい項目と日付の「両方」。
+
+    片方（番号が見つかればそれだけ）で止めていたため、作業No.を持つ点検帳票では
+    タイトル・見出し・ファイル名のどこにも日付が入らなかった（F4 は見出し167個のうち
+    149個に日付なし。2026-09-23 の実測）。LightRAG に渡るのはチャンクの本文だけなので、
+    日付が無いと「いつの記録か」を断片だけでは言えず、期間で絞る質問に答えられない。
+    """
+    return [_clip_title_text(_md_one_line(_plain_value(f)), TITLE_VALUE_CHARS)
+            for f in _fallback_fields(filled, title_fields, want_date=want_date)]
 
 
-def _fallback_field(filled: list[dict], title_fields: list[dict]) -> dict | None:
-    """_fallback_identifier で使う項目（番号らしい項目 → 日付の項目）。"""
+def _fallback_fields(filled: list[dict], title_fields: list[dict], *, want_date: bool = True) -> list[dict]:
+    """足す項目（番号らしい項目・日付の項目）を、その順で返す。
+
+    want_date=False は、タイトルにすでに日付が入っているとき（同じ日付を二重に出さない）。
+    """
     used = {f["field_name"] for f in title_fields}
     rest = [f for f in filled if f["field_name"] not in used
             and f["field_name"] not in ("equipment_id", "equipment_name")]
     numbered = next((f for f in rest if f["data_type"] in ("string", "number")
                      and _NUMBER_LABEL.search(_md_one_line(f.get("display_name")))), None)
-    dated = next((f for f in rest if f["data_type"] == "date"), None)
-    return numbered or dated
+    dated = next((f for f in rest if f["data_type"] == "date"), None) if want_date else None
+    return [f for f in (numbered, dated) if f is not None]
+
+
+def _fallback_field(filled: list[dict], title_fields: list[dict]) -> dict | None:
+    """出典に足す1つ（番号らしい項目 → 日付の項目）。"""
+    found = _fallback_fields(filled, title_fields)
+    return found[0] if found else None
+
+
+# タイトル・識別子に出す1つの値の上限（字）。設備名のセルの隣の注記まで1つの値として読んだ帳票では、
+# 識別子1つが推定254トークンになり、見出しの繰り返しだけで md の3割を占めていた（2026-09-23 のレビュー）
+TITLE_VALUE_CHARS = 40
 
 
 def _title_texts(fields: list[dict], heading: bool) -> list[str]:
@@ -3853,12 +3914,12 @@ def _title_texts(fields: list[dict], heading: bool) -> list[str]:
     for f in fields:
         if pair and f["field_name"] in ("equipment_id", "equipment_name"):
             if not done_pair:
-                eq_id = _md_one_line(_plain_value(names["equipment_id"]))
-                eq_name = _md_one_line(_plain_value(names["equipment_name"]))
+                eq_id = _clip_title_text(_md_one_line(_plain_value(names["equipment_id"])), TITLE_VALUE_CHARS)
+                eq_name = _clip_title_text(_md_one_line(_plain_value(names["equipment_name"])), TITLE_VALUE_CHARS)
                 texts.append(f"{eq_id} {eq_name}" if heading else f"{eq_name}（{eq_id}）")
                 done_pair = True
             continue
-        texts.append(_md_one_line(_plain_value(f)))
+        texts.append(_clip_title_text(_md_one_line(_plain_value(f)), TITLE_VALUE_CHARS))
     return [t for t in texts if t]
 
 
@@ -3906,13 +3967,14 @@ def _plain_value(f: dict) -> str:
 def _form_source_text(doc: dict, title_fields: list[dict], filled: list[dict] | None = None) -> str:
     """出典: 元ファイル名（報告番号 R2026-00123）。報告番号がなければ最初の文字列のタイトル項目。
 
-    タイトル項目が設備だけのときは、タイトルに足した項目（作業No.などの番号 → 日付）を書く。
+    タイトル項目が設備だけのとき、およびタイトル項目が1つも無いときは、
+    タイトルに足した項目（作業No.などの番号 → 日付）を書く。
     """
     file_name = _md_one_line(doc["file_name"])
     ident = next((f for f in title_fields if f["field_name"] == "report_id"), None)
     ident = ident or next((f for f in title_fields if f["data_type"] == "string"
                            and f["field_name"] not in ("equipment_id", "equipment_name")), None)
-    if ident is None and filled and _has_equipment_only(title_fields):
+    if ident is None and filled and (not title_fields or _has_equipment_only(title_fields)):
         ident = _fallback_field(filled, title_fields)
     if ident is None:
         return file_name
@@ -5043,7 +5105,13 @@ class ExcelSource:
     def _style(self, style_id) -> tuple:
         found = self._styles.get(style_id)
         if found is None:
-            found = self._styles[style_id] = self._style_tuple(self._wb_styles[0][style_id])
+            try:
+                array = self._wb_styles[0][style_id]
+            except (IndexError, KeyError, TypeError):
+                # 他社システムが書き出した xlsx で、セルが cellXfs に無い番号を指していることがある。
+                # 書式が読めないだけなので既定の書式で読み進める（2026-09-23 のレビュー）
+                array = None
+            found = self._styles[style_id] = self._style_tuple(array)
         return found
 
     def sheets(self) -> list[SheetInfo]:
@@ -5141,10 +5209,14 @@ class ExcelSource:
                     if trim:
                         # 遠くの列に値が1つだけある表でも、行ごとに全列を作らない（その行の最後のセルまで）
                         width = max([d["column"] for d in by_col.values()] + [0])
+                        # anchor_rows・extra_rows は列で絞らずに作るので、その行の結合セル・コメントが
+                        # 全部 max_col より右にあると anchor_last / extra_last に鍵が無い。
+                        # 以前はそこで KeyError になり、シート全体が「1行目付近の値を読めません（NaN など）」
+                        # という無関係な案内で読めなくなっていた（2026-09-23 のレビューで実測）
                         if has_anchor:
-                            width = max(width, anchor_last[r])
+                            width = max(width, anchor_last.get(r, 0))
                         if has_extra:
-                            width = max(width, extra_last[r])
+                            width = max(width, extra_last.get(r, 0))
                     row_cells = []
                     for c in range(1, width + 1):
                         anchor = anchors.get((r, c)) if has_anchor else None
@@ -5167,6 +5239,11 @@ class ExcelSource:
                     done = r
                     yield SourceRow(index=r, cells=row_cells, hidden=_row_hidden(attrs))
         except (UploadError, GeneratorExit):
+            raise
+        except (KeyError, IndexError):
+            # 添字の取りこぼし＝アプリ側の不具合で、元の値は壊れていない。
+            # 「Excelで開いて値を直してください」と言うと直しようのない案内になるので、
+            # そのまま落とす（500 になり、例外がログに残って原因を追える）
             raise
         except Exception as e:
             if done >= 0:
@@ -5440,11 +5517,34 @@ def _is_header_cell(cell) -> bool:
         and len(cell.text) <= 40 and "\n" not in cell.text
 
 
-def _headerish(row: SourceRow) -> bool:
-    cells = [c for c in row.cells if c.text]
+def _headerish(row: SourceRow, width: int = 0) -> bool:
+    cells = [c for c in row.cells[:width] if c.text] if width else [c for c in row.cells if c.text]
     if len(cells) < 2:
         return False
     return sum(1 for c in cells if _is_header_cell(c)) / len(cells) >= 0.8
+
+
+def _left_block_width(row: SourceRow) -> int:
+    """いちばん左の表の幅（列数）。空の列を2つ以上はさんだ右は別の表とみなす。
+
+    2段見出しの判定を、その行の全部ではなくこの幅に閉じるために使う。閉じないと、
+    右にある別の表のデータが混ざって「下段は見出しらしくない」と誤判定し、
+    2段目の見出し（数量・単価…）が消えて「部品(2)」のような列名になり、
+    下段の見出し行そのものが1件のデータとして取り込まれていた（2026-09-23 のレビューで実測）。
+    """
+    covered = [bool(c.text) or bool(c.merged_anchor and c.merged_anchor[0] == row.index)
+               for c in row.cells]
+    if not any(covered):
+        return 0
+    first = covered.index(True)
+    last = max(i for i, f in enumerate(covered) if f) + 1
+    # _table_width と同じ見方: 空の列をはさんで右に見出しが2つ以上あれば、そこから先は別の表
+    for gap in range(first + 1, last):
+        if covered[gap]:
+            continue
+        if sum(1 for i in range(gap + 1, last) if covered[i]) >= 2:
+            return gap
+    return last
 
 
 def _last_col(row: SourceRow) -> int:
@@ -5546,13 +5646,17 @@ def _header_band(by_index: dict[int, SourceRow], best: int, is_csv: bool) -> lis
 def _pair_is_header(top: SourceRow, bottom: SourceRow, after: SourceRow | None, is_csv: bool) -> bool:
     if after is not None and not after.is_blank and _headerish(after):
         return False
-    top_cells = [c for c in top.cells if c.text]
+    # 右にある別の表を巻き込まないよう、判定は「いちばん左の表の幅」に閉じる。
+    # CSV は結合の情報が無く、横に結合した見出しの下が素の空欄になるので、この絞り込みはしない
+    # （すると「管理No,発生,,設備,,停止時間」の空欄で表が切れてしまう）
+    width = 0 if is_csv else _left_block_width(top)
+    top_cells = [c for c in top.cells[:width] if c.text] if width else [c for c in top.cells if c.text]
     bottom_cells = [c for c in bottom.cells if c.text]
     if len(top_cells) < 2 or len(bottom_cells) < 2:
         return False  # 上段が1セルだけならタイトル行とみなす
     if _BLOCK_TITLE_RE.match(top_cells[0].text) or _NOTE_RE.match(top_cells[0].text):
         return False
-    if not all(_is_header_cell(c) for c in top_cells) or not _headerish(bottom):
+    if not all(_is_header_cell(c) for c in top_cells) or not _headerish(bottom, width):
         return False
     horizontal = any(
         c.merged_anchor and c.merged_anchor[0] == top.index and c.merged_anchor[1] != i + 1
@@ -6269,7 +6373,10 @@ def layout_key(sheet: str, anchors=None, header_row=None, data_end=None, header_
 
 # ---- 控えのファイル ----------------------------------------------------------------------------
 
-_CODE_MODULES = ("tables.py",)   # 読み取り・判定のコードはこのファイルにまとめてある
+# 読み取り・判定のコードが入っているファイル。ファイルをまとめたときに古い名前（tables.py）が
+# 残っていて、読めないファイルの名前をハッシュに混ぜる作りだったため、どれだけコードを直しても
+# 控えの版が変わらず、古い判定のまま使われ続けていた（2026-09-23 のレビューで実測）
+_CODE_MODULES = ("extract.py", "__init__.py")
 
 
 @functools.lru_cache(maxsize=1)
@@ -6281,7 +6388,8 @@ def _code_version() -> str:
         try:
             digest.update((base / name).read_bytes())
         except OSError:
-            digest.update(name.encode("utf-8"))
+            # 読めないファイルがあるときは控えを当てにしない（名前を混ぜると、いつまでも同じ版になる）
+            return uuid.uuid4().hex[:16]
     return digest.hexdigest()[:16]
 
 
@@ -7136,8 +7244,11 @@ def month_last_day(month: str) -> str:
 
 
 def is_month(text) -> bool:
+    # 年も確かめる。「0000-01-01」を月として通していたころは、対象期間の行を作る date(0, …) が
+    # ValueError で落ち、下書きも確定も同じ場所で止まっていた（2026-09-23 のレビューで実測）
     s = str(text or "")
-    return len(s) >= 7 and s[4] == "-" and s[:4].isdigit() and s[5:7].isdigit() and 1 <= int(s[5:7]) <= 12
+    return (len(s) >= 7 and s[4] == "-" and s[:4].isdigit() and s[5:7].isdigit()
+            and 1 <= int(s[5:7]) <= 12 and 1 <= int(s[:4]) <= 9999)
 
 
 # ---- 設備の列 --------------------------------------------------------------------------
@@ -8510,12 +8621,16 @@ class MdFile:
 
 def people_index_for(spec: TableSpec, records: list[dict]):
     """記入者の判定に使う人物の索引（人物一覧＋担当列の値）。"""
-    from app.ai import PeopleIndex
+    from app.ai import PeopleIndex, drop_placeholder_names
 
     stage = spec.log_stage
     person_keys = [c.key for c in spec.columns if c.role == "person"]
     names = sorted({str(r.get("values", {}).get(k)) for r in records for k in person_keys
                     if r.get("values", {}).get(k)})
+    # 「不明」「調査中」「未定」だけの担当欄は人名ではない。設備の列と同じふるいをかける
+    # （入れてしまうと本文の「不明な異音が…」が記入者に化ける。2026-09-23 のレビューで実測）。
+    # AI側（ai.people_index）と同じ関数を使う。片方だけだと分割・マスク・記入者がずれる
+    names = drop_placeholder_names(names)
     return PeopleIndex(stage.people if stage else None, column_names=names,
                        groups=(stage.groups or None) if stage else None)
 
@@ -8684,7 +8799,10 @@ def _clip_title_text(text: str, limit: int) -> str:
             opened.append(i)
         elif opened and ch == _TABLE_BRACKETS[cut[opened[-1]]]:
             opened.pop()
-    if opened:
+    if opened and opened[0] >= limit // 2:
+        # 閉じない括弧の前まで戻す。ただし戻しすぎると見分けの材料ごと落ちるので、
+        # 半分より手前に括弧があるときは戻さない（「コンプレッサ（3号機・…」と
+        # 「コンプレッサ（4号機・…」が同じ識別子になっていた。2026-09-23 のレビューで実測）
         cut = cut[:opened[0]]
     cut = cut.rstrip().rstrip("、,。.")
     return (cut or text[:limit].rstrip()) + "…"
@@ -8753,6 +8871,11 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
             first = _title_text_line(values[text_col.key])
             if first:
                 pieces.append(_clip_title_text(first, TITLE_TEXT_CHARS))
+    if not pieces:
+        # 識別番号・対象・長文のどれも無い表（稼働日報・生産数量など「日付＋区分＋数値」の一覧）。
+        # 日付だけを足すと同じ日の記録が全部「## ｜2026-08-03」になって見分けられないので、
+        # 先に先頭のほうの列の値をつないで材料を作る（2026-09-23 のレビューで実測）
+        pieces = _title_fallback_pieces(values, spec)
     title = ""
     for piece in pieces:
         if title and not title.endswith(("】", "）")):
@@ -8760,25 +8883,28 @@ def record_title(values: dict, spec: TableSpec, source: dict | None = None) -> s
         title += piece
     date_value = values.get(spec.date_key)
     if date_value:
-        title += f"｜{str(date_value)[:10]}"
+        title += f"｜{str(date_value)[:10]}" if title else str(date_value)[:10]
     title = _table_one_line(title)
     if title:
         return title
-    # 見出しの材料が何も無い表（識別番号・設備・長文・日付のどれも無い）。全部の記録が同じ見出しに
-    # なると RAG のチャンクを見分けられないので、先頭のほうの列の値をつないで見出しにする
+    row = (source or {}).get("row")
+    return f"{row}行目の記録" if row else "（見出しなし）"
+
+
+def _title_fallback_pieces(values: dict, spec: TableSpec) -> list[str]:
+    """見出しの材料が無いときに使う、先頭のほうの列の値（最大3つ）。"""
     parts: list[str] = []
     for col in spec.columns:
-        if _is_hidden(col, spec) or col.type == "text":
+        if _is_hidden(col, spec) or col.type == "text" or col.key == spec.date_key:
             continue
-        text = _table_one_line(str(values.get(col.key) or ""))
+        value = values.get(col.key)
+        # 0 は「値あり」。`or ""` で落とすと「- 停止時間: 0分」の記録が見出しから消えていた
+        text = "" if value is None or value == "" else _table_one_line(str(value))
         if text:
             parts.append(_clip_title_text(text, 20))
         if len(parts) >= 3:
             break
-    if parts:
-        return " ".join(parts)
-    row = (source or {}).get("row")
-    return f"{row}行目の記録" if row else "（見出しなし）"
+    return parts
 
 
 def record_blocks(record: dict, spec: TableSpec, ai_results: dict | None = None, people=None) -> list[list[str]]:
@@ -8869,7 +8995,10 @@ def _record_lines(record: dict, spec: TableSpec, ai_results: dict | None, people
 # ---- 大きい記録を「（続きn/m）」に分ける（文字は1つも消さない） ------------------------------
 
 _MIN_PART_TOKENS = 80          # 見出し・書き直す行を引いても、これだけは中身に使う
-_BULLET_LABEL = re.compile(r"^- ([^:]{1,40}): ")
+# `- 項目名: 値` の項目名。いちばん手前の `: ` までを項目名にする（最短一致）。
+# 以前は `[^:]{1,40}` で、項目名に半角コロンのある列（見出し「現象:内容」）や41字以上の列名だと
+# 一致せず、長い1行がまったく切られずに残っていた（2026-09-23 のレビューで実測 上限の14倍）。
+_BULLET_LABEL = re.compile(r"^- (.{1,200}?): ")
 
 
 def _tokens(lines: list[str]) -> int:
@@ -8914,6 +9043,24 @@ def _text_pieces(text: str, budget: int) -> list[str]:
     return out
 
 
+def _pack_pieces(pieces: list[str], budget: int) -> list[str]:
+    """_text_pieces の小片を budget まで詰め直す。
+
+    詰め直さないと、句読点の無い値（英文ログ・空白でつないだ品番の羅列）が1語1行になり、
+    行末の空白が落ちて区切りそのものが消える（2026-09-23 のレビューで実測）。
+    """
+    out: list[str] = []
+    cur = ""
+    for piece in pieces:
+        if cur and estimate_tokens(cur + piece) > budget:
+            out.append(cur)
+            cur = ""
+        cur += piece
+    if cur:
+        out.append(cur)
+    return out or list(pieces)
+
+
 def _split_group(group: list[str], budget: int) -> list[list[str]]:
     """1つの箇条書きが budget に収まらないときに小分けにする（行も文も消さない）。"""
     if _tokens(group) <= budget:
@@ -8922,16 +9069,33 @@ def _split_group(group: list[str], budget: int) -> list[list[str]]:
     if len(group) > 1:
         # 複数行の値（対応の時系列など）。見出しの行を「（続き）」で繰り返して2字下げの行を分ける
         cont = f"{head[:-1]}（続き）:" if head.endswith(":") else head
+        if estimate_tokens(cont) > budget // 2:
+            # 見出しの行が長すぎると繰り返す余地が無くなり、1文字ずつに切れて md が数十倍になる。
+            # そのときは項目名を詰めて繰り返す（2026-09-23 のレビューで実測）
+            cont = f"- {_clip_title_text(cont.lstrip('- ').rstrip(':'), 20)}（続き）:"
+        room = max(_MIN_PART_TOKENS, budget - estimate_tokens(cont))
         out, cur = [], [head]
         for line in group[1:]:
-            if len(cur) > 1 and _tokens(cur) + estimate_tokens(line) > budget:
-                out.append(cur)
-                cur = [cont]
-            cur.append(line)
+            # 2字下げの行1本が budget を超えることがある（句点の無い長い段落、1件が長い対応履歴）。
+            # 行の中でも切らないと、ここだけで上限の百倍の塊が残る（2026-09-23 のレビューで実測）
+            if estimate_tokens(line) <= room:
+                pieces = [line]
+            else:
+                indent = line[:len(line) - len(line.lstrip())]
+                room2 = max(1, room - estimate_tokens(indent))
+                pieces = [indent + p for p in
+                          _pack_pieces(_text_pieces(line[len(indent):], room2), room2)]
+            for piece in pieces:
+                if len(cur) > 1 and _tokens(cur) + estimate_tokens(piece) > budget:
+                    out.append(cur)
+                    cur = [cont]
+                cur.append(piece)
         return out + [cur]
     m = _BULLET_LABEL.match(head)
     if m is None:
-        return [group]  # 項目名が読めない1行。切らずにそのまま出す
+        # 項目名が読めない1行（`- ` で始まらない行など）。項目名は繰り返せないが、
+        # そのままだと窓を超える1行が残るので、区切りの直後で切る（文字は1つも消さない）
+        return [[p] for p in _pack_pieces(_text_pieces(head, budget), budget)] or [group]
     # 1行の長い値。「。」の後ろで分け、項目名を「（続き）」で繰り返す
     label, text = m.group(1), head[m.end():]
     pieces = _text_pieces(text, max(1, budget - estimate_tokens(f"- {label}（続き）: ")))

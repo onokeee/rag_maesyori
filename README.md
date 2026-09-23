@@ -51,13 +51,13 @@ export OPENAI_MODEL="gpt-5.6-sol"
 | 帳票取り込み | `/forms`（`/` はここへ） | 帳票の Excel を読み取って Markdown にする |
 | 表の取り込み | `/tables` | Excel/CSV の一覧表を読み取って Markdown（zip）にする |
 | 帳票登録 | `/form-types` | 帳票の Excel を置いて読み取る欄を決め、帳票の種類を作る |
-| 解説 | `/guide` | Markdown がどう作られるか・帳票登録でのクリックのしかた |
+| 解説 | `/guide` | 何を手がかりにどう決めているか（27項目・目次つき）。しきい値はコードの定数と同じ値 |
 
 ## 構成
 
 ```
 app/__init__.py        設定・土台（DBを含む）・画面・create_app・起動コマンド（serve）
-app/extract.py         Excel/CSV の読み取り（帳票と一覧表）
+app/extract.py         Excel/CSV の読み取りと Markdown の組み立て（帳票と一覧表）
 app/ai.py              AI整形・AI接続・経過の記録（起動時には読み込まない）
 app/templates/base.html  画面5枚・共通部品のマクロ・エラー画面
 app/static/app.js      画面の動き

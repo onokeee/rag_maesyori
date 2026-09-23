@@ -837,10 +837,28 @@ window.ragAiHeader = (() => {
       await postJson("/forms/" + id + "/delete", {});
       docs = docs.filter((d) => d.id !== id);
       toast(docs.length ? "このファイルを外しました" : "この帳票の取り込みをやめました", "ok");
-      if (docs.length) await openType();
-      else resetPage();
+      if (!docs.length) { resetPage(); return; }
+      await openType();
+      // 残りの帳票の③を描き直す（保存済みの内容をそのまま出すので、手で直した値も残る）。
+      // 以前は openType() の clearReview() で③ごと消え、［読み取る］で取り直すしかなく、
+      // 手で直した値が警告なしに失われていた（2026-09-23 のレビューで実測）
+      await restoreReview();
+      // showReview() の中の clearReview() が④も閉じるので、最後にもう一度描き直す。
+      // 描き直さないと、④が畳まれたまま見出しからも［開く］からも開けなくなり、
+      // 残った帳票を確定・ダウンロードする手段が画面から消える（同レビュー）
+      await refreshFinish();
     } catch (e) { toast(e.message, "err"); }
   });
+
+  async function restoreReview() {
+    // 保存済みの読み取り結果を描き直す（読み取りはやり直さない）。まだ1件も読んでいなければ何もしない
+    try {
+      const url = (page.dataset.reviewUrl || "/forms/review") + "?ids=" + encodeURIComponent(ids());
+      showReview(await get(url));
+    } catch (e) {
+      if (e && e.status !== 404) toast(e.message, "err");
+    }
+  }
 
   function resetPage() {
     docs = [];
@@ -1467,10 +1485,20 @@ window.ragAiHeader = (() => {
   // 断片を入れ替える前後で、左のシートのスクロール位置・選んでいたシート・ページの位置を保つ。
   // 保たないと、値のセルをクリックして項目が増えるたびにシートが一番上へ戻ってしまう（利用者の指摘 2026-09-22）
   const sheetPane = () => buildBody.querySelector(".split-pane.sticky .split-pane-body");
+  // 実際に縦横に動くのは表を包む .grid-wrap（.split-pane-body ではない）。
+  // こちらを控えていなかったので、セルをクリックするたびにシートが一番上へ戻っていた
+  // （利用者の指摘 2026-09-22 / 2026-09-23 のレビューで実測）
+  const sheetGrid = () => {
+    const pane = sheetPane();
+    if (!pane) return null;
+    return pane.querySelector(".sheet-grid:not([hidden]) .grid-wrap") || pane.querySelector(".grid-wrap");
+  };
   function rememberSheetView() {
     const pane = sheetPane();
+    const grid = sheetGrid();
     const tab = buildBody.querySelector("[data-sheet-tab][aria-selected='true']");
     return { top: pane ? pane.scrollTop : 0, left: pane ? pane.scrollLeft : 0,
+             gridTop: grid ? grid.scrollTop : 0, gridLeft: grid ? grid.scrollLeft : 0,
              tab: tab ? tab.dataset.sheetTab : null, page: window.scrollY };
   }
   function restoreSheetView(keep) {
@@ -1480,6 +1508,8 @@ window.ragAiHeader = (() => {
     }
     const pane = sheetPane();
     if (pane) { pane.scrollTop = keep.top; pane.scrollLeft = keep.left; }
+    const grid = sheetGrid();   // タブを戻したあとの、いま出ているシートの表
+    if (grid) { grid.scrollTop = keep.gridTop; grid.scrollLeft = keep.gridLeft; }
     if (Math.abs(window.scrollY - keep.page) > 1) window.scrollTo(window.scrollX, keep.page);
   }
 
@@ -2185,7 +2215,11 @@ window.ragAiHeader = (() => {
       try {
         const res = await rf(urls.confirm, { json: {}, quiet: true });
         sections.done("preview", notes.preview);
-        runJob("done", res.job, () => loadPanel("done", { open: true }));
+        // ⑥も描き直す。描き直さないと、確定前の中身と押せない［確定してMarkdownを作成］が居座る
+        runJob("done", res.job, async () => {
+          await loadPanel("done", { open: true });
+          await loadPanel("preview", { open: false, scroll: false });
+        });
       } catch (e) {
         toast(e.message, "err");
         confirmRun.disabled = false;
@@ -2199,6 +2233,14 @@ window.ragAiHeader = (() => {
       if (!confirmed(download)) return;
       // 渡した時点でサーバ側は消える（purge_after_send）ので、画面を離れるときに捨てるものはもう無い
       importId = null;
+      // 2回押すと、2回目は消えたあとの取得になって画面ごと404へ飛ぶ。1回目で無効にする。
+      // ただし href を今すぐ外すと、この click の「リンクを辿る処理」自体が取り消されて
+      // zip が1バイトも落ちてこない（a の activation behavior は dispatch のあとに href を見る）。
+      // 次の一拍に回して、ダウンロードが始まってから外す（2026-09-23 のレビューで実測）
+      setTimeout(() => {
+        download.removeAttribute("href");          // href が無い a はリンクとして押せなくなる
+        download.setAttribute("aria-disabled", "true");   // 見た目は .btn[aria-disabled] で薄くなる
+      }, 0);
       setTimeout(() => {
         body("done").replaceChildren(
           el("p", { text: "ダウンロードしました。この取り込みのデータ（元のファイル・読み込んだ内容・作った Markdown）は"
