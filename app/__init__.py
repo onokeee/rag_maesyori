@@ -5331,8 +5331,9 @@ DATE_TYPES = ("date", "datetime")
 def _roles_for(row: dict) -> list[tuple[str, str]]:
     """その列で選べる役割。
 
-    「日付」は値が日付として読める列にだけ出す。年月だけの列（2025-03 など）を日付にしても
-    保存が通らないので、画面で選べてしまうと直しようのない行き止まりになる。
+    「日付」は値が日付として読める列にだけ出す（日付として読めない列を日付にすると保存が通らず、
+    直しようのない行き止まりになる）。年月だけの列（2025-03・202503）は日付として読めるので出る
+    ＝ その月のファイルに分かれる。
     """
     return [(role, label) for role, label in SCREEN_ROLES
             if role != "date" or row["type"] in DATE_TYPES or row["role"] == "date"]

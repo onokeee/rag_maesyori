@@ -6985,7 +6985,8 @@ def _default_exclude() -> dict:
 # 判定に使っていない項目・前の版にあって今は無い設定。古い JSON に残っていても読み捨てる
 RETIRED_KEYS = {"header": ("search_rows",), "exclude": ("aggregate_keywords",),
                 # lightrag_hint: ファイル名のヒントは付けない。dedupe_timeline/omit_person: 中身は削らない。
-                # max_records_per_file: 記録ファイルは月ごとで、件数では分けない。
+                # max_records_per_file: 分ける単位は月で、件数の指定は受け付けない
+                #   （1ファイルが大きすぎるときだけ、RECORD_FILE_CHARS の目安で自動的に分ける）。
                 # dataset_card/summaries: 出すのは RAG に入れる記録ファイルだけ（集計・説明は作らない。6.3）。
                 "markdown": ("lightrag_hint", "dedupe_timeline", "omit_person", "max_records_per_file",
                              "dataset_card", "summaries")}
@@ -8064,10 +8065,19 @@ def run_checks(records, spec, stats) -> list[Issue]:
 
     date_key = spec.date_key
     if date_key:
-        undated = sum(1 for rec in records if not _values(rec).get(date_key))
+        undated = [rec for rec in records if not _values(rec).get(date_key)]
         if undated:
-            issues.append(Issue("warning", "undated", f"日付が空の行が{undated}件あります（「日付なし」のファイルに入れます）"))
+            issues.append(Issue("warning", "undated",
+                                f"日付が空の行が{len(undated)}件あります（「日付なし」のファイルに入れます）"
+                                + _split_note(undated, "日付なし")))
         issues += _date_outliers(records, date_key)
+    elif records:
+        # 日付の列が無い表は月で分けられないので、全件が1つのファイルに入る。
+        # 件数が多いと1ファイルが何MBにもなり、取り込みの失敗も待ち時間もまとめて1回で来る
+        note = _split_note(records, "この表")
+        if note:
+            issues.append(Issue("warning", "no_date_column",
+                                f"日付の列が無いため、{len(records):,}件を月ごとに分けられません{note}"))
 
     # 許可値
     for col in spec.columns:
@@ -8168,6 +8178,31 @@ def run_checks(records, spec, stats) -> list[Issue]:
 
 
 DATE_OUTLIER_YEARS = 5  # 記録の年の中央値からこれより離れた日付は、打ち間違いの疑い
+
+
+def _split_note(records: list, scope: str) -> str:
+    """1つのファイルに収まらない見込みのときに足す案内（収まるなら空）。
+
+    何個に分かれるかは md を組み立てるまで決まらない（時系列の展開などで増える）ので、
+    数は書かずに「分ける」ことと理由だけを伝える。
+    """
+    if _rough_chars(records) < RECORD_FILE_CHARS:
+        return ""
+    return (f"。{scope}の記録は1つのファイルに収まらないので、いくつかのファイルに分けます"
+            "（1つが大きすぎると、LightRAG への取り込みの失敗も待ち時間もまとめて1回で来るためです）。"
+            "分けた各ファイルには「何分の何か・受け持つ範囲・前後のファイル名」を書くので、"
+            "どれも同じ表の記録だと分かります")
+
+
+def _rough_chars(records: list) -> int:
+    """md にしたときのおおよその文字数（確定前の見込み用。実際の組み立てはしない）。"""
+    total = 0
+    for rec in records:
+        total += 60  # 見出しと出典の行
+        for value in _values(rec).values():
+            if value not in (None, ""):
+                total += len(str(value)) + 12  # 「- 項目: 」と改行のぶん
+    return total
 
 
 def _date_outliers(records, date_key: str) -> list[Issue]:
@@ -9105,6 +9140,10 @@ def _assign_keys(records: list[RecordRow], spec: TableSpec, stats: ImportStats) 
 # 取り込み側の設定は見えないので、狭い固定窓（600/overlap 50）でも記録が途中で切られない大きさにする。
 # オフライン評価（T1・T2・T5 × F1200/100・F600/50・P2000）で 300/400/600 を比べて 400 を選んだ（docs/design.md 6.5）。
 RECORD_TOKEN_BUDGET = 400
+# 記録ファイル1つの目安（文字数）。これを超えそうなら件数で分ける。
+# 月ごとに分かれた見本の1ファイル（数百件・約0.6MB）と同じくらいの大きさにそろえてある。
+# 大きな1ファイルは、取り込みの失敗も待ち時間もまとめて1回で来るので、失敗の単位を小さくする。
+RECORD_FILE_CHARS = 700_000
 TITLE_TEXT_CHARS = 40
 TITLE_ENTITY_CHARS = 60  # 見出しに出す対象の名前の上限（長文が入っている列でも md をふくらませない）
 TITLE_LINE_CHARS = 200   # 見出し1行の上限（どの列が長くても、ここで必ず止まる）
@@ -9735,7 +9774,9 @@ def _table_source_text(values: dict, spec: TableSpec, source: dict) -> str:
 def _sort_key(record: dict, spec: TableSpec, time_col) -> tuple:
     values = record.get("values", {}) or {}
     d = str(values.get(spec.date_key) or "")
-    t = str(values.get(time_col.key) or "") if time_col is not None else ""
+    # 時刻は日付の中の並びを決めるものなので、日付が無い記録では使わない。
+    # 使っていたころは、日付の列が無い表が「時刻だけ」で並び、元の表の順とまるで違う順になっていた
+    t = str(values.get(time_col.key) or "") if (time_col is not None and d) else ""
     # 日付が同じ（または日付の列が無い）ときは元の表の順に並べる。記録キーの文字くらべだと
     # 「行10」「行100」「行11」の順になり、元のExcelと突き合わせられなくなる
     row = (record.get("source") or {}).get("row")
@@ -9777,7 +9818,7 @@ def render_all(spec: TableSpec, records: list[dict], ai_results: dict | None) ->
 
 
 def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names: _Names) -> list[MdFile]:
-    """記録ファイル（月ごと、または対象×月ごとに1ファイル。件数では分けない）。"""
+    """記録ファイル（月ごと、または対象×月ごとに1ファイル）。大きくなりすぎる分だけ件数で分ける。"""
     md = spec.markdown or {}
     prefix = spec.file_prefix
     by_entity = md.get("group_by") == "entity_month"
@@ -9793,16 +9834,60 @@ def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names:
     files: list[MdFile] = []
     for (eid, month) in sorted(groups, key=lambda g: (g[0], g[1] == "", g[1])):
         recs = groups[(eid, month)]
-        parts = [prefix]
-        if by_entity:
-            parts.append(eid or "設備不明")
-        parts.append(month or "日付なし")
-        blocks: list[list[str]] = [_record_file_header(spec, recs, month, eid)]
         suffixes = _title_suffixes(recs, spec)
-        for r in recs:
-            blocks += record_blocks(r, spec, ai_results, people, suffixes.get(id(r), ""))
-        files.append(MdFile(names.make(parts), join_file(blocks), "records"))
+        built = [(r, record_blocks(r, spec, ai_results, people, suffixes.get(id(r), ""))) for r in recs]
+        chunks = _split_by_size(built)
+        total = len(chunks)
+        base = [prefix] + ([eid or "対象不明"] if by_entity else []) + [month or "日付なし"]
+        # 前後のファイル名を先頭に書くので、先に全部の名前を決める
+        made = [names.make(base + ([f"{i}of{total}"] if total > 1 else [])) for i in range(1, total + 1)]
+        offset = 0
+        for i, chunk in enumerate(chunks):
+            part = _PartInfo(index=i + 1, total=total, whole=len(recs), offset=offset,
+                             prev=made[i - 1] if i else "", next=made[i + 1] if i + 1 < total else "")
+            blocks: list[list[str]] = [_record_file_header(spec, [r for r, _b in chunk], month, eid, part)]
+            for _r, record in chunk:
+                blocks += record
+            files.append(MdFile(made[i], join_file(blocks), "records"))
+            offset += len(chunk)
     return files
+
+
+@dataclass
+class _PartInfo:
+    """1つのまとまりを件数で分けたときの、その分の位置（分けていなければ total=1）。"""
+    index: int = 1
+    total: int = 1
+    whole: int = 0      # 分ける前の件数
+    offset: int = 0     # このファイルの最初の記録が、分ける前の何件目か（0始まり）
+    prev: str = ""
+    next: str = ""
+
+
+def _split_by_size(built: list[tuple[dict, list[list[str]]]]) -> list[list[tuple[dict, list[list[str]]]]]:
+    """記録の並びを、1ファイルの目安（RECORD_FILE_CHARS）に収まるまとまりに切る。
+
+    1件は必ず同じファイルに入れる（1件が目安より大きくても分けない）。
+    切る理由は「大きなファイル1つだと、取り込みの失敗も待ち時間も全部まとめて1回で来る」ため。
+    LightRAG は1ファイルを丸ごと読んでから一定の長さで切るので、分けても断片の切られ方は変わらない。
+    """
+    lengths = [sum(len(line) + 1 for block in blocks for line in block) for _r, blocks in built]
+    parts = max(1, math.ceil(sum(lengths) / RECORD_FILE_CHARS))
+    if parts == 1:
+        return [built]
+    # 同じくらいの大きさに分ける（最後の1つだけ数件、という半端なファイルを作らない）
+    target = sum(lengths) / parts
+    out: list[list[tuple[dict, list[list[str]]]]] = []
+    current: list[tuple[dict, list[list[str]]]] = []
+    size = 0
+    for item, length in zip(built, lengths):
+        if current and size + length > target and len(out) < parts - 1:
+            out.append(current)
+            current, size = [], 0
+        current.append(item)
+        size += length
+    out.append(current)
+    return out
 
 
 def _title_suffixes(recs: list[dict], spec: TableSpec) -> dict[int, str]:
@@ -9824,7 +9909,9 @@ def _title_suffixes(recs: list[dict], spec: TableSpec) -> dict[int, str]:
     return out
 
 
-def _record_file_header(spec: TableSpec, group: list[dict], month: str, eid: str) -> list[str]:
+def _record_file_header(spec: TableSpec, group: list[dict], month: str, eid: str,
+                        part: "_PartInfo | None" = None) -> list[str]:
+    part = part or _PartInfo()
     name = spec.name
     scope_month = month_label(month) if month else "日付なし"
     entity_disp = ""
@@ -9835,14 +9922,49 @@ def _record_file_header(spec: TableSpec, group: list[dict], month: str, eid: str
     if entity_disp:
         title += f" {entity_disp}"
     title += f" {scope_month}の記録" if month else " 日付なしの記録"
+    if part.total > 1:
+        title += f"（{part.index}/{part.total}）"
     body = [f"- データ種別: {name}（1行＝1件）の記録"]
     if entity_disp:
         body += md_bullet(_entity_label_name(spec), entity_disp)
     if month:
         body.append(f"- 対象期間: {month_first_day(month)}〜{month_last_day(month)}")
     scope = f"{eid}の{scope_month}" if eid else scope_month
-    body.append(f"- このファイルの記録: {len(group):,}件（{scope}の全件）")
+    if part.total == 1:
+        body.append(f"- このファイルの記録: {len(group):,}件（{scope}の全件）")
+        return _Block(title, body)
+    # 件数で分けたとき: どのファイルも同じ表の一部だと分かるように、位置・範囲・前後を書く
+    first, last = part.offset + 1, part.offset + len(group)
+    body.append(f"- このファイルの記録: {len(group):,}件（{scope}の{part.whole:,}件のうち{first:,}〜{last:,}件目）")
+    body.append(f"- 分割: {scope}の記録は件数が多いため{part.total}個のファイルに分けています"
+                f"（この分は{part.index}/{part.total}）。どの分も同じ「{name}」の記録です")
+    span = _record_span_text(spec, group)
+    if span:
+        body.append(f"- このファイルの範囲: {span}")
+    body.append(f"- 前のファイル: {part.prev or 'なし（これが最初）'}")
+    body.append(f"- 次のファイル: {part.next or 'なし（これが最後）'}")
     return _Block(title, body)
+
+
+def _record_span_text(spec: TableSpec, group: list[dict]) -> str:
+    """そのファイルが受け持つ範囲（最初と最後の記録の識別番号・元の表の行番号）。
+
+    行番号は、続きの並びになっているときだけ書く（並べ替えで散らばっているのに
+    「2〜8,044行目」と書くと、その間の記録も入っているように読めてしまう）。
+    """
+    parts: list[str] = []
+    key_col = spec.first_role("key")
+    if key_col is not None:
+        first = _table_one_line(str(_values(group[0]).get(key_col.key) or ""))
+        last = _table_one_line(str(_values(group[-1]).get(key_col.key) or ""))
+        if first and last:
+            parts.append(f"最初は{key_col.display} {first}、最後は{key_col.display} {last}"
+                         if first != last else f"{key_col.display} {first}")
+    rows = [(_get(r, "source") or {}).get("row") for r in group]
+    rows = [r for r in rows if isinstance(r, int)]
+    if rows and max(rows) - min(rows) + 1 == len(rows):
+        parts.append(f"元の表の{min(rows):,}〜{max(rows):,}行目")
+    return "（".join(parts) + "）" if len(parts) == 2 else (parts[0] if parts else "")
 
 
 class _Block(list):
