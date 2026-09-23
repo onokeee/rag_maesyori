@@ -5524,27 +5524,43 @@ def _headerish(row: SourceRow, width: int = 0) -> bool:
     return sum(1 for c in cells if _is_header_cell(c)) / len(cells) >= 0.8
 
 
-def _left_block_width(row: SourceRow) -> int:
-    """いちばん左の表の幅（列数）。空の列を2つ以上はさんだ右は別の表とみなす。
+def _covered(row: SourceRow) -> list[bool]:
+    """その行で値か横結合に埋まっている列。"""
+    return [bool(c.text) or bool(c.merged_anchor and c.merged_anchor[0] == row.index) for c in row.cells]
+
+
+def _left_block_width(top: SourceRow, bottom: SourceRow | None = None) -> int:
+    """いちばん左の表の幅（列数）。空の列をはさんで右に見出しが2つ以上あれば、そこから先は別の表。
 
     2段見出しの判定を、その行の全部ではなくこの幅に閉じるために使う。閉じないと、
     右にある別の表のデータが混ざって「下段は見出しらしくない」と誤判定し、
     2段目の見出し（数量・単価…）が消えて「部品(2)」のような列名になり、
     下段の見出し行そのものが1件のデータとして取り込まれていた（2026-09-23 のレビューで実測）。
+
+    見るのは上段と下段の「和」。上段だけで見ていたころは、上段に見出しの無い列
+    （下段にだけ「設備名」がある形）を別の表の境目とみなし、普通の2段見出しを壊していた（同レビュー）。
     """
-    covered = [bool(c.text) or bool(c.merged_anchor and c.merged_anchor[0] == row.index)
-               for c in row.cells]
+    a = _covered(top)
+    b = _covered(bottom) if bottom is not None else []
+    covered = [a[i] or (i < len(b) and b[i]) for i in range(max(len(a), len(b)))]
     if not any(covered):
         return 0
     first = covered.index(True)
     last = max(i for i, f in enumerate(covered) if f) + 1
-    # _table_width と同じ見方: 空の列をはさんで右に見出しが2つ以上あれば、そこから先は別の表
     for gap in range(first + 1, last):
         if covered[gap]:
             continue
         if sum(1 for i in range(gap + 1, last) if covered[i]) >= 2:
             return gap
     return last
+
+
+def _spans_whole_width(top: SourceRow, width: int) -> bool:
+    """上段が「1つの見出しを幅いっぱいに横結合しただけ」か（`使用部品` ＋ 品番/数量/単価 の形）。"""
+    if width < 2 or not top.cells:
+        return False
+    anchors = {c.merged_anchor for c in top.cells[:width] if c.merged_anchor}
+    return len(anchors) == 1 and next(iter(anchors))[0] == top.index
 
 
 def _last_col(row: SourceRow) -> int:
@@ -5649,11 +5665,15 @@ def _pair_is_header(top: SourceRow, bottom: SourceRow, after: SourceRow | None, 
     # 右にある別の表を巻き込まないよう、判定は「いちばん左の表の幅」に閉じる。
     # CSV は結合の情報が無く、横に結合した見出しの下が素の空欄になるので、この絞り込みはしない
     # （すると「管理No,発生,,設備,,停止時間」の空欄で表が切れてしまう）
-    width = 0 if is_csv else _left_block_width(top)
+    width = 0 if is_csv else _left_block_width(top, bottom)
     top_cells = [c for c in top.cells[:width] if c.text] if width else [c for c in top.cells if c.text]
-    bottom_cells = [c for c in bottom.cells if c.text]
-    if len(top_cells) < 2 or len(bottom_cells) < 2:
-        return False  # 上段が1セルだけならタイトル行とみなす
+    bottom_cells = [c for c in bottom.cells[:width] if c.text] if width else [c for c in bottom.cells if c.text]
+    if len(bottom_cells) < 2:
+        return False
+    if len(top_cells) < 2 and not _spans_whole_width(top, width):
+        # 上段が1セルだけならタイトル行とみなす。ただし、それが幅いっぱいの横結合なら
+        # 2段見出しの上段（「使用部品」＋品番/数量/単価）なので通す（2026-09-23 のレビューで実測）
+        return False
     if _BLOCK_TITLE_RE.match(top_cells[0].text) or _NOTE_RE.match(top_cells[0].text):
         return False
     if not all(_is_header_cell(c) for c in top_cells) or not _headerish(bottom, width):

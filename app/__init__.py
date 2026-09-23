@@ -82,6 +82,8 @@ class Config:
     # 一覧表（Excel/CSV・1行＝1件）
     TABLE_ALLOWED_EXTENSIONS = {".xlsx", ".xlsm", ".csv", ".tsv", ".txt"}
     TABLE_MAX_UPLOAD_BYTES = int(os.environ.get("TABLE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
+    # 帳票1ファイルの上限（画面を開くたびにブックを開き直すので、一覧表とは別に持つ）
+    FORM_MAX_UPLOAD_BYTES = int(os.environ.get("FORM_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
     # 1回のリクエストの上限（一覧表の大きいCSV/Excelを想定）。受け口はここ。
     # 200MB 固定にしていたころは、TABLE_MAX_UPLOAD_BYTES を広げても Flask が先に 413 で断り、
     # 設定が効かなかった（2026-09-23 のレビューで実測）
@@ -3755,7 +3757,9 @@ def upload_error_text(storage, exc: Exception, position: int | None = None) -> s
 def _store_document(storage, batch_id: str = "", order: int = 0) -> int:
     """1ファイルを保存して帳票を作る。読めないファイルは保存先から消して UploadError。"""
     cfg = current_app.config
-    stored = save_upload(storage, "documents", cfg["ALLOWED_EXTENSIONS"], cfg["MAX_CONTENT_LENGTH"])
+    # 帳票1ファイルの上限はここ。一覧表むけの設定（TABLE_MAX_UPLOAD_BYTES）を広げても
+    # 帳票の上限は動かさない（別の話なので連動させない。2026-09-23 のレビュー）
+    stored = save_upload(storage, "documents", cfg["ALLOWED_EXTENSIONS"], cfg["FORM_MAX_UPLOAD_BYTES"])
     try:
         path = upload_path(stored.stored_path)
         precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"), max_merged=FORM_MAX_MERGED_CELLS)
