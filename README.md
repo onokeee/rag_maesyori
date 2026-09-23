@@ -42,9 +42,6 @@ export OPENAI_MODEL="gpt-5.6-sol"
 # 任意
 # export OPENAI_TEMPERATURE="0"
 # export OPENAI_TOP_P=""
-# export OPENAI_MAX_TOKENS=""
-# export LLM_RATE_LIMIT_RETRIES="3"
-# export LLM_RATE_LIMIT_MAX_WAIT="20"
 ```
 
 ## 画面

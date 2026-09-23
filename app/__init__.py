@@ -68,11 +68,6 @@ def _optional_float(name: str) -> float | None:
     return float(raw) if raw else None
 
 
-def _optional_int(name: str) -> int | None:
-    raw = os.environ.get(name, "").strip()
-    return int(raw) if raw else None
-
-
 class Config:
     # セッション署名鍵は create_app が FLASK_SECRET_KEY または .flask_secret ファイルから設定する
     SECRET_KEY = None
@@ -103,9 +98,10 @@ class Config:
     OPENAI_MODELS = _split(os.environ.get("OPENAI_MODELS", ""))
     OPENAI_TEMPERATURE = float(os.environ.get("OPENAI_TEMPERATURE", "0"))
     OPENAI_TOP_P = _optional_float("OPENAI_TOP_P")
-    OPENAI_MAX_TOKENS = _optional_int("OPENAI_MAX_TOKENS")
-    LLM_RATE_LIMIT_RETRIES = int(os.environ.get("LLM_RATE_LIMIT_RETRIES", "3"))
-    LLM_RATE_LIMIT_MAX_WAIT = float(os.environ.get("LLM_RATE_LIMIT_MAX_WAIT", "20"))
+    # OPENAI_MAX_TOKENS・LLM_RATE_LIMIT_RETRIES・LLM_RATE_LIMIT_MAX_WAIT は持たない。
+    # 読み込むだけでどこからも使っておらず、書かれた既定値（3回・20秒）も実際の値と違っていた
+    # （再試行は ai.py の MAX_RETRIES=5・MAX_WAIT=120.0。Retry-After の優先や、429 が3行続いたら
+    #  一時停止する決まりと噛み合っているので、外から2つだけ変えられる形にはしない。2026-09-23）
 
 
 # ====================================================================================================
