@@ -161,7 +161,7 @@ _NO_DEBUG_MSG = (
     "\n[app] デバッグモードでは起動しません。\n"
     "  理由: デバッガが開くと、例外が出たときにブラウザからこのサーバの Python を実行できます。\n"
     "  断ったもの: flask run の --debug / --debugger と、環境変数 FLASK_DEBUG=1。\n"
-    "  通常の起動: flask --app app serve\n"
+    "  通常の起動: flask --app app run --host=0.0.0.0 --port=5000\n"
     "  詳しいエラーを見たいとき: app/__init__.py の DEBUG を True にして flask --app app serve\n"
 )
 
@@ -175,25 +175,64 @@ def _refuse_debugger() -> None:
 
 # --- 待ち受け先と、受け付ける宛先の名前 -------------------------------------------------
 # サーバ（JupyterLab のターミナルなど）で起動し、社内LANの他のPCから数人で開いて使う（design.md 0）。
-# 既定はこのサーバの中からだけ開ける 127.0.0.1。LAN に出すときは起動時に環境変数で渡す:
-#   HOST=0.0.0.0 PORT=5000 flask --app app serve
+# 既定はこのサーバの中からだけ開ける 127.0.0.1。LAN に出すときは起動のコマンドで渡す:
+#   flask --app app run --host=0.0.0.0 --port=5000
+# 待ち受け先は「コマンド行（--host/--port）→ FLASK_RUN_HOST/FLASK_RUN_PORT → HOST/PORT → 既定」の順に決める。
+# コマンド行を最優先にするのは、実際に待ち受けるのがその値だから。ここがずれると
+# 受け付ける宛先（allowed_hosts）がループバックだけのままになり、他のPCから開いて断られる。
 _ALL_ADDRESSES = ("", "0.0.0.0", "::")
+_SERVER_COMMANDS = ("run", "serve")
+
+
+def _start_command() -> str:
+    """flask のコマンド行のサブコマンド（"run" / "serve"。それ以外・テストからの呼び出しは ""）。"""
+    for arg in sys.argv[1:]:
+        if arg in _SERVER_COMMANDS:
+            return arg
+    return ""
+
+
+def _cli_option(*names: str) -> str:
+    """コマンド行から `--host 0.0.0.0` `--host=0.0.0.0` `-h 0.0.0.0` の値を取り出す（無ければ ""）。"""
+    if not _start_command():
+        return ""
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name:
+                return args[i + 1].strip() if i + 1 < len(args) else ""
+            if arg.startswith(f"{name}="):
+                return arg.split("=", 1)[1].strip()
+    return ""
+
+
+def _env_host(default: str = "127.0.0.1") -> str:
+    for value in (_cli_option("--host", "-h"), os.environ.get("FLASK_RUN_HOST"), os.environ.get("HOST")):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return default
 
 
 def _env_port(default: int = 5000) -> int:
-    raw = (os.environ.get("PORT") or "").strip()
-    if not raw:
-        return default
-    try:
-        port = int(raw)
-    except ValueError:
-        raise SystemExit(f"\n[app] PORT が数字ではありません: {raw!r}\n  例: PORT=5000 flask --app app serve\n") from None
-    if not 1 <= port <= 65535:
-        raise SystemExit(f"\n[app] PORT が範囲外です: {port}（1〜65535）\n")
-    return port
+    for where, value in (("--port", _cli_option("--port", "-p")),
+                         ("FLASK_RUN_PORT", os.environ.get("FLASK_RUN_PORT")),
+                         ("PORT", os.environ.get("PORT"))):
+        raw = str(value or "").strip()
+        if not raw:
+            continue
+        try:
+            port = int(raw)
+        except ValueError:
+            raise SystemExit(f"\n[app] {where} が数字ではありません: {raw!r}\n"
+                             f"  例: flask --app app run --host=0.0.0.0 --port=5000\n") from None
+        if not 1 <= port <= 65535:
+            raise SystemExit(f"\n[app] {where} が範囲外です: {port}（1〜65535）\n")
+        return port
+    return default
 
 
-HOST = (os.environ.get("HOST") or "127.0.0.1").strip() or "127.0.0.1"
+HOST = _env_host()
 PORT = _env_port()
 
 
@@ -6215,10 +6254,12 @@ def create_app(overrides: dict | None = None) -> Flask:
 
     @app.cli.command("serve")
     def _serve() -> None:
-        """本番用サーバー（waitress）で待ち受ける。待ち受け先は環境変数 HOST・PORT。"""
-        # flask --app app run は Flask の開発サーバーを使うので、通常はこちらを使う。開発サーバーだと
-        # WAITRESS_OPTIONS の outbuf_high_watermark が効かず、途中で切れたダウンロードに気づけない
-        # （送り終えたように見えた時点でデータを消してしまう。design.md 3.3「欠けないダウンロード」）。
+        """waitress で待ち受ける（flask run の代わり）。待ち受け先は環境変数 HOST・PORT。
+
+        通常は `flask --app app run --host=0.0.0.0 --port=5000` で起動する。
+        こちらは waitress を使いたいときだけ。どちらでも「途中で切れたダウンロードは消さない」は保てる
+        （気づけない大きさは waitress で約48KB、開発サーバーで約128KB。2026-09-24 に実測）。
+        """
         if DEBUG and not _is_loopback(HOST):
             # DEBUG=True の Flask はデバッガを開く。LAN に出す起動では絶対に開かせない（_NO_DEBUG_MSG と同じ理由）
             raise SystemExit("\n[app] DEBUG = True のまま LAN のアドレス（HOST=%s）では起動しません。\n"
@@ -6240,6 +6281,9 @@ def create_app(overrides: dict | None = None) -> Flask:
     _purge_pending(app)
     _cleanup_leftovers(app)
     _start_sweeper(app)
+    if _start_command() == "run":
+        # serve は自分で出すので run のときだけ。ログインが無いことの注意を必ず見せる
+        print(startup_notice(), flush=True)
     # ヘッダーは「帳票取り込み／表の取り込み／帳票登録」の3つだけ。使うAIモデルの選択は
     # 「表の取り込み」画面の AI整形の段の中（AI接続）に移したので、共通の値は渡さない。
     return app
@@ -6339,7 +6383,7 @@ def _recover_jobs(app: Flask) -> None:
 # --- 起動の設定 -------------------------------------------------------------
 # 待ち受け先（HOST・PORT）はファイルの上のほうで環境変数から読む。
 THREADS = 8
-# waitress が応答の本文を先読みして溜める上限（既定は 16MB）。
+# waitress が応答の本文を先読みして溜める上限（既定は 16MB。flask run の開発サーバーには無い設定）。
 # 溜められる分はアプリ側では「送り終えた」ように見えるため、既定のままだと 16MB 未満の zip は
 # 途中で通信が切れても消えてしまう（core/purge.purge_after_send・design.md 3.3「欠けないダウンロード」）。
 # 小さくすると、送れた分だけ読み進めるので途中で切れたことに気づける。ループバックでは速度はほぼ変わらない

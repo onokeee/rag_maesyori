@@ -10,12 +10,18 @@ Excel/CSV の帳票・一覧表を読み取り、LightRAG に手作業で投入�
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-flask --app app serve
+flask --app app run --host=0.0.0.0 --port=5000
 ```
 
-`flask --app app serve` は本番用サーバー（waitress）で待ち受けます。`flask --app app run` も動きますが Flask の開発サーバーになり、途中で切れたダウンロードを検知する設定（outbuf_high_watermark）が効かないので使わないでください。
+`--host` `--port` が待ち受け先です。`--host=0.0.0.0` で社内LANの他のPCから開けます。このサーバーの中からだけ開くなら `flask --app app run`（既定は 127.0.0.1:5000）。
 
-http://127.0.0.1:5000 を開きます（既定はサーバーの中からだけ開けます）。初回は `instance/app.db` を作り、古い DB は起動時に自動で移行します。
+待ち受け先は **コマンド行（`--host`/`--port`）→ `FLASK_RUN_HOST`/`FLASK_RUN_PORT` → `HOST`/`PORT` → 既定** の順に決めます。ここで決まった値で「他のPCから開ける宛先（Host ヘッダー）」も決まるので、`--host=0.0.0.0` を付けずに LAN から開くと断られます（`ALLOWED_HOSTS` で別名を足せます）。
+
+起動すると、開けるアドレスと「ログインが無いこと」の注意を表示します。止めるときは Ctrl+C。
+
+waitress で動かしたいときは `flask --app app serve`（待ち受け先は環境変数 `HOST`/`PORT`）。どちらでも「途中で切れたダウンロードはサーバーから消さない」は保てます（消してしまう大きさは waitress で約48KB 未満、`run` の開発サーバーで約128KB 未満。2026-09-24 に実測）。
+
+http://127.0.0.1:5000 を開きます。初回は `instance/app.db` を作り、古い DB は起動時に自動で移行します。
 
 ## 設定（env ファイル）
 
@@ -34,6 +40,8 @@ export OPENAI_MODELS="gpt-5.6-sol;gpt-5.6-luna;gpt-4.1;gpt-4o-mini"
 export OPENAI_MODEL="gpt-5.6-sol"
 
 # 社内LANのサーバーで動かすとき（JupyterLab のターミナルから起動する）
+# 待ち受け先は起動のコマンドで渡すのが基本（flask --app app run --host=0.0.0.0 --port=5000）。
+# env に書いておきたいときだけ下を使う（コマンド行の指定が優先されます）
 # export HOST="0.0.0.0"          # 既定 127.0.0.1（このサーバーの中からしか開けない）
 # export PORT="5000"
 # export ALLOWED_HOSTS="rag-server;rag.example.local"   # 社内DNSの別名で開くとき（; か , 区切り。* で全許可）
@@ -56,7 +64,7 @@ export OPENAI_MODEL="gpt-5.6-sol"
 ## 構成
 
 ```
-app/__init__.py        設定・土台（DBを含む）・画面・create_app・起動コマンド（serve）
+app/__init__.py        設定・土台（DBを含む）・画面・create_app・起動（flask run／serve）
 app/extract.py         Excel/CSV の読み取りと Markdown の組み立て（帳票と一覧表）
 app/ai.py              AI整形・AI接続・経過の記録（起動時には読み込まない）
 app/templates/base.html  画面5枚・共通部品のマクロ・エラー画面
