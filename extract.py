@@ -51,6 +51,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from openpyxl.xml.constants import COMMENTS_NS
 from openpyxl.xml.functions import fromstring
 
+# app.py（土台）を先に読む。app.py はこのファイルを途中で import するので、順番は
+# 「app.py → extract.py」に決まっている（起動は flask --app app run …）
 import app as core
 from app import escape_md_line, estimate_tokens, JobCancelled, JobError, join_blocks, md_bullet, md_filename, nfkc_keep_enclosed, start_job, upload_path, UploadError
 
@@ -68,29 +70,7 @@ _EDGE_CHARS = "[]()<>【】〈〉《》「」『』■□◆◇●○・*※:;."
 _FORM_BRACKETS = {"[": "]", "(": ")", "<": ">", "【": "】", "〈": "〉", "《": "》", "「": "」", "『": "』"}
 _CLOSERS = {close: open_ for open_, close in _FORM_BRACKETS.items()}
 _EDGE_MARKS = "".join(ch for ch in _EDGE_CHARS if ch not in _FORM_BRACKETS and ch not in _CLOSERS)
-# 見出しの先頭の項番: 「3.」「3)」「3、」「(3)」「D3」（8D の D1〜D8）「A.機構部」。丸数字は section_stripped で別に見る
-_SECTION_NO_RE = re.compile(r"^(?:\d{1,2}[.)、](?!\d)|\(\d{1,2}\)|d[1-8](?=\D)|[a-z][.)、](?=[^\x00-\x7f]))")
-# 「.5」「約.5時間」のような整数部の無い小数も読む（「5」と読まない）
-_FORM_NUM_RE = re.compile(r"-?(?:\d+(?:\.\d+)?|\.\d+)")
-_DURATION_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(?:時間|hours?|hrs?|h)\s*(\d+(?:\.\d+)?)\s*(?:分|mins?|m)(?![A-Za-z])",
-                          re.IGNORECASE)
-# 時刻の形の時間「2:45」「25:30」（時間の欄に h:mm で書いた値。Excel の [h]:mm のセルもこの形の文字にする）
-_HMM_RE = re.compile(r"^(\d{1,4}):([0-5]\d)(?::([0-5]\d))?$")
-# 数値の範囲「10～20分」「1〜2時間」（NFKC で「～」は「~」になる）
-_NUM_RANGE_RE = re.compile(r"(?:\d+(?:\.\d+)?|\.\d+)\s*[^\d\s~〜]{0,4}?\s*[~〜]\s*(\d+(?:\.\d+)?|\.\d+)")
-# 時刻の範囲「09:30-12:45」「9:30～13:55」（作業時間の欄によくある書き方。先頭の 9 を数値として読まない）
-# 「12/24 21:53-12/25 11:09」のように各時刻の前に月日が付いた書き方も範囲として見る（先頭の月を数値として読まない）
-_TIME_RANGE_RE = re.compile(r"(?:\d{1,2}/\d{1,2}\s*)?(\d{1,2})\s*:\s*(\d{2})\s*[-~〜ー―]\s*"
-                            r"(?:\d{1,2}/\d{1,2}\s*)?(\d{1,2})\s*:\s*(\d{2})")
-# 時刻の範囲に添えた時間数「（3.2h）」「（工数 8.75h）」「(195分)」
-_TIME_AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(時間|hours?|hrs?|h|分|mins?)(?![A-Za-z])", re.IGNORECASE)
 _SPACES_RE = re.compile(r"[^\S\n]+")
-# 値の末尾の単位: 「1.5時間」「95分」「120 min」
-_VALUE_UNIT_RE = re.compile(r"^-?(?:\d+(?:\.\d+)?|\.\d+)\s*([^\d\s.,\-]{1,4})$")
-# 前後に言葉や括弧書きのある値（「約90分」「595分（9.9h）」）の、最初の数値の直後の単位
-_UNIT_AFTER_RE = re.compile(r"\s*([^\d\s.,\-:/~()\[\]{}<>、。・]{1,4})(?![^\d\s.,\-:/~()\[\]{}<>、。・])")
-# 会計の書き方の負号「▲50万円」「△0.8」（一覧表の側と同じく負の数として読む）
-_MINUS_MARK_RE = re.compile(r"^[△▲]\s*(?=\d)")
 # 見えない文字（ゼロ幅スペース・語結合子・BOM・方向制御・ソフトハイフン）。Web や Teams から貼った文字に混ざり、
 # NFKC でも消えないので、ラベルが見つからない・同じ値が別の値になる。セルの文字とラベル・値の正規化で消す
 _INVISIBLE_RE = re.compile("[\u200b-\u200d\u2060\ufeff\u202a-\u202e\u2066-\u2069\u00ad]")
@@ -99,16 +79,6 @@ _INVISIBLE_RE = re.compile("[\u200b-\u200d\u2060\ufeff\u202a-\u202e\u2066-\u2069
 _JA_UNITS = {"時間", "千円", "万円", "百万円", "人日", "人時", "日間", "ヶ月", "か月", "カ月", "箇所", "ケ所"}
 UNIT_ALIASES = {"h": "時間", "hr": "時間", "hrs": "時間", "hour": "時間", "hours": "時間",
                 "min": "分", "mins": "分", "sec": "秒", "yen": "円", "¥": "円"}
-
-
-# Excel のエラー値（数式の結果）。値として取り込まない（一覧表の側 tables/normalize.py と同じ一覧）
-EXCEL_ERRORS = {"#N/A", "#DIV/0!", "#REF!", "#VALUE!", "#NAME?", "#NUM!", "#NULL!", "#GETTING_DATA"}
-
-
-def excel_error(text) -> str:
-    """セルの文字が Excel のエラー値（「#REF!」「#N/A」）ならその文字、違えば ""。"""
-    s = str(text or "").strip().upper()
-    return s if s in EXCEL_ERRORS else ""
 
 
 def normalize_label(text) -> str:
@@ -145,38 +115,6 @@ def _strip_edges(s: str) -> str:
     return s
 
 
-def section_stripped(text) -> str:
-    """見出しの先頭の項番を除いた正規化ラベル。「３．暫定対策」「①何が」「(2)原因」「D2 問題の記述」→ 項番なし。
-
-    項番が無い、または除くと文字が残らない（「1.5」など）ときは "" を返す。
-    「2号機」のような数字始まりの値は項番とみなさない（区切りの「.」「)」「、」か丸数字が必要）。
-    """
-    raw = str(text).strip()
-    if raw[:1] and "①" <= raw[0] <= "⑳":
-        rest = normalize_label(raw[1:])
-    else:
-        compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", raw)).lower()
-        m = _SECTION_NO_RE.match(compact)
-        rest = normalize_label(compact[m.end():]) if m else ""
-    return rest if any(ch.isalpha() for ch in rest) else ""
-
-
-def nfkc_value(text) -> str:
-    """値の正規化（Markdown 出力用）。NFKC＋行内の連続空白を1つに畳む。改行と日本語間の空白は残す。
-
-    ラベル比較用の normalize_label とは別物（こちらは空白を消さない）。
-    """
-    if text is None:
-        return ""
-    s = unicodedata.normalize("NFKC", strip_invisible(str(text))).replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
-    lines = [_SPACES_RE.sub(" ", line).strip() for line in s.split("\n")]
-    while lines and not lines[0]:
-        lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
-
-
 def normalize_unit(unit: str) -> str:
     u = unicodedata.normalize("NFKC", unit or "").strip()
     return UNIT_ALIASES.get(u.lower(), u)
@@ -186,40 +124,6 @@ def _unit_like(text: str) -> bool:
     if text.isascii() or text in _JA_UNITS or len(text) == 1:
         return True
     return normalize_unit(text) != text  # 別名の一覧にあるもの
-
-
-def _number_text(text) -> str:
-    """数値として読む前の正規化: NFKC・桁区切りのカンマを除く・「▲」「△」の負号を「-」にする。"""
-    s = unicodedata.normalize("NFKC", str(text or "")).replace(",", "").strip()
-    return _MINUS_MARK_RE.sub("-", s)
-
-
-def value_unit(text) -> str:
-    """「1.5時間」→ "時間"。数値＋単位の形でなければ ""。"""
-    m = _VALUE_UNIT_RE.match(_number_text(text))
-    return normalize_unit(m[1]) if m else ""
-
-
-def written_unit(text) -> str:
-    """値に書かれた単位。「1.5時間」に加えて「約90分」「595分（9.9h）」のような前後に言葉のある値からも、
-    最初の数値（to_number が読む数値）の直後の単位を返す。単位らしくなければ ""。
-
-    「3時間40分」「09:30-12:45」は to_number が換算するので、ここでは単位を返さない。
-    """
-    s = _number_text(text)
-    whole = value_unit(s)
-    if whole or _DURATION_RE.search(s) or _TIME_RANGE_RE.search(s) or _HMM_RE.match(s):
-        return whole
-    r = _NUM_RANGE_RE.search(s)
-    if r:
-        # 「10〜20分」: 範囲の後ろの数値の単位を見る（先頭の「10」の直後の「〜」を単位としない）
-        m = _UNIT_AFTER_RE.match(s, r.end())
-        return normalize_unit(m[1]) if m and _unit_like(m[1]) else ""
-    first = _FORM_NUM_RE.search(s)
-    m = _UNIT_AFTER_RE.match(s, first.end()) if first else None
-    if not m or not _unit_like(m[1]):
-        return ""
-    return normalize_unit(m[1])
 
 
 _FORMAT_LITERAL_RE = re.compile(r'"([^"]*)"|\\(.)')
@@ -249,84 +153,6 @@ def cell_format_unit(number_format) -> str:
     if "%" in str(number_format or ""):
         return "%"
     return format_unit(number_format)
-
-
-def to_number(raw, text: str, unit: str = "") -> tuple[int | float | str | None, str | None]:
-    """数値に変換する。「2.5時間」のような単位付きは数値部分を取り出して警告を付ける。
-
-    値が「3時間40分」の形なら、unit（「分」「時間」）に換算する（220 / 3.67）。unit が空なら分にする。
-    """
-    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
-        return (int(raw) if float(raw).is_integer() else raw), None
-    if isinstance(raw, time) and not isinstance(raw, datetime):
-        return _minutes_number(text, raw.hour * 60 + raw.minute + raw.second / 60, unit)
-    if isinstance(raw, timedelta):
-        return _minutes_number(text, raw.total_seconds() / 60, unit)
-
-    s = _number_text(text)
-    hm = _HMM_RE.match(s)
-    if hm:
-        # 「2:45」は2時間45分（先頭の 2 だけを読まない）
-        return _minutes_number(text, int(hm[1]) * 60 + int(hm[2]) + int(hm[3] or 0) / 60, unit)
-    m = _DURATION_RE.search(s)
-    if m and normalize_unit(unit) in ("分", "時間", ""):
-        # 単位の決まっていない項目では分にする（「3時間40分」を 3 と読まない）
-        target = normalize_unit(unit) or "分"
-        minutes = float(m[1]) * 60 + float(m[2])
-        number = minutes if target == "分" else round(minutes / 60, 2)
-        value = int(number) if float(number).is_integer() else number
-        return value, f"「{text}」を{target}に換算しました"
-    r = _TIME_RANGE_RE.search(s)
-    if r:
-        return _time_range_number(text, s, r, unit)
-    target = normalize_unit(unit)
-    if target and _NUM_RANGE_RE.search(s) and written_unit(s) not in ("", target):
-        # 「時間」の欄に「10～20分」: 先頭の 10 を時間として読まない
-        return (text or None), f"「{text}」は範囲で、単位も項目の単位（{target}）と違います。数値として読み取れません"
-    m = _FORM_NUM_RE.search(s)
-    if not m:
-        return (text or None), "数値として読み取れません"
-    number = float(m[0])
-    value = int(number) if number.is_integer() else number
-    warning = None if m[0] == s else f"「{text}」から数値の部分だけを読み取りました"
-    return value, warning
-
-
-def _minutes_number(text: str, minutes: float, unit: str) -> tuple[int | float | str | None, str | None]:
-    """時:分で書かれた時間（時刻のセル・[h]:mm のセル・「2:45」）を、項目の単位（分・時間。無ければ分）の数値にする。"""
-    target = normalize_unit(unit) or "分"
-    if target not in ("分", "時間"):
-        return (text or None), "時:分の形です。数値として読み取れません"
-    number = round(minutes, 2) if target == "分" else round(minutes / 60, 2)
-    value = int(number) if float(number).is_integer() else number
-    return value, f"「{text}」を{target}に換算しました"
-
-
-def _time_range_number(text: str, s: str, r: re.Match, unit: str) -> tuple[int | float | str | None, str | None]:
-    """「09:30-12:45（3.2h）」の形。添えた時間数があればそれを、無ければ範囲の長さを、項目の単位で返す。
-
-    開始時刻（9）を数値として返さない。単位の決まっていない項目では分にする（「3時間40分」と同じ）。
-    """
-    target = normalize_unit(unit) or "分"
-    if target not in ("分", "時間"):
-        return (text or None), "時刻の範囲です。数値として読み取れません"
-    rest = s[:r.start()] + " " + s[r.end():]
-    m = _TIME_AMOUNT_RE.search(rest)
-    if not m and "/" in r[0]:
-        # 月日の付いた範囲は日をまたぐ日数が分からないので、終了−開始では出さない
-        return (text or None), "時刻の範囲です。時間数が書かれていないので数値として読み取れません"
-    if m:
-        amount, written = float(m[1]), normalize_unit(m[2])
-        minutes = amount * 60 if written == "時間" else amount
-        note = f"「{text}」の時間数（{m[1]}{written}）を読み取りました"
-    else:
-        start = int(r[1]) * 60 + int(r[2])
-        end = int(r[3]) * 60 + int(r[4])
-        minutes = end - start if end >= start else end + 24 * 60 - start  # 日をまたぐ作業
-        note = f"「{text}」は時刻の範囲なので、開始から終了までの時間を出しました"
-    number = minutes if target == "分" else round(minutes / 60, 2)
-    value = int(number) if float(number).is_integer() else number
-    return value, f"{note}（{target}）。元のファイルと照らして確かめてください"
 
 
 # ---- 単位が書かれていないと意味が変わる項目 ------------------------------------------------
@@ -3259,7 +3085,7 @@ def _sget(obj, name: str, default=None):
 
 
 def base_date_from(values: dict, spec) -> date | None:
-    """経過の記録の相対日付（「翌週」など）を解くときの基準日。無ければ None（＝年不明）。
+    """経過の記録で、年つきの日付が書かれていない回に仮に使う日（発生日）。無ければ None（＝日付不明）。
 
     探す順: 期間の日付列 → role='date' の列すべて → occurred_at。'-' でも '/' でも読む。
     AI整形（ai.runner）と Markdown（tables.markdown）で同じ日付にするため、ここ1か所に置く。
@@ -3420,8 +3246,9 @@ def validate_spec(spec: TableSpec) -> list[str]:
         for unit, factor in (col.unit_conversions or {}).items():
             if not isinstance(factor, (int, float)) or isinstance(factor, bool) or factor <= 0:
                 errors.append(f"列「{label}」の単位換算「{unit}」の倍率が正しくありません")
-    if len([c for c in spec.columns if c.role == "entity"]) > 1:
-        errors.append("役割「対象（設備・製品・顧客など）」の列は1つだけにしてください")
+    for role, label in (("entity", "対象（設備・製品・顧客など）"), ("key", "識別番号"), ("entity_label", "対象の名前")):
+        if len([c for c in spec.columns if c.role == role]) > 1:
+            errors.append(f"役割「{label}」の列は1つだけにしてください")
 
     all_keys = set(keys)
     record = spec.record or {}
@@ -3555,13 +3382,7 @@ def _log_stage_errors(stage: LogStageSpec) -> list[str]:
                 continue
             if _NESTED_QUANTIFIER_RE.search(pat):
                 errors.append(f"AI整形の区切りの正規表現「{text}」は処理が極端に遅くなる形（(…+)+ など）です")
-    for key in ("order_tolerance_days",):
-        if splitter.get(key) is not None:
-            try:
-                int(splitter[key])
-            except (TypeError, ValueError):
-                errors.append(f"AI整形の区切りの {key} は整数で指定してください")
-    # 上限・実行条件の数値（aiproc/runner.py が int() で読む。数値でないと分割プレビュー・AI整形が止まる）
+    # 上限・実行条件の数値（ai.py が int() で読む。数値でないと分割プレビュー・AI整形が止まる）
     limits = stage.limits if isinstance(stage.limits, dict) else {}
     for key in ("max_segments", "max_input_tokens"):
         if key in limits and not _is_int_at_least(limits[key], 1):
@@ -3659,7 +3480,7 @@ def _get(obj, name, default=None):
 def spec_from_suggestions(name: str, layout, suggestions, options: dict | None = None) -> TableSpec:
     """見出しの判定結果（LayoutGuess）と列の候補（ColumnSuggestion）から取り込み設定を作る。
 
-    options: description, name_patterns, file_types, group_by, fiscal_year_start_month
+    options: description, name_patterns, file_types, group_by_columns, fiscal_year_start_month
     """
     options = dict(options or {})
     spec = TableSpec(name=name)  # ファイル名の先頭は空（＝表の名前。TableSpec.file_prefix）
@@ -3907,6 +3728,7 @@ class ColumnSuggestion:
     blank_rate: float
     md: str  # body/attribute/omit
     fill_down_blank: bool = False
+    looks_filled_down: bool = False   # 値の形が「上と同じ」の空欄に見えるか（役割を選び直したとき用）
     log: bool = False
     matched_by: str = ""  # dictionary/similar/none
     inferred_type: str = ""  # 値から推定した型（type と違えば画面で知らせる）
@@ -3959,7 +3781,8 @@ def suggest_columns(headers: list[str], sample_rows) -> list[ColumnSuggestion]:
             s.log = True
         if s.blank_rate >= 1.0:
             s.md, s.omit_reason = "omit", "blank"
-        if s.role in ("entity", "entity_label") and _looks_filled_down(values):
+        s.looks_filled_down = _looks_filled_down(values)
+        if s.role in ("entity", "entity_label") and s.looks_filled_down:
             s.fill_down_blank = True
         out.append(s)
     _keep_one_log(out)
@@ -4196,9 +4019,11 @@ def run_checks(records, spec, stats) -> list[Issue]:
         # 日付欄に「不明」「2025年」が混じる表は現場では普通なので、警告にとどめる（2026-09-23）。
         if bool(spec.date_key) and key == spec.date_key:
             if rate >= warn:
+                where = ("その行は「日付なし」のファイルに入れます" if _groups_by_date(spec)
+                         else "その行の日付は空のまま出します")
                 issues.append(Issue("warning", "type_error_rate",
                                     f"列「{label}」で日付として読めない行があります（{errors}/{total}件、{rate:.0%}）。"
-                                    "その行は「日付なし」のファイルに入れます（元の値はそのまま残します）", column=label))
+                                    f"{where}（元の値はそのまま残します）", column=label))
         elif rate > block:
             # 指示は画面でできることだけを書く（列の型は見出しと値からサーバーが決めるので、利用者は変えられない）
             issues.append(Issue("error", "type_error_rate",
@@ -4219,17 +4044,17 @@ def run_checks(records, spec, stats) -> list[Issue]:
     if date_key:
         undated = [rec for rec in records if not _values(rec).get(date_key)]
         if undated:
-            issues.append(Issue("warning", "undated",
-                                f"日付が空の行が{len(undated)}件あります（「日付なし」のファイルに入れます）"
-                                + _split_note(undated, "日付なし")))
+            note = (f"（「日付なし」のファイルに入れます）{_split_note(undated, '日付なし')}"
+                    if _groups_by_date(spec) else "")
+            issues.append(Issue("warning", "undated", f"日付が空の行が{len(undated)}件あります{note}"))
         issues += _date_outliers(records, date_key)
-    elif records:
-        # 日付の列が無い表は月で分けられないので、全件が1つのファイルに入る。
-        # 件数が多いと1ファイルが何MBにもなり、取り込みの失敗も待ち時間もまとめて1回で来る
+    if records and not group_columns(spec):
+        # ファイルの分け方に列を選んでいない表は全件が1つのファイルに入る。件数が多いと1ファイルが
+        # 何MBにもなり、取り込みの失敗も待ち時間もまとめて1回で来る
         note = _split_note(records, "この表")
         if note:
             issues.append(Issue("warning", "no_date_column",
-                                f"日付の列が無いため、{len(records):,}件を月ごとに分けられません{note}"))
+                                f"ファイルの分け方に列を選んでいないため、{len(records):,}件が1つのファイルに入ります{note}"))
 
     # 許可値
     for col in spec.columns:
@@ -4401,7 +4226,6 @@ def _num(value) -> str:
 MAX_ROW_ISSUES = 2000
 PROGRESS_EVERY = 500
 
-_SPACES = re.compile(r"[^\S\n]+")
 _ALL_SPACES = re.compile(r"\s+")
 _WEEKDAY = re.compile(r"\s*[(（]\s*[月火水木金土日](?:曜日?)?\s*[)）]\s*")
 # 秒の小数（SQL Server などの「.000」）と時差（「Z」「+09:00」）は読み捨てる（秒までで足り、時刻は書かれたまま）
@@ -4597,7 +4421,7 @@ def _nfkc(text) -> str:
 def nfkc_text(text, keep_enclosed: bool = True) -> str:
     """NFKC＋行内の空白の畳み込み（改行は残す）。
 
-    md に出す値は囲み文字（①Ⓐ㋐㊤…）を原文どおり残す（core.mdtext.nfkc_keep_enclosed）。
+    md に出す値は囲み文字（①Ⓐ㋐㊤…）を原文どおり残す（nfkc_keep_enclosed）。
     コードのように比較・突き合わせに使う値は keep_enclosed=False で従来どおり NFKC だけをかける。
     """
     if text is None:
@@ -4605,8 +4429,8 @@ def nfkc_text(text, keep_enclosed: bool = True) -> str:
     base = nfkc_keep_enclosed(str(text or "")) if keep_enclosed else _nfkc(text)
     s = base.replace("_x000D_", "").replace("\r\n", "\n").replace("\r", "\n")
     if "\n" not in s:  # 1行なら行に分けない（結果は同じ）
-        return _SPACES.sub(" ", s).strip()
-    lines = [_SPACES.sub(" ", line).strip() for line in s.split("\n")]
+        return _SPACES_RE.sub(" ", s).strip()
+    lines = [_SPACES_RE.sub(" ", line).strip() for line in s.split("\n")]
     return "\n".join(lines).strip("\n")
 
 
@@ -4799,7 +4623,7 @@ def convert_cell(value, text: str, col, cctx: ConvertContext, number_format: str
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             out = _zero_pad(value, number_format) if float(value).is_integer() else str(_clean_number(value))
         else:
-            out = _SPACES.sub(" ", nfkc_text(text, keep_enclosed=False)).strip()  # コードは突き合わせに使うので NFKC のみ
+            out = _SPACES_RE.sub(" ", nfkc_text(text, keep_enclosed=False)).strip()  # コードは突き合わせに使うので NFKC のみ
         if "upper" in col.normalize:
             out = _upper_code(out)
         return out, None, None
@@ -5284,7 +5108,7 @@ def _assign_keys(records: list[RecordRow], spec: TableSpec, stats: ImportStats) 
 #
 # 決まり（docs/design.md 6章）: 同じ入力から同じバイト列。生成日時・取込ID・行番号の一覧を本文に書かない。
 # レコード内に空行を入れない。パイプ表を使わない。出す列の中身は1文字も削らない（人名・コードの列も出す）。
-# 「経過の記録」の列（role=log）は logproc のルール出力（対応の時系列）＋ AI 照合に通った要点だけを出す。
+# 「経過の記録」の列（role=log）は ai.py のルール出力（対応の時系列）＋ AI 照合に通った要点だけを出す。
 # 大きい記録は「（続きn/m）」に分けて、どの部分にも管理No・対象・日付を書く（切られても身元が分かるように）。
 # ====================================================================================================
 
@@ -5312,7 +5136,7 @@ class MdFile:
         return self.text.encode("utf-8")
 
 
-# ---- 経過の記録（role=log。logproc） -------------------------------------------------------
+# ---- 経過の記録（role=log。ai.py の parse_log） -------------------------------------------------------
 
 def people_index_for(spec: TableSpec, records: list[dict]):
     """記入者の判定に使う人物の索引（人物一覧＋担当列の値）。"""
@@ -5337,7 +5161,7 @@ def _base_date(values: dict, spec: TableSpec) -> date | None:
 
 def parse_log_cell(spec: TableSpec, values: dict, people=None):
     """ログ列のセルをルールで分割する（マスク → parse_log）。AI 整形も同じ関数で分割して ID をそろえる。"""
-    from ai import PeopleIndex, SplitOptions, mask_text, parse_log
+    from ai import mask_log_text, PeopleIndex, SplitOptions, parse_log
 
     stage = spec.log_stage
     if stage is None:
@@ -5346,10 +5170,7 @@ def parse_log_cell(spec: TableSpec, values: dict, people=None):
     if text in (None, ""):
         text = ""
     people = people or PeopleIndex(stage.people, groups=stage.groups or None)
-    rules = list(stage.mask or [])
-    if rules:
-        names = people.names() if any(r in ("person", "人名") for r in rules) else ()
-        text, _spans = mask_text(str(text), rules, names=names)
+    text = mask_log_text(stage, str(text), people)
     options = SplitOptions.from_dict(stage.splitter or {})
     return parse_log(str(text), base_date=_base_date(values, spec), people=people, options=options)
 
@@ -5505,8 +5326,8 @@ def _clip_title_text(text: str, limit: int) -> str:
             opened.pop()
     if opened and opened[0] >= limit // 2:
         # 閉じない括弧の前まで戻す。ただし戻しすぎると見分けの材料ごと落ちるので、
-        # 半分より手前に括弧があるときは戻さない（「コンプレッサ（3号機・…」と
-        # 「コンプレッサ（4号機・…」が同じ識別子になっていた。2026-09-23 のレビューで実測）
+        # 半分より手前に括弧があるときは戻さない（「送風機（3番・…」と
+        # 「送風機（4番・…」が同じ識別子になっていた。2026-09-23 のレビューで実測）
         cut = cut[:opened[0]]
     cut = cut.rstrip().rstrip("、,。.")
     return (cut or text[:limit].rstrip()) + "…"
@@ -5936,7 +5757,7 @@ class _Names:
     """ファイル名の重複を避ける（安全化で同じ名前になった場合だけ _2 を付ける）。
 
     Windows のフォルダは大文字・小文字を区別しないので、比較は casefold して行う
-    （「ETC-302号機」と「Etc-302号機」が同じファイルに上書きされて記録が消えるのを防ぐ）。
+    （「A-302」と「a-302」が同じファイルに上書きされて記録が消えるのを防ぐ）。
     """
 
     def __init__(self):
@@ -5966,6 +5787,11 @@ def render_all(spec: TableSpec, records: list[dict], ai_results: dict | None) ->
     return _record_files(spec, ordered, ai_results or {}, names)
 
 
+def _groups_by_date(spec: TableSpec) -> bool:
+    """ファイルの分け方に日付の列（月ごと）が入っているか。"""
+    return any(_is_month_column(spec, c) for c in group_columns(spec))
+
+
 def group_columns(spec: TableSpec) -> list[ColumnSpec]:
     """記録ファイルをくくる列。並びは表の左からの順で、日付の列だけ最後に回す。
 
@@ -5982,7 +5808,11 @@ def _is_month_column(spec: TableSpec, col: ColumnSpec) -> bool:
 
 
 def group_value(rec: dict, spec: TableSpec, col: ColumnSpec) -> str:
-    """その記録がどのまとまりに入るかを表す値（日付の列なら YYYY-MM）。"""
+    """その記録がどのまとまりに入るかを表す値（日付の列なら YYYY-MM）。
+
+    値は縮めない。縮めてからまとめていたころは、先頭60字が同じ別の値が1つのファイルに
+    混ざっていた（2026-09-26 の総ざらいで実測）。ファイル名・見出しに出すときだけ縮める。
+    """
     values = rec.get("values") or {}
     raw = str(values.get(col.key) or "")
     if _is_month_column(spec, col):
@@ -5991,13 +5821,13 @@ def group_value(rec: dict, spec: TableSpec, col: ColumnSpec) -> str:
         # 対象の列は、番号と名前が1つのセルに入っていれば番号だけを使い、
         # 「調査中」「不明」のような但し書きは対象として扱わない（entity_value と同じ決まり）
         return entity_value(values, spec)[0]
-    return _clip_title_text(_table_one_line(raw), TITLE_ENTITY_CHARS)
+    return _table_one_line(raw)
 
 
 def _group_name_part(spec: TableSpec, col: ColumnSpec, value: str) -> str:
-    """ファイル名に使う、そのまとまりの名前（値が空のときの書き方もここで決める）。"""
+    """ファイル名・見出しに使う、そのまとまりの名前（値が空のときの書き方もここで決める）。"""
     if value:
-        return value
+        return _clip_title_text(value, TITLE_ENTITY_CHARS)
     return "日付なし" if _is_month_column(spec, col) else f"{col.display}なし"
 
 
@@ -6022,7 +5852,9 @@ def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names:
         total = len(chunks)
         base = [prefix] + [_group_name_part(spec, c, v) for c, v in pairs]
         # 前後のファイル名を先頭に書くので、先に全部の名前を決める
-        made = [names.make(base + ([f"{i}of{total}"] if total > 1 else [])) for i in range(1, total + 1)]
+        # 0詰めにする（10個以上のとき、フォルダや zip の並びが 1of12, 10of12, 2of12 … になっていた）
+        width = len(str(total))
+        made = [names.make(base + ([f"{i:0{width}d}of{total}"] if total > 1 else [])) for i in range(1, total + 1)]
         offset = 0
         for i, chunk in enumerate(chunks):
             part = _PartInfo(index=i + 1, total=total, whole=len(recs), offset=offset,
@@ -6095,31 +5927,39 @@ def _record_file_header(spec: TableSpec, group: list[dict], pairs: list, part: "
     """ファイルの先頭。どの列のどの値でくくったファイルなのかを必ず書く（切られても分かるように）。"""
     part = part or _PartInfo()
     name = spec.name
+    # 日付の列が2つ以上選ばれたときは、1つ目を「対象期間」に使い、残りは名前として書く
+    # （落としていたころは見出しからも本文から消え、件数の「全件」も嘘になった。2026-09-26 の実測）
     month_col = next((c for c, _v in pairs if _is_month_column(spec, c)), None)
     month = next((v for c, v in pairs if c is month_col), "") if month_col is not None else ""
-    labels = [(c, v) for c, v in pairs if not _is_month_column(spec, c)]
-    title = f"# {name}"
-    for _c, v in labels:
-        if v:
-            title += f" {v}"
-    title += f" {month_label(month)}の記録" if month else ("" if not month_col else " 日付なしの記録")
-    if not month_col and not any(v for _c, v in labels):
+    labels = [(c, v) for c, v in pairs if c is not month_col]
+    # 値が空のまとまりも「取引先なし」と名前を書く（ファイル名と同じ言い方。見出しだけで
+    # どのまとまりのファイルか分かるように）
+    named = [_group_name_part(spec, c, v) for c, v in labels]
+    title = " ".join([f"# {name}"] + named)
+    if month_col is not None:
+        title += f" {month_label(month)}の記録" if month else " 日付なしの記録"
+    else:
         title += "の記録"
     if part.total > 1:
         title += f"（{part.index}/{part.total}）"
     body = [f"- データ種別: {name}（1行＝1件）の記録"]
     for c, v in labels:
-        if c.role == "entity" and v:
-            # 対象の列は、番号だけでなく名前も書く（「設備: 2号機（ETC-302）」）
+        if c.role == "entity":
+            # 対象の列は、番号だけでなく名前も書く（「対象: 2番（A-302）」）。
+            # 項目名は値が空のときも同じにする（値の有無で名前が変わっていた）
+            name_of = _entity_label_name(spec)
             disp = _clip_title_text(entity_display(group[0].get("values", {}), spec)[2] or v, TITLE_ENTITY_CHARS)
-            body += md_bullet(_entity_label_name(spec), disp)
+            body += md_bullet(name_of, disp or f"（{name_of}なし）")
         else:
-            body += md_bullet(c.display, v or f"（{c.display}なし）")
+            body += md_bullet(c.display, _clip_title_text(v, TITLE_ENTITY_CHARS) or f"（{c.display}なし）")
     if month:
-        body.append(f"- 対象期間: {month_first_day(month)}〜{month_last_day(month)}")
+        # 件数で分けたときは、まとまり全体の期間だと分かるように書く（この分の範囲は下の行に出す）
+        span = "まとまり全体の対象期間" if part.total > 1 else "対象期間"
+        body.append(f"- {span}: {month_first_day(month)}〜{month_last_day(month)}")
     scope_month = (month_label(month) if month else "日付なし") if month_col is not None else ""
-    named = "・".join(v for _c, v in labels if v)
-    scope = f"{named}の{scope_month}" if (named and scope_month) else (named or scope_month or "全件")
+    named_text = "・".join(named)
+    scope = (f"{named_text}の{scope_month}" if (named_text and scope_month)
+             else (named_text or scope_month or "全件"))
     if part.total == 1:
         body.append(f"- このファイルの記録: {len(group):,}件（{scope}の全件）" if scope != "全件"
                     else f"- このファイルの記録: {len(group):,}件（全件）")
@@ -6250,7 +6090,7 @@ def build_zip(md_files: list[tuple[str, bytes]]) -> bytes:
 #
 # 取り込み設定は保存しない（利用者の指示 2026-09-20:「表の方には、取り込み設定を保持しておく機能はいらない」）。
 # 取り込みごとに列の対応づけを決め、その設定（TableSpec）を取り込みの行（spec_json）に持つ。
-# 接続は models.core.get_db()（リクエスト中もジョブの app_context 中も使える）。conn を渡せばそれを使う。
+# 接続は app.py の get_db()（リクエスト中もジョブの app_context 中も使える）。conn を渡せばそれを使う。
 # JSON の列は読み出し時に dict/list に直した値を別名（source, stats）で付け、spec_json は TableSpec にする。
 # ====================================================================================================
 
@@ -6294,7 +6134,7 @@ def _decode_import(row) -> dict | None:
 
 def create_import(file_name: str, file_hash: str, stored_path: str, source: dict | None = None, conn=None,
                   session_id: str | None = None) -> int:
-    """取り込みを1件作る。session_id は置いたブラウザ（views.current_session_id）。
+    """取り込みを1件作る。session_id は置いたブラウザ（current_session_id）。
 
     template_id / template_version_id は取り込み自身の番号にそろえる（設定はもう無いが、AI整形の控え
     （ai_items）がこの番号で取り込みを束ねている。design.md 3.2）。
@@ -6312,6 +6152,8 @@ def create_import(file_name: str, file_hash: str, stored_path: str, source: dict
 
 
 def get_import(import_id: int, conn=None) -> dict | None:
+    if not core.fits_row_id(import_id):
+        return None      # 桁の大きすぎる番号（URL 直打ち）は「無い」として扱う
     return _decode_import(_db(conn).execute("SELECT * FROM table_imports WHERE id = ?", (import_id,)).fetchone())
 
 

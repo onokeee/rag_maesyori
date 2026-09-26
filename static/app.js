@@ -189,16 +189,6 @@ document.addEventListener("click", async (event) => {
   const dismiss = event.target.closest("[data-dismiss]");
   if (dismiss) dismiss.parentElement.remove();
 
-  // Markdown / JSON のコピー
-  const copy = event.target.closest("[data-copy]");
-  if (copy) {
-    const source = document.querySelector(copy.dataset.copy);
-    if (!source) return;
-    navigator.clipboard.writeText(source.value ?? source.textContent).then(() => {
-      toast("コピーしました。");
-    }, () => toast("コピーできませんでした。", "err"));
-  }
-
 });
 
 // ---- ragFetch: 画面を移らずにサーバへ送る -------------------------------------------------
@@ -351,8 +341,10 @@ const ragSections = (() => {
     const toggle = section.querySelector("[data-step-toggle]");
     if (!toggle) return;
     const done = section.classList.contains("is-done");
+    const open = section.classList.contains("is-open");
     toggle.hidden = !done;
-    toggle.textContent = section.classList.contains("is-open") ? "閉じる" : "開く";
+    toggle.textContent = open ? "閉じる" : "開く";
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
   }
 
   /** その段を開く（3画面とも data-steps-open なので、ほかの段は畳まない）。 */
@@ -705,16 +697,22 @@ window.ragAiHeader = (() => {
     const bar = el("div", { class: "progress-bar" });
     const count = el("span", {});
     const message = el("span", { class: "muted" });
-    const cancel = el("button", { type: "button", class: "btn danger-outline small", text: "中止" });
-    cancel.addEventListener("click", async () => {
-      cancel.disabled = true;
-      try {
-        const res = await rf(urls.cancel, { json: {} });
-        toast(res.message || "処理を中止しました");
-      } catch (e) {
-        cancel.disabled = false;
-      }
-    });
+    // 中止できるジョブのときだけボタンを出す（サーバーが止める口を教えてくれる）
+    const cancelUrl = job.cancel_url || "";
+    const cancel = cancelUrl
+      ? el("button", { type: "button", class: "btn danger-outline small", text: "中止" })
+      : el("span", { class: "hint", text: "この処理は終わるまでお待ちください（中止はできません）。" });
+    if (cancelUrl) {
+      cancel.addEventListener("click", async () => {
+        cancel.disabled = true;
+        try {
+          const res = await rf(cancelUrl, { json: {} });
+          toast(res.message || "処理を中止しました");
+        } catch (e) {
+          cancel.disabled = false;
+        }
+      });
+    }
     const box = el("div", { class: "progress-box" },
       el("div", { class: "progress-head" },
         el("span", { class: "progress-label", text: JOB_TITLES[job.kind] || "処理しています" }),
@@ -773,6 +771,7 @@ window.ragAiHeader = (() => {
     }
     section.classList.remove("is-open", "is-done");
     body(name).replaceChildren();
+    sections.refresh();   // 「開く」の文字が残らないように印を付け直す
   }
 
   async function loadPanel(name, { open = true, scroll = true, query = "" } = {}) {
@@ -875,13 +874,11 @@ window.ragAiHeader = (() => {
   });
   uploadForm?.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const button = uploadForm.querySelector("[data-upload-run]");
     const input = uploadForm.querySelector("input[type=file]");
     if (!input?.files?.length) {
       toast("ファイルを選んでください。", "err");
       return;
     }
-    if (button) button.disabled = true;
     sections.working("file", "ファイルを読み取っています…");
     try {
       // 新しいファイルを置いたら、前の取り込み（ダウンロードしていない分）はその場で捨てる
@@ -889,22 +886,16 @@ window.ragAiHeader = (() => {
       const res = await rf(page.dataset.uploadUrl, { form: new FormData(uploadForm), quiet: true });
       urls = res.urls;
       importId = Number(res.import_id) || idFrom(urls && urls.panel);
+      // 前の取り込みの中身を残さない（残すと✓付きのまま押せて、消えた取り込みを取りに行って404になる）
+      ["columns", "ai", "preview", "done"].forEach(clearStep);
       sections.done("file", res.file_name);
       await loadPanel("layout", { open: true, scroll: false });
       await loadPanel("source", { open: true });
     } catch (e) {
       toast(e.message, "err");
     } finally {
-      if (button) button.disabled = false;
       sections.working("file", "");
     }
-  });
-
-  page.querySelector("[data-restart]")?.addEventListener("click", async () => {
-    // 別のファイルにするときも、いまの取り込み（ダウンロードしていない分）はその場で捨てる
-    await guard.now();
-    importId = null;
-    window.location.href = page.dataset.newUrl;
   });
 
   // ---- 共通のクリック -------------------------------------------------------------------

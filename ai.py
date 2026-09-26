@@ -9,7 +9,7 @@
   items（ai_items）・runner（AIジョブ本体と試し実行）・custom 段・見積もり。
 
 このファイルは起動時には読み込まない（openai の import に 0.8 秒ほどかかるため、
-views.py・tables.py からは関数の中で import する）。
+app.py の画面の側からは関数の中で import する）。
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ import unicodedata
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable
@@ -58,13 +58,13 @@ DEFAULT_NOT_DATE_PATTERNS = [r"\d+\.\d+\s*(?:mm|MPa|V|A)(?![A-Za-z0-9\-\u30A0-\u
 
 @dataclass
 class WhenInfo:
-    text: str                      # 原文の日時表現（例「4/1 10:00」「翌週」）。継承時は空か時刻のみ
+    text: str                      # 原文の日時表現（例「2026/4/1 10:00」）。日付が無い回は空
     date: str | None               # ISO日付（範囲なら開始日）
     time: str | None               # "HH:MM"
-    date_to: str | None            # 範囲の終了日（翌週など）
+    date_to: str | None            # 範囲の終了日（「2026/9/25 22:00〜9/26 6:00」の 9/26）
     shift: str | None              # 夜勤/日勤/2直/夕方 など
     estimated: bool
-    note: str = ""                 # 要確認に出す説明（「原文「翌週」から推定した（基準は…）」など）
+    note: str = ""                 # 要確認に出す説明（「年つきの日付が書かれていないので…」など）
     how: str = ""                  # explicit（年つきの日付）/ base（発生日を仮に使った）/ none（日付なし）
     time_to: str | None = None     # 範囲の終わりの時刻（「9/25 22:00〜9/26 6:00」の 6:00）
 
@@ -99,9 +99,6 @@ class LogParse:
     kind: str                      # log（2件以上）/ single（1件）/ empty
     warnings: list[str] = field(default_factory=list)
     text: str = ""                 # 分割に使ったテキスト（_x000D_ と CRLF を除いたもの。start/end はこの位置）
-
-    def to_dict(self) -> dict:
-        return asdict(self)
 
 
 @dataclass
@@ -196,7 +193,7 @@ def dedupe(items) -> list[str]:
 #   本文中の「納期4/8」「1.5mm」「4/10に伺います」は出来事の日付にしない。
 # - **年が書かれている日付だけ**を読む（利用者の指示 2026-09-26）。「9/25」「0925」「9.25」「9月25日」の
 #   ように年の無い書き方は日付にせず、本文にそのまま残す（年を推測すると、別の年の記録に化けたり、
-#   数量や型番を日付と読み違えたりするため）。時刻だけの行・「翌日」「3日後」は今までどおり読む。
+#   数量や型番を日付と読み違えたりするため）。時刻だけの行・「翌日」「3日後」・勤務帯は日付にしない。
 # ====================================================================================================
 
 ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988, "昭和": 1925, "S": 1925}
@@ -288,8 +285,22 @@ def _match_date(sh: str, p: int):
     return None
 
 
+def _time_hour(m: re.Match) -> int:
+    return int(m[2]) if m[2] is not None else int(m[4])
+
+
+def ampm_ignored(m: re.Match) -> bool:
+    """うしろに付いた AM/PM を午前・午後の印として使わないか。
+
+    印にするのは時が 1〜12 のとき（12時制の書き方）だけ。24時間表記のうしろに別の意味で付く
+    「00:03 PM明け」を午後と取って 12:03 にしていた（2026-09-26 の総ざらいで実測）。
+    使わないときは読む範囲もその前で止める（そうしないと本文から「PM」が消える）。
+    """
+    return bool(m.groupdict().get("post")) and not 1 <= _time_hour(m) <= 12
+
+
 def _format_time(m: re.Match) -> str | None:
-    ampm = (m[1] or m.groupdict().get("post") or "").upper().replace(".", "")
+    ampm = (m[1] or ("" if ampm_ignored(m) else m.groupdict().get("post") or "")).upper().replace(".", "")
     if m[2] is not None:
         h, mi = int(m[2]), int(m[3])
     else:
@@ -297,6 +308,8 @@ def _format_time(m: re.Match) -> str | None:
         mi = 30 if m[5] else int(m[6] or 0)
     if ampm in ("PM", "午後") and h < 12:
         h += 12
+    elif ampm == "AM" and h == 12:
+        h = 0
     if h > 29 or mi > 59:
         return None
     return f"{h:02d}:{mi:02d}"
@@ -354,7 +367,8 @@ def parse_when_at(sh: str, pos: int, *, not_date_res=(), end: int | None = None)
             if m.group("to"):
                 m2 = _TIME_RE.match(m.group("to"))
                 w.time_to = _format_time(m2) if m2 else None
-            p = m.end()
+            # 印にしなかった「PM」は本文に残す（食べたままにすると md から消える）
+            p = m.start("post") if ampm_ignored(m) else m.end()
             continue
         m = _SHIFT_RE.match(view, q) if w.shift is None else None
         if m:
@@ -371,7 +385,8 @@ def parse_when_at(sh: str, pos: int, *, not_date_res=(), end: int | None = None)
             m = _TIME_RE.match(view, _skip_ws(view, q))
             end_time = _format_time(m) if m else None
             if end_time is not None:
-                w.time_to, p = end_time, m.end()
+                w.time_to = end_time
+                p = m.start("post") if ampm_ignored(m) else m.end()
     w.end = p
     return w
 
@@ -469,17 +484,19 @@ def resolve_whens(
         if info is None:
             # 日付の書かれていない段落（セルの先頭に日付より前の文があるときだけ起きる）
             if base is not None:
+                # 仮に使う日は「日付の列（発生日）」か、無ければ「そのセルで最初に出てくる年つきの日付」
+                where = "発生日" if base_date is not None else "セルの中で最初に出てくる日付"
                 info = WhenInfo("", base.isoformat(), None, None, None, True,
-                                f"日付の記載がなく、発生日（{base.isoformat()}）を仮に使った", "base")
+                                f"年つきの日付が書かれていないので、{where}（{base.isoformat()}）を仮に使った", "base")
             else:
-                info = WhenInfo("", None, None, None, None, False, "日付の記載がない", "none")
+                info = WhenInfo("", None, None, None, None, False, "年つきの日付が書かれていない", "none")
         out.append(info)
     return out, order, warnings
 
 
 # ====================================================================================================
 # 元 logproc/extract.py
-# 識別子（型番・エラーコード・ロット）、数量・回数、予定句の抜き出し。
+# 識別子（型番・コード・管理番号）、数量・回数、予定句の抜き出し。
 # ====================================================================================================
 
 _ID_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9](?:[A-Za-z0-9._\-]*[A-Za-z0-9])?")
@@ -992,6 +1009,18 @@ def mask_text(text: str, rules: Iterable[str] | None = None, names: Iterable[str
     return "".join(parts), spans
 
 
+def mask_log_text(stage, text: str, people: "PeopleIndex") -> str:
+    """「経過の記録」のセルにマスクをかける。md 側（extract.parse_log_cell）と AI 側（_prepare_log）の
+    どちらもこれを通す（別々に書いていたころは、設定が None のときの既定が食い違っていた）。
+    """
+    rules = sget(stage, "mask", None)
+    rules = ["phone", "email"] if rules is None else list(rules)
+    if not rules:
+        return text
+    names = people.names() if any(r in ("person", "人名") for r in rules) else ()
+    return mask_text(text, rules, names=names)[0]
+
+
 # ====================================================================================================
 # 元 logproc/glossary.py
 # 用語集による言い換え（様子見→経過観察 など）。
@@ -1206,16 +1235,17 @@ def order_blocks(parse: LogParse) -> tuple[list[Segment], bool]:
     書かれた順のまま（安定な並べ替え）。
     """
     blocks = _blocks(parse)
-    if parse.order == "desc":
-        blocks.reverse()
-    # 先頭の塊に日付が書かれていないとき（前置きの文）は動かさない
+    # 先頭の塊に日付が書かれていないとき（前置きの文）は動かさない。並びを逆にする**前**に取り分ける
+    # （逆にしてから見ていたころは、新しい順のセルで前置きが最後に回っていた。2026-09-26 の実測）
     fixed = 1 if blocks and not _own_date(blocks[0][0]) else 0
-    rest = blocks[fixed:]
+    head, rest = blocks[:fixed], blocks[fixed:]
+    if parse.order == "desc":
+        rest.reverse()
     keys = _block_keys(rest)
     reordered = any(keys[i] < keys[i - 1] for i in range(1, len(keys)))
     if reordered:
         rest = [rest[i] for i in sorted(range(len(rest)), key=lambda i: keys[i])]
-    return [s for block in blocks[:fixed] + rest for s in block], reordered
+    return [s for block in head + rest for s in block], reordered
 
 
 def timeline_order(parse: LogParse) -> list[Segment]:
@@ -1282,9 +1312,9 @@ def review_notes(parse: LogParse) -> list[str]:
 # 元 logproc/segment.py
 # 「経過の記録」（date_log）の分割と、parse_log（分割・日時・記入者・抜き出しの一括処理）。
 #
-# 区切り: 行頭の日付・時刻・相対日・勤務帯、【】、・などの箇条書き、①、「／」「→」直後の日付、
-# 全角空白の後の「10:15：」。※行・→行・目印のない行は直前につなぐ。メール転記は1つの塊にする。
 # 分けるのは「行頭（飾りを除いた先頭）に年つきの日付がある行」だけ（利用者の指示 2026-09-26）。
+# 飾り（・ ● ① (1) 1. と 【 】 [ ] ( ) < >）はまたいで、そのうしろの日付を行頭の日付として読む。
+# ほかは何があっても分けない（時刻だけの行・「翌日」・勤務帯・見出し語・空行・「。」・行末の日付）。
 # ====================================================================================================
 
 _BULLETS = "・●■◆◇□○▪►*"
@@ -1309,8 +1339,6 @@ class _Head:
 class _Piece:
     start: int
     end: int
-    line_start: bool = True
-    marks: list[str] = field(default_factory=list)
 
 
 def _skip_ws_until(sh: str, p: int, end: int) -> int:
@@ -1416,7 +1444,7 @@ def _split_pieces(clean: str, sh: str, not_date_res) -> list[_Piece]:
             continue            # 空行では分けない（前の段落の続き）
         head = _parse_head(clean, sh, s, e, not_date_res)
         if cur is None or (head.when is not None and head.when.has_date):
-            cur = _Piece(s, e, True, [])
+            cur = _Piece(s, e)
             pieces.append(cur)
         else:
             cur.end = e
@@ -1452,7 +1480,7 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
         if s >= e:
             continue
         idx = len(segs)
-        marks = list(pc.marks)
+        marks: list[str] = []
         body_s, body_e = s, e
         head = _parse_head(clean, sh, s, e, not_date_res)
         for mk in head.marks:
@@ -1492,10 +1520,16 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
     warnings: list[str] = []
     whens, order, date_warnings = resolve_whens(heads, texts, base_date, options.order)
     warnings.extend(date_warnings)
-    authors = inherit_authors(authors)
-    for seg, w, a in zip(segs, whens, authors):
-        seg.when, seg.author = w, a
+    for seg, w in zip(segs, whens):
+        seg.when = w
     kind = "single" if len(segs) <= 1 else "log"
+    # 記入者の引き継ぎは**時系列の順**（md・画面に出る順）で行う。原文の並び順で引き継いでいたころは、
+    # 新しい順に書かれたセルで「直前の人」があとの記録の人になり、時間をさかのぼって引き継いでいた
+    # （同じ記録でも書き方で記入者が変わっていた。2026-09-26 の実測）
+    ordered = order_blocks(LogParse(segs, order, kind, [], clean))[0]
+    at = {id(seg): i for i, seg in enumerate(segs)}
+    for seg, a in zip(ordered, inherit_authors([authors[at[id(seg)]] for seg in ordered])):
+        seg.author = a
     if any("reference" in s.marks for s in segs):
         warnings.append("他の記録や資料への参照がある（内容は推測しない）")
     return LogParse(segs, order, kind, dedupe(warnings), clean)
@@ -1511,7 +1545,7 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
 #
 # 前の版は AI接続をここに書いていた（data/model_settings.yaml。全員で1つ）。今は書かない。
 # 残っているファイルは「サーバー共通の設定」として読むだけ（llm._read_admin）。
-# ウイルス対策・同期ソフトが少しの間ファイルを掴んでいることもあるので、core.files.remove_upload と同じく
+# ウイルス対策・同期ソフトが少しの間ファイルを掴んでいることもあるので、remove_upload と同じく
 # 少し待って何度か試す。
 # ====================================================================================================
 
@@ -1580,7 +1614,7 @@ SETTINGS_FILE = "model_settings.yaml"
 ADMIN_KEYS =("models", "default", "api_key", "chat_url", "models_url")
 CATALOG_TTL = 300
 _MAX_FIX = 4
-# ブラウザの作業場所の id のクッキーの鍵（views.SESSION_ID_KEY と同じ。views は画面の層なので、ここからは読まない）
+# ブラウザの作業場所の id のクッキーの鍵（app.py の SESSION_ID_KEY と同じ。画面の層なので、ここからは読まない）
 SESSION_ID_KEY = "sid"
 
 _clients: dict[tuple[str, str, float], OpenAI] = {}
@@ -1602,7 +1636,7 @@ def _cfg(name: str):
 # ---- 設定の解決 ----------------------------------------------------------------
 # 項目ごとに「このブラウザが保存した値 → 前の版の yaml（サーバー共通） → env」の順に見る。
 # ブラウザの値は要求（request）の中でしか分からない。ジョブのスレッドには無いので、AI整形は開始時に
-# job_client_settings() で設定を固めて渡す（aiproc.start_ai_job）。
+# job_client_settings() で設定を固めて渡す（start_ai_job）。
 
 def _read_admin() -> dict:
     """前の版が書いた data/model_settings.yaml（サーバー共通・読むだけ）。無ければ空。要求の中では1回だけ読む。"""
@@ -2365,6 +2399,16 @@ def detect_structured_mode(settings: dict, refresh: bool = False) -> str:
     return mode
 
 
+def known_structured_mode(settings: dict) -> str | None:
+    """すでに判定してある出力方式（判定していなければ None）。ここでは AI を呼ばない。
+
+    見積もりで使う。方式が分かっていれば、実行時と同じ鍵で保存済みの応答を数えられる。
+    """
+    key = (str(settings.get("chat_url") or settings.get("base_url") or ""), str(settings.get("model") or ""))
+    with _lock:
+        return _MODES.get(key)
+
+
 def forget_structured_modes() -> None:
     with _lock:
         _MODES.clear()
@@ -2385,8 +2429,10 @@ DEFAULT_ENTRY_TYPES = ["連絡", "初動", "調査", "原因判明", "部品手�
 DEFAULT_CERTAINTY = ["確定", "疑い", "不明"]
 DEFAULT_FINAL_STATES = ["完了", "経過観察中", "部品待ち", "メーカー回答待ち", "承認待ち", "暫定対応中", "未着手", "不明"]
 DEFAULT_LIMITS = {"max_segments": 40, "max_input_tokens": 6000}
-DEFAULT_RUN_IF = {"any": [{"min_segments": 2}, {"min_chars": 60}, {"contains": ["Original Message", "訂正"]}]}
-DEFAULT_OUTPUT_TOKENS = {"base": 400, "per_segment": 40, "max": 2000, "summary": 300}
+DEFAULT_RUN_IF = {"any": [{"min_segments": 2}, {"min_chars": 60}, {"contains": ["訂正"]}]}
+# 「参照だけの記録」とみなす本文の長さ（「同上」「別紙参照（A-123）」のような指し先だけの記載）
+REFERENCE_ONLY_CHARS = 60
+DEFAULT_OUTPUT_TOKENS = {"base": 400, "per_segment": 40, "per_input_token": 2, "max": 2000}
 
 
 def sget(obj, name: str, default=None):
@@ -2700,16 +2746,14 @@ LOG_SYSTEM_RULES = """あなたは業務の対応記録を、決められた項�
 2. 原文に書かれていない事実（原因・処置・部品・数量・人名）を足さないでください。分からない項目は null にしてください。
 3. 日付・時刻・記入者・人名・所要時間は書かないでください。アプリが付けます。
 4. 数量・回数（「×1」「2回」など）は数字を自分で書かず、原文の語句をそのまま _q の項目に引用してください。
-5. 型番・アラームコード・ロット番号は、原文と同じ表記で書き写してください。
+5. 型番・コード・番号は、原文と同じ表記で書き写してください。
 6. 「疑い」「可能性」「予定」「手配」「未」「なし」などは、断定・完了・肯定に変えずに残してください。
 7. 要点や要約の主語は、<context> の対象の名前・状況、または同じセル内の前のセグメントから分かる場合だけ補ってください。
 8. すべてのセグメントIDを、どれか1つのエントリの segs に1回ずつ入れてください。まとめてよいのは隣り合うセグメントだけです。
-   ignored に入れてよいのは、アプリが「署名・挨拶」と印を付けたセグメントだけです。
 9. 選択肢がある項目は選択肢から選んでください。当てはまらなければ「メモ」または「不明」にしてください。
 10. 事実を書く項目には、根拠のエントリID（例 "e4"）を src に入れてください。
-11. summary を求められたときは、1文の根拠を同じ日のエントリだけにしてください。文に日付は書かないでください。
-12. 訂正があれば、root_cause には訂正後の原因を入れてください。
-13. JSONだけを出力してください。"""
+11. 訂正があれば、root_cause には訂正後の原因を入れてください。
+12. JSONだけを出力してください。"""
 
 CUSTOM_SYSTEM_RULES = """あなたは業務の表の記載を、決められた形に整理する担当者です。文章を創作する係ではありません。
 
@@ -2719,9 +2763,6 @@ CUSTOM_SYSTEM_RULES = """あなたは業務の表の記載を、決められた�
 3. 根拠にした原文の語句を、q にそのまま引用してください。
 4. 分からないときは v を null にしてください。
 5. JSONだけを出力してください。"""
-
-SIGNATURE_MARKS = ("signature", "greeting")
-
 
 # ---- 共通 -----------------------------------------------------------------------
 
@@ -2736,10 +2777,7 @@ def segment_body(seg: Segment) -> str:
 
 
 def segment_line(seg: Segment) -> str:
-    head = [seg.id, format_when(seg.when)]
-    if any(m in (seg.marks or []) for m in SIGNATURE_MARKS):
-        head.append("署名・挨拶")
-    return f"[{'｜'.join(head)}] {segment_body(seg)}"
+    return f"[{seg.id}｜{format_when(seg.when)}] {segment_body(seg)}"
 
 
 def context_text(context) -> str:
@@ -2785,7 +2823,7 @@ def _nullable(schema: dict) -> dict:
     return {"anyOf": [schema, {"type": "null"}]}
 
 
-def log_output_schema(stage, want_summary: bool = False) -> dict:
+def log_output_schema(stage) -> dict:
     """keep の出力スキーマ（json_schema 方式で送る。照合はこのスキーマに頼らずコードで行う）。"""
     ch = stage_choices(stage)
     src = {"type": "array", "items": {"type": "string"}}
@@ -2795,7 +2833,6 @@ def log_output_schema(stage, want_summary: bool = False) -> dict:
             "properties": {"id": {"type": "string"}, "segs": {"type": "array", "items": {"type": "string"}},
                            "t": {"type": "array", "items": {"type": "string", "enum": ch["entry_types"]}}},
             "required": ["id", "segs", "t"]}},
-        "ignored": {"type": "array", "items": {"type": "string"}},
     }
     required = ["entries"]
     if sget(stage, "incident", True):
@@ -2817,17 +2854,12 @@ def log_output_schema(stage, want_summary: bool = False) -> dict:
                 "v": {"type": "string", "enum": ch["final_states"]}, "src": src}, "required": ["v", "src"]}),
         }}
         required.append("incident")
-    if want_summary:
-        props["summary"] = {"type": "array", "items": {"type": "object", "properties": {
-            "v": {"type": "string"}, "src": src}, "required": ["v", "src"]}}
-        required.append("summary")
     return {"type": "object", "properties": props, "required": required}
 
 
 def _shape_example(stage) -> str:
     shape: dict = {"entries": [{"id": "e1", "segs": ["s1"], "t": ["種別"]},
-                               {"id": "e2", "segs": ["s2", "s3"], "t": ["種別", "種別"]}],
-                   "ignored": []}
+                               {"id": "e2", "segs": ["s2", "s3"], "t": ["種別", "種別"]}]}
     if sget(stage, "incident", True):
         shape["incident"] = {
             "root_cause": {"q": "原文の語句", "v": "原因（短い名詞句）", "certainty": "確定", "src": ["e2"]},
@@ -2844,8 +2876,7 @@ def log_template_system(stage) -> str:
     """取り込み設定の版から自動生成する system の後半（全行で同じ）。"""
     ch = stage_choices(stage)
     lines = ["出力の形（この形のJSONを1つだけ返す）:", _shape_example(stage), "", "項目の説明:",
-             "- entries: エントリの一覧。id は e1 から順に付ける。segs は含めるセグメントID、t は種別（選択肢から1つ以上）。",
-             "- ignored: 署名・挨拶の印が付いたセグメントだけを入れてよい（無ければ空の配列）。"]
+             "- entries: エントリの一覧。id は e1 から順に付ける。segs は含めるセグメントID、t は種別（選択肢から1つ以上）。"]
     if sget(stage, "incident", True):
         lines += [
             "- incident.root_cause: 原因。q は根拠の原文の語句、v は短い名詞句、certainty は確からしさ。書かれていなければ null。",
@@ -2856,7 +2887,7 @@ def log_template_system(stage) -> str:
             "- incident.final_state: 最後の状態。書かれていなければ null。",
             "- src: 根拠にしたエントリID（例 \"e4\"）の配列。",
         ]
-    lines += ["- summary: 求められたときだけ出す。1要素＝1文（v）と、その根拠のエントリID（src。同じ日のエントリだけ）。", "",
+    lines += ["",
               "選択肢:",
               f"- 種別（entries[].t）: {'、'.join(ch['entry_types'])}"]
     if sget(stage, "incident", True):
@@ -2868,7 +2899,7 @@ def log_template_system(stage) -> str:
     return "\n".join(lines)
 
 
-def log_user_content(parse: LogParse, context=None, glossary: dict | None = None, want_summary: bool = False) -> str:
+def log_user_content(parse: LogParse, context=None, glossary: dict | None = None) -> str:
     seg_lines = [segment_line(s) for s in parse.segments]
     body_text = "\n".join(s.body or "" for s in parse.segments)
     parts = []
@@ -2879,8 +2910,6 @@ def log_user_content(parse: LogParse, context=None, glossary: dict | None = None
     if terms:
         parts += ["<glossary>", *[f"{escape_data(t)} → {escape_data(to)}" for t, to in terms], "</glossary>"]
     parts += ["<segments>", *seg_lines, "</segments>"]
-    if want_summary:
-        parts.append("この記録は長いため、summary も出力してください。")
     return "\n".join(parts)
 
 
@@ -2896,22 +2925,28 @@ def _few_shot_messages(stage) -> list[dict]:
     return out
 
 
-def build_log_messages(parse: LogParse, context, spec, want_summary: bool = False) -> list[dict]:
+def build_log_messages(parse: LogParse, context, spec) -> list[dict]:
     """log 段の messages。spec は LogStageSpec（または TableSpec。その場合 log_stage を使う）か dict。"""
     stage = sget(spec, "log_stage", None) or spec
     glossary = sget(stage, "glossary", {}) or {}
     system = LOG_SYSTEM_RULES + "\n\n" + log_template_system(stage)
     return ([{"role": "system", "content": system}] + _few_shot_messages(stage)
-            + [{"role": "user", "content": log_user_content(parse, context, glossary, want_summary)}])
+            + [{"role": "user", "content": log_user_content(parse, context, glossary)}])
 
 
-def log_max_tokens(stage, parse: LogParse, want_summary: bool = False) -> int:
+def log_max_tokens(stage, parse: LogParse) -> int:
+    """その1セルの応答に許す出力トークン数。
+
+    出す量は区切りの数だけでなく**本文の長さ**でも決まる（原文の語句を引用して書き写すため）。
+    区切りの数だけで決めていたころは、区切りが1つの長いセル（行頭に年つきの日付が無いセル）で
+    上限が base+per_segment のまま 440 になり、必要な 583〜1,630 に届かず必ず打ち切られていた
+    （T1 8,046セルのうち 94% が足りない。2026-09-26 の実測）。
+    """
     conf = dict(DEFAULT_OUTPUT_TOKENS)
     conf.update(sget(stage, "output_tokens", {}) or {})
     n = int(conf["base"]) + int(conf["per_segment"]) * len(parse.segments)
-    if want_summary:
-        n += int(conf.get("summary", 300))
-    return min(n, int(conf["max"]) + (int(conf.get("summary", 300)) if want_summary else 0))
+    n = max(n, int(conf["base"]) + int(conf.get("per_input_token", 2)) * estimate_tokens(parse.text))
+    return min(n, int(conf["max"]))
 
 
 def build_repair_messages(messages: list[dict], previous_text: str, problems: list[str]) -> list[dict]:
@@ -3041,7 +3076,7 @@ def _final_state_words(state: str, glossary: dict) -> list[str]:
 @dataclass
 class VerifyIssue:
     level: str        # fatal / error / warning
-    path: str         # entries / incident.parts[0] / summary[1] など
+    path: str         # entries / incident.parts[0] / incident.root_cause など
     message: str      # 再依頼と要確認に使う日本語
     code: str = ""
 
@@ -3167,7 +3202,7 @@ class _Ctx:
 
 
 def verify_log_result(result, parse: LogParse, sent_text: str = "", *, spec=None, context_text: str = "",
-                      people_names=(), finish_reason: str | None = None, want_summary: bool = False) -> VerifyReport:
+                      people_names=(), finish_reason: str | None = None) -> VerifyReport:
     """keep の出力を照合する。spec は LogStageSpec（選択肢・用語集・incident の有無）か dict。"""
     stage = sget(spec, "log_stage", None) or spec
     choices = stage_choices(stage) if stage is not None else {
@@ -3196,9 +3231,6 @@ def verify_log_result(result, parse: LogParse, sent_text: str = "", *, spec=None
             return rep
         accepted["incident"] = _check_incident(inc or {}, cx, rep)
 
-    summary = result.get("summary")
-    if summary is not None or want_summary:
-        accepted["summary"] = _check_summary(summary, cx, rep, want_summary)
     rep.accepted = accepted
     return rep
 
@@ -3262,23 +3294,6 @@ def _check_entries(result: dict, cx: _Ctx, rep: VerifyReport) -> list[dict]:
         cx.entry_segs[eid] = segs
         cx.entry_types[eid] = types
         out.append({"id": eid, "segs": segs, "t": types})
-    ignored = result.get("ignored") or []
-    if not isinstance(ignored, list):
-        _fatal(rep, "ignored", "ignored が配列になっていません。", "structure")
-        ignored = []
-    for sid in (str(x).strip() for x in ignored):
-        seg = cx.seg_by_id.get(sid)
-        if seg is None:
-            _fatal(rep, "ignored", f"ignored の {sid} は存在しないセグメントIDです。", "segments")
-            continue
-        if sid in used:
-            _fatal(rep, "ignored", f"{sid} がエントリと ignored の両方に入っています。", "segments")
-            continue
-        used[sid] = "ignored"
-        body = cx.seg_text[sid]
-        if not any(m in (seg.marks or []) for m in ("signature", "greeting")) or re.search(r"\d", nfkc(body)) \
-                or _identifiers(body):
-            _fatal(rep, "ignored", f"{sid} は署名・挨拶ではないため ignored に入れられません。", "ignored")
     for sid in cx.seg_ids:
         if sid not in used:
             _fatal(rep, "entries", f"{sid} がどのエントリにも入っていません。", "segments")
@@ -3588,7 +3603,13 @@ def _check_incident(inc: dict, cx: _Ctx, rep: VerifyReport) -> dict:
 
 
 def _check_missing_identifiers(out: dict, cx: _Ctx, rep: VerifyReport) -> None:
-    """抜けの疑い：部品・処置の根拠セグメントにある型番が、要点のどこにも出ていない（警告）。"""
+    """抜けの疑い：部品・処置の根拠セグメントにある型番が、要点のどこにも出ていない（警告）。
+
+    区切りが1つのセルでは出さない。根拠のセグメント＝セル全体になるので、セルに出てくる型番を
+    ぜんぶ並べてしまい、正しい応答でも「要確認」になっていた（型番5つのセルで警告5件。2026-09-26 の実測）。
+    """
+    if len(cx.seg_ids) < 2:
+        return
     segs = set()
     for key in ("temporary_actions", "permanent_actions", "parts"):
         for item in out.get(key, []):
@@ -3604,46 +3625,6 @@ def _check_missing_identifiers(out: dict, cx: _Ctx, rep: VerifyReport) -> None:
             if norm(tok) not in written and not re.fullmatch(r"(?i)ALM|ERR|E|AL", re.sub(r"[-\d]", "", tok)):
                 rep.issues.append(VerifyIssue("warning", "incident.parts", f"{sid} の型番「{tok}」が部品・処置のどこにも出ていません。",
                                               "missing"))
-
-
-def _check_summary(summary, cx: _Ctx, rep: VerifyReport, want_summary: bool) -> list[dict]:
-    if summary is None:
-        if want_summary:
-            rep.issues.append(VerifyIssue("error", "summary", "summary がありません。", "structure"))
-            rep.failed_items.append("summary")
-        return []
-    if not isinstance(summary, list):
-        _finish(rep, "summary", [VerifyIssue("error", "summary", "summary が配列になっていません。", "structure")])
-        return []
-    kept = []
-    for n, s in enumerate(summary):
-        path, issues = f"summary[{n}]", []
-        if isinstance(s, str):
-            s = {"v": s, "src": []}
-        if not isinstance(s, dict) or not isinstance(s.get("v"), str) or not s["v"].strip():
-            _finish(rep, path, [VerifyIssue("error", path, f"{path}.v がありません。", "structure")])
-            continue
-        ev = _evidence(cx, s.get("src"), path, rep, issues)
-        dates: list[str] = []
-        if ev:
-            segs, text = ev
-            _check_text_value(cx, path, "v", s["v"], text, issues, limit=200, check_dropped=True)
-            for sid in segs:
-                when = cx.seg_by_id[sid].when
-                d = when.date if when else None
-                if d and d not in dates:
-                    dates.append(d)
-            if len(dates) > 1:
-                issues.append(VerifyIssue("warning", path, f"{path} の根拠が複数の日（{min(dates)}〜{max(dates)}）にまたがっています。",
-                                          "summary_days"))
-        if _finish(rep, path, issues):
-            item = {"v": nfkc(s["v"]).strip(), "src": list(s.get("src") or []), "segs": ev[0] if ev else []}
-            if len(dates) == 1:
-                item["date"] = dates[0]
-            elif dates:
-                item["date_from"], item["date_to"] = min(dates), max(dates)
-            kept.append(item)
-    return kept
 
 
 # ====================================================================================================
@@ -3751,9 +3732,9 @@ CACHE_DB_RETRIES = 2     # キャッシュの読み書きが「database is locke
 CACHE_DB_BACKOFF = 0.5   # やり直しの前に待つ秒数（回数×この秒数）
 STOP_GRACE = 2.0        # 一時停止・中止のとき、送信中の呼び出しの応答を待つ秒数（過ぎたら見捨てる）
 DEFAULT_CONCURRENCY = {"local": 1, "cloud": 4}
+# 画面に出す言葉は app.py の SCOPE_LABELS（ここは受け付ける値だけ）。
+# changed（内容が変わった行だけ）は画面には出さない。pending が「未処理＋内容が変わった行」を含むため
 SCOPES = ("pending", "all", "errors", "flagged", "changed")
-SCOPE_LABELS = {"pending": "未処理のみ", "all": "全件", "errors": "エラーだけ", "flagged": "要確認だけ",
-                "changed": "変更行のみ"}
 
 
 class AIJobError(JobError):
@@ -3871,7 +3852,6 @@ class StageWork:
     messages: list[dict] = field(default_factory=list)
     schema: dict | None = None
     max_tokens: int | None = None
-    want_summary: bool = False
     parse: object = None            # LogParse（log 段）
     stage: object = None
     inputs: dict = field(default_factory=dict)       # custom 段の入力 {表示名: 値}
@@ -3967,13 +3947,8 @@ def _prepare_log(row: dict, data: ImportData, stage, people: PeopleIndex) -> Sta
     col = _resolve_column(spec, str(sget(stage, "column", "")))
     raw = row["values"].get(col)
     raw_text = "" if raw is None else str(raw)
-    # マスクと分割は tables.markdown.parse_log_cell と同じ規則（セグメントIDをそろえる）
-    rules = sget(stage, "mask", None)
-    rules = ["phone", "email"] if rules is None else list(rules)
-    masked = raw_text
-    if rules:
-        names = people.names() if any(r in ("person", "人名") for r in rules) else ()
-        masked, _ = mask_text(raw_text, rules, names=names)
+    # マスクと分割は extract.parse_log_cell と同じ規則（セグメントIDをそろえる）
+    masked = mask_log_text(stage, raw_text, people)
     parse = parse_log(masked, _base_date(row, spec), people, SplitOptions.from_dict(sget(stage, "splitter", {}) or {}))
     labels = _labels(spec)
     context = {}
@@ -3992,7 +3967,11 @@ def _prepare_log(row: dict, data: ImportData, stage, people: PeopleIndex) -> Sta
     if parse.kind == "empty":
         work.route, work.reason = "skipped", "対応内容の記載なし"
         return work
-    if parse.segments and all("reference" in (s.marks or []) for s in parse.segments):
+    if parse.segments and all("reference" in (s.marks or []) and len(s.body or "") <= REFERENCE_ONLY_CHARS
+                              for s in parse.segments):
+        # 「参照だけ」は本文が短いときに限る。長さを見ないでいたころは、ちゃんと書かれた記録でも
+        # 「別紙参照」「…と同じ現象」の1行があるだけでセル全体が AI に出なかった
+        # （T1 では参照の語があるセル 895 件のうち 861 件が不当に外れていた。2026-09-26 の実測）
         work.route, work.reason = "rule_only", "他の記録の参照だけ（要確認）"
         return work
     if len(parse.segments) > int(limits["max_segments"]):
@@ -4001,16 +3980,9 @@ def _prepare_log(row: dict, data: ImportData, stage, people: PeopleIndex) -> Sta
     if not _run_if(sget(stage, "run_if", None) or DEFAULT_RUN_IF, parse, parse.text):
         work.route, work.reason = "rule_only", "短い記載（ルールのみ）"
         return work
-    # 要約（summary）は Markdown にも画面にも出ない。頼むと入力が +300トークン増え、
-    # 照合に落ちると消えない「要確認」が付くだけなので、既定では頼まない。
-    # 設定（summary_if.record_tokens_over）を明示したときだけ、今までどおり頼む（2026-09-23 のレビュー）
-    summary_if = sget(stage, "summary_if", {}) or {}
-    over = sget(summary_if, "record_tokens_over", None)
-    work.want_summary = (over is not None
-                         and estimate_tokens("\n".join(render_timeline(parse, work.entity_label))) > int(over))
-    work.messages = build_log_messages(parse, context, stage, want_summary=work.want_summary)
-    work.schema = log_output_schema(stage, work.want_summary)
-    work.max_tokens = log_max_tokens(stage, parse, work.want_summary)
+    work.messages = build_log_messages(parse, context, stage)
+    work.schema = log_output_schema(stage)
+    work.max_tokens = log_max_tokens(stage, parse)
     work.sent_text = work.messages[-1]["content"]
     tokens = estimate_tokens("".join(m["content"] for m in work.messages))
     if tokens > int(limits["max_input_tokens"]):
@@ -4239,7 +4211,7 @@ def _evaluate(work: StageWork, text: str, finish_reason: str | None):
     if work.kind == "log":
         rep: VerifyReport = verify_log_result(parsed, work.parse, work.sent_text, spec=work.stage,
                                               context_text=work.context_text, people_names=work.people_names,
-                                              finish_reason=finish_reason, want_summary=work.want_summary)
+                                              finish_reason=finish_reason)
         status = rep.status()
         if status == "rule_only":
             status = "error" if finish_reason == "length" else "flagged"
@@ -4416,7 +4388,7 @@ def check_resume(job: dict, settings: dict | None = None) -> tuple[bool, str]:
 
 def run_ai_job(ctx, import_id: int, scope: str | None = None, concurrency: int | None = None, *,
                stage_ids=None, row_keys=None, settings: dict | None = None) -> dict:
-    """AI整形のジョブ本体。ctx は core.jobs.JobContext。戻り値は件数のまとめ（jobs の result になる）。"""
+    """AI整形のジョブ本体。ctx は app.py の JobContext。戻り値は件数のまとめ（jobs の result になる）。"""
     params = getattr(ctx, "params", {}) or {}
     scope = scope or params.get("scope") or "pending"
     if scope not in SCOPES:
@@ -4696,7 +4668,7 @@ def _ensure_trial_import(import_id: int, keys=()) -> None:
             return
         for key in {k for k in keys if k}:
             # 生きている別の取り込みが払った応答は消さない（消すとその取り込みが再開・再実行で再課金になる）。
-            # その応答は、持ち主の取り込みを消すときに core.purge が一緒に消す
+            # その応答は、持ち主の取り込みを消すときに 取り込みの片付け（purge_table_import）が一緒に消す
             conn.execute(f"DELETE FROM llm_calls WHERE cache_key = ? AND {NO_LIVE_OWNER} AND NOT EXISTS "
                          "(SELECT 1 FROM ai_items WHERE ai_items.cache_key = llm_calls.cache_key)", (key,))
         conn.commit()
@@ -4842,7 +4814,8 @@ def estimate(import_id: int, trial_stats: list[dict] | None = None, *, scope: st
 
         uniq: dict[str, object] = {}
         if settings:
-            modes = [structured_mode] if structured_mode else ["json_schema", "json_object", "prompt_only"]
+            mode = structured_mode or known_structured_mode(settings)
+            modes = [mode] if mode else ["json_schema", "json_object", "prompt_only"]
             for w in targets:
                 keys = []
                 for m in modes:
@@ -4853,8 +4826,11 @@ def estimate(import_id: int, trial_stats: list[dict] | None = None, *, scope: st
                     counts["duplicates"] += 1
                     continue
                 uniq[dedupe] = w
-                # 保存済みでも、使えない応答（壊れたJSON・打ち切り）や再依頼の応答が無いものは実行時に AI を呼ぶ
-                if any(exists(k, conn) and cached_usable(w, settings, m, k, conn) for m, k in keys):
+                # 保存済みでも、使えない応答（壊れたJSON・打ち切り）や再依頼の応答が無いものは実行時に AI を呼ぶ。
+                # 方式（json_schema/json_object/prompt_only）が決まっていないときは、どの方式で呼ぶか
+                # 分からないので、**全部の方式**に使える応答があるときだけ「呼ばなくて済む」と数える
+                # （1つでも当たれば0回と数えていたころは、見積もり0回でも実行すると呼び出しが起きていた）
+                if all(exists(k, conn) and cached_usable(w, settings, m, k, conn) for m, k in keys):
                     counts["cached"] += 1
         else:
             for w in targets:

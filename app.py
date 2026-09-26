@@ -9,8 +9,8 @@ waitress で動かすときだけ flask --app app serve）。
 - create_app とエラー画面、待ち受け先の決め方、起動コマンド serve（waitress 用）。
 
 読み取りは extract.py（一覧表）、AI は ai.py（起動時には読み込まない）。
-同じ名前で中身の違うものは分けてある（JOB_KIND_LABELS / ROW_KIND_LABELS、_dumps_value /
-_dumps_extraction、save_ai_connection_row と画面側の save_ai_connection ルート）。
+同じ名前で中身の違うものは分けてある（JOB_KIND_LABELS / ROW_KIND_LABELS、
+save_ai_connection_row と画面側の save_ai_connection ルート）。
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ import unicodedata
 import zipfile
 import zlib
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -73,7 +73,7 @@ class Config:
     SECRET_KEY = None
     DATABASE = Path(os.environ.get("DATABASE", BASE_DIR / "instance" / "app.db"))
     UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", BASE_DIR / "uploads"))
-    # 画面から保存する設定（model_settings.yaml）の置き場所
+    # 行データ・状態ファイルの置き場所（下の TABLES_DIR。前の版の data/model_settings.yaml は読むだけ）
     DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
     # 一覧表の行データ・状態ファイルの置き場所（DATA_DIR/tables。create_app で DATA_DIR に合わせて決め直す）
     TABLES_DIR = Path(os.environ.get("TABLES_DIR", DATA_DIR / "tables"))
@@ -565,7 +565,7 @@ def _m7_llm_calls_owner(conn: sqlite3.Connection) -> None:
 def _m8_session_scope(conn: sqlite3.Connection) -> None:
     """取り込んだものに「どのブラウザのものか」を持たせる（社内LANで数人が同時に使うため）。
 
-    ログインは無いので利用者は分からないが、セッションのクッキー（views.current_session_id）で
+    ログインは無いので利用者は分からないが、セッションのクッキー（current_session_id）で
     ブラウザごとの作業場所は分けられる。ほかのブラウザの取り込みは見えない（404）。
     古いDBの行は NULL（持ち主が分からない）のままで、これまでどおり扱う（起動時の片付けで消える）。
     """
@@ -584,7 +584,7 @@ def _m9_import_spec(conn: sqlite3.Connection) -> None:
     取り込みごとに列の対応づけを決めるので、設定を名前で残して選び直す仕組み（table_templates と
     その版）は要らない。表を作り直すのは table_templates への外部キーを外すため（参照先の表を
     落とすと、外部キーを有効にした接続では table_imports への書き込みがすべて落ちる）。
-    template_id / template_version_id は取り込み自身の id にそろえて残す（aiproc・core.purge が
+    template_id / template_version_id は取り込み自身の id にそろえて残す（ai.py・purge_table_import が
     AI整形の控えを束ねる鍵に使っている）。
     """
     _add_column(conn, "table_imports", "spec_json", "TEXT NOT NULL DEFAULT ''")
@@ -632,7 +632,7 @@ def _m9_import_spec(conn: sqlite3.Connection) -> None:
 def _m10_drop_unused(conn: sqlite3.Connection) -> None:
     """使わなくなったものを落とす。
 
-    - 互換ビュー table_template_versions: _m9 が一時的に置いたもの。aiproc.runner.load_spec が
+    - 互換ビュー table_template_versions: _m9 が一時的に置いたもの。ai.load_spec が
       table_imports.spec_json を直接読むようになったので要らない。
     - table_imports.period_json: 書く側がもう無く、常に '{}' のまま（期間は取り込み設定が持つ）。
     """
@@ -655,13 +655,13 @@ def _m13_ai_connections(conn: sqlite3.Connection) -> None:
     利用者の指示:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる。全部空欄にしておいて
     cookieでユーザー毎に登録内容をずっと保持させるようにしてほしい」。
     これまでは data/model_settings.yaml 1つを全員で使っていたので、社内LANで数人が使うと互いのキーを
-    上書きし合い、1つのキーを共有していた。持ち主は取り込みと同じ session_id（views.current_session_id）。
-    この表は「設定」なので、取り込みを捨てる片付け（core.purge_session / sweep_stale / purge_all_pending）の
-    対象にしない（core.SETTINGS_TABLES）。最後の接続確認の結果もここに持ち、ヘッダーはそれを表示するだけ
+    上書きし合い、1つのキーを共有していた。持ち主は取り込みと同じ session_id（current_session_id）。
+    この表は「設定」なので、取り込みを捨てる片付け（purge_session / sweep_stale / purge_all_pending）の
+    対象にしない（SETTINGS_TABLES）。最後の接続確認の結果もここに持ち、ヘッダーはそれを表示するだけ
     （画面を開くたびに確認しに行かない）。
     """
     conn.execute("""CREATE TABLE IF NOT EXISTS ai_connections (
-        session_id TEXT PRIMARY KEY,                   -- ブラウザの作業場所（views.current_session_id）
+        session_id TEXT PRIMARY KEY,                   -- ブラウザの作業場所（current_session_id）
         api_key TEXT NOT NULL DEFAULT '',              -- 平文（暗号化はしていない。画面にそう書く）
         chat_url TEXT NOT NULL DEFAULT '',             -- …/chat/completions までのフルパス（空欄＝サーバー共通の値）
         models_url TEXT NOT NULL DEFAULT '',           -- …/models までのフルパス（空欄＝サーバー共通の値）
@@ -766,13 +766,9 @@ def _one(sql: str, args=()) -> dict | None:
     return dict(row) if row else None
 
 
-def _dumps_value(value) -> str:
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-
-
 # ---- ai_connections（ブラウザごとの AI接続） ---------------------------------------------------
-# 持ち主は session_id（views.current_session_id）。行は「保存」か「接続の確認」で初めてできる（読むだけでは作らない）。
-# 取り込みの片付け（core.purge_*）では消えない「設定」。長く使われていない行だけ core.sweep_stale_ai_connections が消す。
+# 持ち主は session_id（current_session_id）。行は「保存」か「接続の確認」で初めてできる（読むだけでは作らない）。
+# 取り込みの片付け（purge_session など）では消えない「設定」。長く使われていない行だけ sweep_stale_ai_connections が消す。
 
 
 def get_ai_connection(session_id: str | None) -> dict | None:
@@ -1451,8 +1447,22 @@ def remove_orphan_import_dirs(tables_dir, known_ids) -> int:
 
 
 # 起動時の片付けで、これより新しいファイルは消さない（保存してから DB の行を作るまでの間を守る）。
-# core.jobs.STALE_AFTER（2分）と同じ長さ。
+# STALE_AFTER（2分）と同じ長さ。
 ORPHAN_GRACE_SECONDS = 120
+
+
+def known_stored_paths(db) -> set[str]:
+    """DB のどこかの表から参照されているアップロード済みファイルの一覧。
+
+    「消してよいファイル」を決める唯一の場所。2か所に写していたころは、片方だけ直すと
+    使用中のファイルを消す危険があった（stored_path の列を持つ表を全部見る）。
+    """
+    known: set[str] = set()
+    for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
+        columns = {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}
+        if "stored_path" in columns:
+            known |= {row[0] for row in db.execute(f'SELECT stored_path FROM "{table}"') if row[0]}
+    return known
 
 
 def remove_orphan_uploads(base, known_paths) -> int:
@@ -1576,7 +1586,7 @@ class JobCancelled(Exception):
 class JobError(Exception):
     """利用者にそのまま見せてよい日本語メッセージを持つエラー。
 
-    これを継承した例外（aiproc.runner.AIJobError、tables.pipeline.PipelineError）は、そのメッセージを
+    これを継承した例外（ai.AIJobError）は、そのメッセージを
     画面にそのまま出す。それ以外の例外は Python の例外名が画面に出ないようにし、内容はログにだけ残す。
     """
 
@@ -1997,8 +2007,19 @@ def _waiting_note(conn, job: dict | None) -> dict | None:
     return job
 
 
+def fits_row_id(value) -> bool:
+    """SQLite の整数（8バイト）に収まる番号か。
+
+    URL の番号をそのまま問い合わせに渡すので、桁が大きすぎると OverflowError で 500 になっていた。
+    収まらない番号は「無い」として扱う（2026-09-26 の総ざらいで実測）。
+    """
+    return isinstance(value, int) and -2 ** 63 <= value < 2 ** 63
+
+
 def get_job(job_id: int) -> dict | None:
     """ジョブ1件（params / progress / result / status_label / finished を付けて返す）。"""
+    if not fits_row_id(job_id):
+        return None
     return _with_conn(lambda c: _waiting_note(c, _decode(_reap_orphan(
         c, c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()))))
 
@@ -2436,7 +2457,7 @@ def forget_id_counters(db) -> int:
 #   - 起動時: ダウンロードしていない取り込みをすべて捨てる（purge_all_pending）
 # あとの2つ（時間切れ・起動時）は、動いているジョブが付いているものには手を出さない（_busy_ids）。
 # 残すのは「設定」（ブラウザごとの AI接続 = SETTINGS_TABLES）だけで、これは purge の対象ではない。
-# AI接続だけは、クッキーの寿命（約1年。views.SESSION_LIFETIME）より長くさわられていない行を
+# AI接続だけは、クッキーの寿命（約1年。SESSION_LIFETIME）より長くさわられていない行を
 # sweep_stale_ai_connections が消す（もう戻って来ないブラウザの APIキーを DB に残さない）。
 
 # 放っておかれた取り込みを捨てるまでの時間。数人が同時に使う社内LANの置き方（2026-09-20）では、
@@ -2499,13 +2520,7 @@ def _sweep_orphan_uploads() -> int:
     次の再起動まで残っていた（2026-09-23 のレビュー）。
     """
     try:
-        db = get_db()
-        known: set[str] = set()
-        for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
-            columns = {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}
-            if "stored_path" in columns:
-                known |= {row[0] for row in db.execute(f'SELECT stored_path FROM "{table}"') if row[0]}
-        return remove_orphan_uploads(current_app.config["UPLOAD_DIR"], known)
+        return remove_orphan_uploads(current_app.config["UPLOAD_DIR"], known_stored_paths(get_db()))
     except (sqlite3.Error, OSError, RuntimeError, KeyError):
         return 0     # 片付けは best effort。ここで見回り全体を止めない
 
@@ -2536,7 +2551,7 @@ def sweep_stale(hours: float = STALE_HOURS) -> int:
     return tables
 
 
-# ブラウザごとの AI接続を消すまでの日数。クッキーの寿命（views.SESSION_LIFETIME = 365日）を過ぎたブラウザは
+# ブラウザごとの AI接続を消すまでの日数。クッキーの寿命（SESSION_LIFETIME = 365日）を過ぎたブラウザは
 # 同じ id で戻って来られないので、その行（APIキー）を持ち続ける理由が無い。保存・接続の確認・AI整形の
 # 開始のたびに updated_at が進むので、使っている人の分は消えない。
 AI_CONNECTION_KEEP_DAYS = 400
@@ -2558,7 +2573,7 @@ def sweep_stale_ai_connections(days: float = AI_CONNECTION_KEEP_DAYS) -> int:
 # ---- 使っている人ごとに捨てる ---------------------------------------------------------
 # 社内LANに置いて数人が同時に使う（利用者の指示 2026-09-20）ので、「作業中のもの」は
 # 全員分がひとつの DB に混ざっている。画面を離れた人の分だけを捨てられるように、
-# table_imports は持ち主（session_id。views.current_session_id() がブラウザごとに配る）を持つ。
+# table_imports は持ち主（session_id。current_session_id() がブラウザごとに配る）を持つ。
 #
 # 持ち主の列がまだ無い古い DB でも動くようにしてある:
 #   - 番号を指して捨てる（discard_table_imports）… 持ち主を確かめずに捨てる
@@ -2647,6 +2662,8 @@ def purge_session(session_id, *, include_busy: bool = False) -> int:
 # 画面（旧 views.py）
 ####################################################################################################
 
+# 先に土台（この上の部分）を読み終えてから extract を読む（extract.py は app を import するので、
+# extract.py を単独で import すると順番が逆になって ImportError になる。起動は flask --app app）
 from extract import (
     group_columns,
     MAX_GROUP_COLUMNS,
@@ -2804,10 +2821,10 @@ def render_part(template: str, part: str, **ctx) -> str:
 # 画面は /tables の1枚だけ。ファイルを置く → 読み取り方 → 表の範囲 → 列の対応づけ → AI整形（任意）
 # → 内容の確認 → 確定してダウンロード（zip）を、同じ画面の「段」として順に開く。
 # 段の中身はこの blueprint が HTML の断片（panel）として返し、保存・実行は JSON でやりとりする。
-# 画面の移動（①→②→③）は無く、URL は変わらない（static/tables.js）。
+# 画面の移動（①→②→③）は無く、URL は変わらない（static/app.js）。
 # 範囲の決まり（利用者の判断）: 期間の置き換え・投入済みとの差分・取り消しはしない。取り込みごとに
 # その取り込みの記録だけから全 Markdown を作り、全ファイルを zip で渡す。クロス集計と名寄せ辞書は扱わない。
-# ダウンロードした取り込みのデータは、zip を送り終えたあとに消す（design.md 3.3・core.purge.purge_after_send）。
+# ダウンロードした取り込みのデータは、zip を送り終えたあとに消す（design.md 3.3・purge_after_send）。
 # 読み込み・Markdown 作成・AI整形は core.jobs のジョブ（tables.pipeline / ai.runner）で動かし、
 # 同じ画面の中に進み具合を出す。表の範囲・列の段は取り込みの控え（tables.source_cache）を通して読む。
 # ====================================================================================================
@@ -2916,18 +2933,18 @@ def _int(value, default=None):
         return default
 
 
-# 行番号の範囲「3-4」を広げる上限（見出し行の帯なので広くはならない）。static/tables.js の parseRows と同じ規則
+# 行番号の範囲「3-4」を広げる上限（見出し行の帯なので広くはならない）。static/app.js の parseRows と同じ規則
 _MAX_ROW_SPAN = 10
 
 
 def _row_no(value) -> int | None:
-    """行番号の入力（全角数字も可）。数字だけのときだけ読む（static/tables.js の parseEnd と同じ規則）。"""
+    """行番号の入力（全角数字も可）。数字だけのときだけ読む（static/app.js の parseEnd と同じ規則）。"""
     text = unicodedata.normalize("NFKC", str(value if value is not None else "")).strip()
     return int(text) if text.isascii() and text.isdigit() and int(text) > 0 else None
 
 
 def _int_list(value) -> list[int]:
-    """見出し行の入力（「1,2」「1、2」「1 2」「１，２」「1-2」）。static/tables.js の parseRows と同じ規則で読む。"""
+    """見出し行の入力（「1,2」「1、2」「1 2」「１，２」「1-2」）。static/app.js の parseRows と同じ規則で読む。"""
     if isinstance(value, (list, tuple)):
         items = [str(x) for x in value]
     else:
@@ -2969,10 +2986,23 @@ def _processing(imp: dict) -> bool:
     return imp.get("status") in ("reading", "confirming") or _ai_running(imp["id"])
 
 
+def _busy_error(imp: dict):
+    """設定・データを変えられないとき（処理中・AIの試し実行中）の断り。変えてよければ None。
+
+    試し実行を見ていなかったころは、断り書きで「保存できません」と言いながら保存が通り、
+    行を入れ替えたあとに試し実行の結果が書き戻っていた（2026-09-26 の総ざらいで実測）。
+    """
+    if _processing(imp):
+        return _json_error(BUSY_MESSAGE, 409)
+    if _trial_running(imp["id"]):
+        return _json_error(TRIAL_BUSY_MESSAGE, 409)
+    return None
+
+
 # ---- 1画面のやりとり（段の URL と、段の中身） ------------------------------------------------------
 
 def _urls(import_id: int) -> dict:
-    """画面（static/tables.js）が使う URL。panel は末尾の NAME を段の名前に置き換えて使う。
+    """画面（static/app.js）が使う URL。panel は末尾の NAME を段の名前に置き換えて使う。
 
     列の対応づけ・AI整形・プレビュー・ダウンロードの URL は、それぞれの段の HTML が
     data-* 属性や <a href> で持っているので、ここには入れない。
@@ -2995,7 +3025,22 @@ def _job_info(job: dict | None, import_id: int | None = None) -> dict | None:
             "finished": bool(job.get("finished")), "message": job.get("message") or "",
             "progress": job.get("progress") or {},
             "url": url_for("tables.api_job", job_id=job["id"]),
-            "cancel_url": url_for("tables.cancel_job", import_id=import_id) if import_id else None}
+            "cancel_url": _cancel_url(job, import_id)}
+
+
+def _cancel_url(job: dict, import_id: int | None) -> str | None:
+    """そのジョブを止める口。止められないジョブでは None（画面は［中止］を出さない）。
+
+    AI整形は別の口。Markdown の下書き（table_preview）は止める口が無いので、
+    ボタンを出すと「中止できる処理がありません」と言うだけになる（2026-09-26 の総ざらいで実測）。
+    """
+    if not import_id:
+        return None
+    if job.get("kind") == "ai_format":
+        return url_for("tables.ai_control", import_id=import_id, action="cancel")
+    if job.get("kind") not in CANCELLABLE_JOBS:
+        return None
+    return url_for("tables.cancel_job", import_id=import_id)
 
 
 def _running_job(imp: dict) -> dict | None:
@@ -3098,7 +3143,7 @@ def tables_upload():
 # 画面を閉じた・隠したときに static/app.js の ragDiscard がここへ「捨てて」と送ってくる。
 # navigator.sendBeacon で届くので中身の型は text/plain（get_json(force=True) で読む）。
 # 応答は読めず、やり直しもできないので、いつでも 204 を返す（もう無い番号・ほかの人の番号・
-# 処理中のものは core.purge 側で黙って外れる）。
+# 処理中のものは 片付け（purge_session など）の側で黙って外れる）。
 
 @tables_bp.post("/discard", endpoint="discard")
 def tables_discard():
@@ -3151,8 +3196,9 @@ def _panel_source(imp: dict):
 def save_source(import_id: int):
     """読み取り方（シート・文字コード・区切り）。変えるたびに保存する。"""
     imp = _load_import(import_id)
-    if _processing(imp):
-        return _json_error(BUSY_MESSAGE, 409)
+    busy = _busy_error(imp)
+    if busy is not None:
+        return busy
     form = _tables_payload() or request.form
     src = dict(imp.get("source") or {})
     before = (src.get("sheet"), src.get("encoding"), src.get("delimiter"), src.get("errors"))
@@ -3250,8 +3296,9 @@ def layout_detect(import_id: int):
 def save_layout(import_id: int):
     """この範囲で読み込む。設定が無い・見出しが変わったときは列の対応づけへ、そうでなければ読み込みを始める。"""
     imp = _load_import(import_id)
-    if _processing(imp):
-        return _json_error(BUSY_MESSAGE, 409)
+    busy = _busy_error(imp)
+    if busy is not None:
+        return busy
     data = _tables_payload() or request.form
     header_rows = _int_list(data.get("header_rows"))
     data_end = _row_no(data.get("data_end_row"))
@@ -3440,18 +3487,30 @@ def _build_spec(payload: dict, guess, suggestions):
         md = sugg.md if sugg.md != "omit" else ("body" if type_ == "text" else "attribute")
         used.append({"index": sugg.index, "header": sugg.header, "key": sugg.key, "display": sugg.display,
                      "type": type_, "role": role, "unit": sugg.unit, "md": md,
-                     "fill_down_blank": bool(sugg.fill_down_blank)})
+                     # 「対象」の空欄を上の値で埋めるのは値の形で決まる。画面で対象に選び直した列でも
+                     # 同じにする（候補が対象だった列だけ埋めていた）
+                     "fill_down_blank": bool(sugg.fill_down_blank
+                                             or (role in ("entity", "entity_label")
+                                                 and getattr(sugg, "looks_filled_down", False)))})
     name = str(payload.get("name") or "").strip()
     header_rows = list(getattr(guess, "header_rows", None) or [1])
     spec = spec_from_suggestions(name, {"table_kind": "list", "header_rows": header_rows}, used)
+    group_errors: list[str] = []
     if payload.get("group_by") is not None:
         # ファイルの分け方。画面は列の位置（index）で送る。列のキーはここで決まるので、
         # 作った spec の列から引く（画面の段階ではキーがまだ無い列がある）
         order = [u["index"] for u in used]
-        chosen = [_int(x, -1) for x in _as_list_payload(payload.get("group_by"))]
-        spec.markdown["group_by_columns"] = [spec.columns[order.index(i)].key for i in chosen
-                                             if i in order and order.index(i) < len(spec.columns)]
-    errors = validate_spec(spec)
+        keys: list[str] = []
+        for i in (_int(x, -1) for x in _as_list_payload(payload.get("group_by"))):
+            if i in order and order.index(i) < len(spec.columns):
+                keys.append(spec.columns[order.index(i)].key)
+                continue
+            # 「使う」を外した列を分け方に選んだまま保存すると、分け方が黙って無効になっていた
+            head = next((s.header for s in suggestions if s.index == i), "")
+            group_errors.append(f"ファイルの分け方に選んだ列「{head}」は「使う」にしてください"
+                                if head else "ファイルの分け方に、この表に無い列が選ばれています")
+        spec.markdown["group_by_columns"] = keys
+    errors = group_errors + validate_spec(spec)
     if date_errors:
         # 「型を日付にしてください」は画面に直す場所が無いので、こちらの言い方に置き換える
         errors = date_errors + [e for e in errors if not e.startswith("日付の列「")]
@@ -3490,7 +3549,8 @@ def _group_note(spec) -> str:
     cols = group_columns(spec)
     if not cols:
         return "分け方: 1つのファイルにまとめています"
-    return "分け方: " + "・".join(c.display + ("（月ごと）" if c.key == spec.date_key else "") for c in cols) + " ごと"
+    parts = [c.display + ("の月" if (c.type in DATE_TYPES or c.key == spec.date_key) else "") for c in cols]
+    return "分け方: " + "・".join(parts) + "ごと"
 
 
 def _panel_columns(imp: dict):
@@ -3533,8 +3593,9 @@ def _panel_columns(imp: dict):
 @tables_bp.post("/imports/<int:import_id>/columns")
 def save_columns(import_id: int):
     imp = _load_import(import_id)
-    if _processing(imp):
-        return _json_error(BUSY_MESSAGE, 409)
+    busy = _busy_error(imp)
+    if busy is not None:
+        return busy
     try:
         guess, suggestions = _suggest(imp)
     except UploadError as exc:
@@ -3555,9 +3616,10 @@ def reread(import_id: int):
     spec = _spec_for(imp)
     if spec is None:
         return _json_error("先に列の対応づけを保存してください")
-    if _processing(imp):
-        # AI整形の実行中・一時停止中に読み込み直すと、読み込みが AI整形の後ろで待ち続ける
-        return _json_error(BUSY_MESSAGE, 409)
+    # AI整形の実行中・一時停止中に読み込み直すと、読み込みが AI整形の後ろで待ち続ける
+    busy = _busy_error(imp)
+    if busy is not None:
+        return busy
     job_id = start_read_job(import_id)
     return jsonify({"ok": True, "next": _after_read_panel(spec), "reset": ["ai", "preview", "done"],
                     "job": _job_info(get_job(job_id), import_id), "reading": True})
@@ -3582,7 +3644,11 @@ def cancel_job(import_id: int):
             and fresh["status"] in ("reading", "confirming")):
         # 待機中のまま中止されたときは本体が動かないので、ここで取り込みの状態を戻す
         update_import(import_id, status=CANCELLABLE_JOBS[job["kind"]])
-    return jsonify({"ok": True, "message": "処理を中止しました"})
+    # 止まるのは、動いている側が次に「中止の要求」を確かめたときなので、押した瞬間には止まっていない。
+    # いつでも「中止しました」と答えていたころは、止まらなかったときも中止したと言っていた
+    if after and after.get("finished"):
+        return jsonify({"ok": True, "message": "処理を中止しました"})
+    return jsonify({"ok": True, "message": "中止を要求しました（動いている処理が止まるまで少しかかります）"})
 
 
 @tables_bp.post("/imports/<int:import_id>/delete")
@@ -3615,7 +3681,9 @@ def _not_ready_reason(imp: dict, spec) -> str:
     if imp["status"] == "failed":
         return (imp.get("stats") or {}).get("error") or "表を読み込めませんでした"
     if imp["status"] == "uploaded":
-        return "先に「表の範囲」で読み込んでください"
+        # ここに来るのは列の対応づけが保存済みのとき（spec is None は上で返している）。
+        # 読み込みを中止したあとがこれなので、戻り口は④の［この対応づけで読み込む］
+        return "表を読み込んでいません（中止したか、まだ読み込んでいません）。「列の対応づけ」の［この対応づけで読み込む］を押してください"
     return ""
 
 
@@ -3670,8 +3738,10 @@ def _panel_ai(imp: dict):
         job_url=url_for("tables.api_job", job_id=ai_job["id"]) if ai_job else None,
         counts=ai.counts(imp["template_id"], "log", import_id=import_id),
         scopes=SCOPE_LABELS, item_labels=ai.STATUS_LABELS, **_ai_connection_ctx())
-    return _panel(html, note=f"経過の記録の列: {col.display if col else log_key}",
-                  job=_job_info(ai_job, import_id) if ai_job and not ai_job.get("finished") else None)
+    # AI整形のジョブは job を返さない。返すと画面側（loadPanel）が HTML を捨てて汎用の進捗箱に
+    # 差し替えてしまい、この段にある一時停止・再開・内訳・［中止］が一度も出なかった
+    # （そのうえ汎用の箱の［中止］は読み込み用の口なので AI整形は止まらなかった。2026-09-26 の実測）
+    return _panel(html, note=f"経過の記録の列: {col.display if col else log_key}")
 
 
 @tables_bp.post("/imports/<int:import_id>/ai/split-preview")
@@ -3792,6 +3862,10 @@ def ai_run(import_id: int):
 
     imp = _load_import(import_id)
     data = _tables_payload()
+    if imp["status"] == "confirmed":
+        # 「読み込みが終わってから」では理由が事実と違う（読み込みは終わっている）
+        return _json_error("確定後はAI整形を実行できません（結果が確定した Markdown に入らないため）。"
+                           "実行するときは「列の対応づけ」からもう一度読み込んでください")
     if imp["status"] != "preview":
         return _json_error("表の読み込みが終わってから実行してください")
     job = _ai_job(import_id)
@@ -4142,8 +4216,8 @@ def create_app(overrides: dict | None = None) -> Flask:
     _refuse_debugger()
     app = Flask(__name__)
     app.config.from_object(Config)
-    # クッキーは約1年もたせる（views.SESSION_LIFETIME。ヘッダーの「AI接続」の設定をブラウザごとに
-    # 「ずっと保持」するため。利用者の指示 2026-09-21）。views.current_session_id が session.permanent を立てる
+    # クッキーは約1年もたせる（SESSION_LIFETIME。ヘッダーの「AI接続」の設定をブラウザごとに
+    # 「ずっと保持」するため。利用者の指示 2026-09-21）。current_session_id が session.permanent を立てる
     app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax",
                       PERMANENT_SESSION_LIFETIME=SESSION_LIFETIME)
     if overrides:
@@ -4190,7 +4264,7 @@ def create_app(overrides: dict | None = None) -> Flask:
 
     @app.before_request
     def _refuse_cross_site_write():
-        # 他のサイトのページから、利用者のブラウザ経由で書き込ませない（views.is_cross_site_write のとおり）。
+        # 他のサイトのページから、利用者のブラウザ経由で書き込ませない（is_cross_site_write のとおり）。
         if is_cross_site_write(request):
             abort(403)
 
@@ -4288,7 +4362,7 @@ def create_app(overrides: dict | None = None) -> Flask:
 
 
 # 途中で放り出されたものを捨てる間隔（design.md 3.3）。起動時に全部捨て、動いている間は
-# core.purge.STALE_HOURS より古いものをこの間隔で捨てる（数人で使うサーバーに置きっぱなしになるため）。
+# STALE_HOURS より古いものをこの間隔で捨てる（数人で使うサーバーに置きっぱなしになるため）。
 # 捨てるまでの時間（STALE_HOURS）を短くしたときは、見回りもそれに合わせて短くする。
 # 見回りの間隔だけ延びると「2時間で捨てます」と言いながら3時間残ることになるので、上限は10分にする。
 SWEEP_INTERVAL_SECONDS = 10 * 60
@@ -4343,12 +4417,7 @@ def _cleanup_leftovers(app: Flask) -> None:
     try:
         with app.app_context():
             db = get_db()
-            known: set[str] = set()
-            for (table,) in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall():
-                columns = {row[1] for row in db.execute(f'PRAGMA table_info("{table}")')}
-                if "stored_path" in columns:
-                    known |= {row[0] for row in db.execute(f'SELECT stored_path FROM "{table}"') if row[0]}
-            removed = remove_orphan_uploads(app.config["UPLOAD_DIR"], known)
+            removed = remove_orphan_uploads(app.config["UPLOAD_DIR"], known_stored_paths(db))
             import_ids = {row[0] for row in db.execute("SELECT id FROM table_imports")}
             removed_dirs = remove_orphan_import_dirs(app.config["TABLES_DIR"], import_ids)
             # もう無い取り込みの AI整形の結果と、どこからも使われない AI の応答も消す（データを残さない）。
