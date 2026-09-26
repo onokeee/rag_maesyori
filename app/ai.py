@@ -66,6 +66,7 @@ class WhenInfo:
     estimated: bool
     note: str = ""                 # 要確認に出す説明（「原文「翌週」から推定した（基準は…）」など）
     how: str = ""                  # explicit/year_inferred/relative/inherited/base/unresolved/year_unknown/none
+    time_to: str | None = None     # 範囲の終わりの時刻（「9/25 22:00〜9/26 6:00」の 6:00）
 
 
 @dataclass
@@ -231,11 +232,17 @@ _RANGE_RE = re.compile(r"\s*[〜~]\s*(?:(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})|(\
 # 残すと本文の先頭が「00 …」になり、記入者も拾えなかった（2026-09-26 の本番の指摘）。
 # 出す時刻は「時:分」でそろえる（md のほかの日時表示と同じ形）。
 # 時差は秒があるときだけ受ける（「10:30-11:00」の範囲を時差と取り違えないため）
-_SECONDS = r"(?::\d{2}(?:\.\d{1,6})?(?:Z|[+\-]\d{2}:?\d{2}(?![:\d]))?)?"
+# 「:秒（.小数）＋時差」か、秒なしの「Z・+09:00」のどちらか。
+# マイナスの時差は秒があるときだけ受ける（「10:30-11:00」の範囲を時差と取り違えないため）
+_SECONDS = (r"(?::\d{2}(?:\.\d{1,9})?(?:Z|[+\-]\d{2}:?\d{2}(?![:\d]))?"
+            r"|Z|\+\d{2}:?\d{2}(?![:\d]))?")
+# AM/PM は大文字・小文字のどちらでも、時刻の前でも後ろでも受ける（「PM1:30」「1:30pm」）。
+# 後置は最後の (?P<post>…) で拾う（先頭の群番号を変えないように末尾に置く）
 _TIME_RE = re.compile(
-    r"(?:(AM|PM|午前|午後)\s*)?"
+    r"(?:((?i:AM|PM)|午前|午後)\s*)?"
     r"(?:(\d{1,2}):(\d{2})" + _SECONDS + r"(?!\d)|(\d{1,2})時(?!間)(?:(半)|(\d{1,2})分)?(?:\d{1,2}秒)?)"
     r"(?:\s*[〜~\-]\s*(?:\d{1,2}:\d{2}" + _SECONDS + r"(?!\d)|\d{1,2}時(?!間)(?:半|\d{1,2}分)?(?:\d{1,2}秒)?))?"
+    r"(?:\s*(?P<post>(?i:AM|PM)))?"
 )
 _SHIFT_RE = re.compile(
     r"(夜勤|日勤|[123一二三]直|午前中|午前|午後|朝一|昼過ぎ|夕方|深夜|定時後|朝|昼|夜)(?=[\s:)\]】、。,]|$)"
@@ -258,6 +265,7 @@ class HeadWhen:
     full: bool = False
     to: tuple[int | None, int, int] | None = None
     time: str | None = None
+    time_to: str | None = None   # 範囲の終わりの時刻（「22:00〜6:00」の 6:00）
     shift: str | None = None
     relative: str | None = None
     rel_days: int | None = None
@@ -306,7 +314,7 @@ def _match_date(sh: str, p: int, line_start: bool):
 
 
 def _format_time(m: re.Match) -> str | None:
-    ampm = m[1]
+    ampm = (m[1] or m.groupdict().get("post") or "").upper()
     if m[2] is not None:
         h, mi = int(m[2]), int(m[3])
     else:
@@ -342,21 +350,14 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
         if got:
             w.year, w.month, w.day, w.full, p = got
             found = True
+            if p < end and view[p] == "日" and p + 1 < end and view[p + 1].isdigit():
+                # 「2026年9月25日10時30分」。日付の正規表現は末尾の「日」を諦めて止まるので、ここで飛ばす
+                # （「9/25日勤」のように後ろが数字でないときは勤務帯として読ませるため触らない）
+                p += 1
             m = _WEEKDAY_RE.match(view, p)
             if m:
                 p = m.end()
-            m = _RANGE_RE.match(view, p)
-            if m:
-                if m[1]:
-                    w.to = (int(m[1]), int(m[2]), int(m[3]))
-                elif m[4]:
-                    w.to = (None, int(m[4]), int(m[5]))
-                else:
-                    w.to = (None, int(m[6]), int(m[7]))
-                if _valid(w.to[0] or 2024, w.to[1], w.to[2]):
-                    p = m.end()
-                else:
-                    w.to = None
+            p = _take_range(w, view, p)
     for _ in range(4):
         q = _skip_ws(view, p) if found else p
         if found and w.time is None and q < end and view[q] in "Tt" \
@@ -392,8 +393,35 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
         break
     if not found:
         return None
+    if w.to is None:
+        # 「9/25 22:00〜9/26 6:00」のように、時刻のあとに範囲の終わり（日付＋時刻）が来る書き方。
+        # ここで読まないと「〜9/26 6:00」が本文の先頭に残る
+        q = _take_range(w, view, p)
+        if q != p:
+            p = q
+            m = _TIME_RE.match(view, _skip_ws(view, q))
+            end_time = _format_time(m) if m else None
+            if end_time is not None:
+                w.time_to, p = end_time, m.end()
     w.end = p
     return w
+
+
+def _take_range(w: HeadWhen, view: str, p: int) -> int:
+    """「〜9/26」「〜2026/09/26」のような範囲の終わりの日付を読む。読めなければ位置は変えない。"""
+    m = _RANGE_RE.match(view, p)
+    if not m:
+        return p
+    if m[1]:
+        to = (int(m[1]), int(m[2]), int(m[3]))
+    elif m[4]:
+        to = (None, int(m[4]), int(m[5]))
+    else:
+        to = (None, int(m[6]), int(m[7]))
+    if not _valid(to[0] or 2024, to[1], to[2]):
+        return p
+    w.to = to
+    return m.end()
 
 
 def head_kind(w: HeadWhen | None) -> str | None:
@@ -547,7 +575,8 @@ def resolve_whens(
                 d_to = _mk(y_to, h.to[1], h.to[2])
                 if d_to and d_to < d and not h.to[0]:
                     d_to = _mk(y_to + 1, h.to[1], h.to[2])
-            resolved[i] = WhenInfo(text, d.isoformat(), h.time, d_to.isoformat() if d_to else None, h.shift, False, "", how)
+            resolved[i] = WhenInfo(text, d.isoformat(), h.time, d_to.isoformat() if d_to else None,
+                                   h.shift, False, "", how, h.time_to)
             prev = d
         elif h.relative:
             if h.relative in UNRESOLVABLE:
@@ -1229,10 +1258,14 @@ def format_when(when: WhenInfo | None) -> str:
             return f"{when.text}（年不明）"
         return f"日付不明（原文「{when.text}」）" if when.text else "日付不明"
     s = when.date
-    if when.date_to and when.date_to != when.date:
-        s += f"〜{when.date_to}"
-    if when.time:
-        s += f" {when.time}"
+    if when.time and when.time_to:
+        # 終わりの時刻まで書かれた範囲（「9/25 22:00〜9/26 6:00」）は、日付と時刻を組にして出す
+        s = f"{s} {when.time}〜{when.date_to or when.date} {when.time_to}"
+    else:
+        if when.date_to and when.date_to != when.date:
+            s += f"〜{when.date_to}"
+        if when.time:
+            s += f" {when.time}"
     if when.shift:
         s += f" {when.shift}"
     if when.estimated:
@@ -1580,7 +1613,13 @@ def _split_inline(clean: str, sh: str, pc: _Piece, not_date_res) -> list[_Piece]
                 j = i
         if j is not None and j > pc.start and (not cuts or j > cuts[-1]):
             line_head = clean.rfind("\n", pc.start, j)
-            if sh[max(pc.start, line_head + 1):j].strip():
+            line_s = max(pc.start, line_head + 1)
+            line_e = clean.find("\n", line_s)
+            line_e = pc.end if line_e < 0 else min(line_e, pc.end)
+            # 行頭の日時の途中では切らない（「2026年　9月　25日」のように日付の中に全角空白がある書き方）
+            if j < _parse_head(clean, sh, line_s, line_e, True, not_date_res).pos:
+                continue
+            if sh[line_s:j].strip():
                 cuts.append(j)
     if not cuts:
         return [pc]
