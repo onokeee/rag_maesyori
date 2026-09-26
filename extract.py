@@ -4167,7 +4167,7 @@ def _split_note(records: list, scope: str) -> str:
         return ""
     return (f"。{scope}の記録は1つのファイルに収まらないので、いくつかのファイルに分けます"
             "（1つが大きすぎると、LightRAG への取り込みの失敗も待ち時間もまとめて1回で来るためです）。"
-            "分けた各ファイルには「何分の何か・受け持つ範囲・前後のファイル名」を書くので、"
+            "分けた各ファイルには「何分の何か・最初と最後の記録・前後のファイル名」を書くので、"
             "どれも同じ表の記録だと分かります")
 
 
@@ -5971,7 +5971,8 @@ def _record_file_header(spec: TableSpec, group: list[dict], pairs: list, part: "
                 f"（この分は{part.index}/{part.total}）。どの分も同じ「{name}」の記録です")
     span = _record_span_text(spec, group)
     if span:
-        body.append(f"- このファイルの範囲: {span}")
+        # 識別番号は並べ替えの対象ではないので「範囲」と言わない（最初と最後の記録を書くだけ）
+        body.append(f"- このファイルの最初と最後: {span}")
     body.append(f"- 前のファイル: {part.prev or 'なし（これが最初）'}")
     body.append(f"- 次のファイル: {part.next or 'なし（これが最後）'}")
     return _Block(title, body)

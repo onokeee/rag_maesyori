@@ -918,15 +918,6 @@ def nfkc_keep_enclosed(text: str) -> str:
                    for part in _ENCLOSED.split(text))
 
 
-def nfkc_value(text) -> str:
-    """値の正規化。NFKC（囲み文字は残す）＋空白の畳み込み（改行は保持、行末の空白と前後の空行は除く）。"""
-    if text is None:
-        return ""
-    s = nfkc_keep_enclosed(str(text)).replace("\r\n", "\n").replace("\r", "\n")
-    lines = [_SPACES.sub(" ", line).strip() for line in s.split("\n")]
-    return "\n".join(lines).strip("\n")
-
-
 def escape_md_line(line: str) -> str:
     """行頭の見出し・箇条書き・引用・番号付きリスト、区切り線、コードフェンスとして解釈されないようにする。"""
     body = line.lstrip(" \t")
