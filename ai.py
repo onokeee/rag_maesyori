@@ -65,7 +65,7 @@ class WhenInfo:
     shift: str | None              # 夜勤/日勤/2直/夕方 など
     estimated: bool
     note: str = ""                 # 要確認に出す説明（「原文「翌週」から推定した（基準は…）」など）
-    how: str = ""                  # explicit/relative/inherited/inherited_next_day/base/unresolved/none
+    how: str = ""                  # explicit（年つきの日付）/ base（発生日を仮に使った）/ none（日付なし）
     time_to: str | None = None     # 範囲の終わりの時刻（「9/25 22:00〜9/26 6:00」の 6:00）
 
 
@@ -89,15 +89,14 @@ class Segment:
     identifiers: list[str] = field(default_factory=list)
     quantities: list[str] = field(default_factory=list)
     plans: list[str] = field(default_factory=list)
-    marks: list[str] = field(default_factory=list)   # email/header_cell/bullet/checklist/note/sentence_split/reference/correction
-    label: str = ""                # 見出し型セルの見出し語（【現象】→「現象」）
+    marks: list[str] = field(default_factory=list)   # bullet/checklist/reference/correction
 
 
 @dataclass
 class LogParse:
     segments: list[Segment]
     order: str                     # asc/desc/unknown
-    kind: str                      # log/header_cell/single/empty
+    kind: str                      # log（2件以上）/ single（1件）/ empty
     warnings: list[str] = field(default_factory=list)
     text: str = ""                 # 分割に使ったテキスト（_x000D_ と CRLF を除いたもの。start/end はこの位置）
 
@@ -107,27 +106,16 @@ class LogParse:
 
 @dataclass
 class SplitOptions:
-    order: str = "auto"                    # auto/asc/desc
-    sentence_split_min_chars: int = 120    # 目印のない長いセグメントを「。」で分ける長さ
-    header_cells: str = "detect"           # detect/off
-    extra_anchors: list[str] = field(default_factory=list)       # 行頭の区切りを正規表現で追加
+    """「経過の記録」の分け方の設定。分け目は行頭の年つき日付だけなので、残るのはこの2つ。"""
+    order: str = "auto"                    # auto/asc/desc（記入順。auto は日付の並びから判定）
     not_date_patterns: list[str] = field(default_factory=lambda: list(DEFAULT_NOT_DATE_PATTERNS))
-    time_only_lines: str = "separate"      # separate（別セグメント、日付は直前から）/ join（直前につなぐ）
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "SplitOptions":
         d = d or {}
         opts = cls()
-        for key in ("order", "header_cells", "time_only_lines"):
-            if d.get(key):
-                setattr(opts, key, str(d[key]))
-        split = d.get("sentence_split")
-        if isinstance(split, dict) and split.get("min_chars"):
-            opts.sentence_split_min_chars = int(split["min_chars"])
-        if d.get("sentence_split_min_chars"):
-            opts.sentence_split_min_chars = int(d["sentence_split_min_chars"])
-        if d.get("extra_anchors"):
-            opts.extra_anchors = [str(x) for x in d["extra_anchors"]]
+        if d.get("order"):
+            opts.order = str(d["order"])
         if d.get("not_date_patterns") is not None:
             opts.not_date_patterns = [str(x) for x in d["not_date_patterns"]]
         return opts
@@ -252,11 +240,6 @@ _TIME_RE = re.compile(
 _SHIFT_RE = re.compile(
     r"(夜勤|日勤|[123一二三]直|午前中|午前|午後|朝一|昼過ぎ|夕方|深夜|定時後|朝|昼|夜)(?=[\s:)\]】、。,]|$)"
 )
-_REL_RE = re.compile(
-    r"(同日|翌々日|翌日|翌朝|翌週|週明け|後日|連休明け|前日|昨日|本日|今日|今朝|明日|(\d{1,2})日後|(\d{1,2})週間後)"
-    r"(?![のにはもをがで])"
-)
-UNRESOLVABLE = {"昨日", "本日", "今日", "今朝", "明日", "後日", "連休明け", "前日"}
 
 
 @dataclass
@@ -271,9 +254,6 @@ class HeadWhen:
     time: str | None = None
     time_to: str | None = None   # 範囲の終わりの時刻（「22:00〜6:00」の 6:00）
     shift: str | None = None
-    relative: str | None = None
-    rel_days: int | None = None
-    rel_weeks: int | None = None
 
     @property
     def has_date(self) -> bool:
@@ -333,10 +313,11 @@ def _skip_ws(sh: str, p: int) -> int:
 USER_PATTERN_WINDOW = 200
 
 
-def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=(), end: int | None = None) -> HeadWhen | None:
-    """影テキストの pos から始まる日時表現を読む。何もなければ None。
+def parse_when_at(sh: str, pos: int, *, not_date_res=(), end: int | None = None) -> HeadWhen | None:
+    """影テキストの pos から始まる日時表現を読む。読むのは**年つきの日付**だけ。
 
-    line_start は箇条書きの目印を見るときの区別用（日付の読み方は行頭かどうかで変えない）。
+    時刻・勤務帯・範囲は、その日付の後ろに続くときだけ一緒に読む（利用者の指示 2026-09-26）。
+    「10:30」「翌日」「夜勤」のように日付の無い表現だけのときは None を返す（本文として残す）。
     """
     end = len(sh) if end is None else end
     view = sh[:end]
@@ -356,9 +337,11 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
             if m:
                 p = m.end()
             p = _take_range(w, view, p)
-    for _ in range(4):
-        q = _skip_ws(view, p) if found else p
-        if found and w.time is None and q < end and view[q] in "Tt" \
+    if not found:
+        return None      # 年つきの日付が無ければ日時として読まない
+    for _ in range(2):
+        q = _skip_ws(view, p)
+        if w.time is None and q < end and view[q] in "Tt" \
                 and q + 1 < end and view[q + 1].isdigit():
             q += 1   # ISO 形式の区切り（2026-09-25T10:30:00）。数字が続くときだけ飛ばす
         m = _TIME_RE.match(view, q) if w.time is None else None
@@ -372,29 +355,13 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
                 m2 = _TIME_RE.match(m.group("to"))
                 w.time_to = _format_time(m2) if m2 else None
             p = m.end()
-            found = True
             continue
         m = _SHIFT_RE.match(view, q) if w.shift is None else None
         if m:
             w.shift = m[1]
             p = m.end()
-            found = True
-            continue
-        m = _REL_RE.match(view, q) if (not w.has_date and w.relative is None and w.time is None) else None
-        if m:
-            w.relative = m[1]
-            if m[2]:
-                w.rel_days = int(m[2])
-            if m[3]:
-                w.rel_weeks = int(m[3])
-            if w.relative == "翌朝":
-                w.shift = w.shift or "朝"
-            p = m.end()
-            found = True
             continue
         break
-    if not found:
-        return None
     if w.to is None:
         # 「9/25 22:00〜9/26 6:00」のように、時刻のあとに範囲の終わり（日付＋時刻）が来る書き方。
         # ここで読まないと「〜9/26 6:00」が本文の先頭に残る
@@ -426,18 +393,6 @@ def _take_range(w: HeadWhen, view: str, p: int) -> int:
     return m.end()
 
 
-def head_kind(w: HeadWhen | None) -> str | None:
-    if w is None:
-        return None
-    if w.has_date:
-        return "date"
-    if w.relative:
-        return "relative"
-    if w.time:
-        return "time"
-    return "shift"
-
-
 # ---- 年と記入順の決定 ----
 
 def _mk(y: int, m: int, d: int) -> date | None:
@@ -462,9 +417,6 @@ def detect_order(heads: list[HeadWhen | None]) -> tuple[str, bool]:
         fwd += s > 0
         bwd += s < 0
     if fwd == 0 and bwd == 0:
-        # 明示の日付で決まらなくても「翌日」「3日後」などが続けば古い順
-        if len(dated) >= 1 and any(h is not None and h.relative and h.relative not in UNRESOLVABLE for h in heads):
-            return "asc", False
         return "unknown", False
     return ("desc" if bwd > fwd else "asc"), (fwd > 0 and bwd > 0)
 
@@ -477,56 +429,18 @@ def first_full_date(heads: list[HeadWhen | None]) -> date | None:
     return None
 
 
-def _relative_range(h: HeadWhen, ref: date) -> tuple[date, date | None, bool]:
-    """相対表現を (開始日, 終了日, 推定か) にする。"""
-    r = h.relative
-    if r == "同日":
-        return ref, None, False
-    if r in ("翌日", "翌朝"):
-        return ref + timedelta(days=1), None, True
-    if r == "翌々日":
-        return ref + timedelta(days=2), None, True
-    if h.rel_days is not None:
-        return ref + timedelta(days=h.rel_days), None, True
-    if h.rel_weeks is not None:
-        return ref + timedelta(weeks=h.rel_weeks), None, True
-    if r == "翌週":
-        monday = ref + timedelta(days=7 - ref.weekday())
-        return monday, monday + timedelta(days=6), True
-    if r == "週明け":
-        return ref + timedelta(days=7 - ref.weekday()), None, True
-    return ref, None, True
-
-
-def _inherited(text: str, time: str | None, shift: str | None, last: WhenInfo) -> WhenInfo:
-    """日付の書かれていない段落に直前の記録の日付を継がせる。夜をまたぐ時刻だけは翌日とみる。"""
-    if (time and last.time and last.date and time < last.time
-            and last.time >= "18:00" and time <= "08:00"):
-        # 夜勤の書き方（「23:10 部品を交換」→「1:25 温度が安定」）。同じ日付のままだと md が
-        # 「23:10 のあとに 01:25」というありえない並びになる（2026-09-26 の総ざらいで実測）
-        d = (date.fromisoformat(last.date) + timedelta(days=1)).isoformat()
-        return WhenInfo(text, d, time, None, shift, True,
-                        f"日付の記載がなく、直前の記録（{last.date} {last.time}）より早い時刻なので"
-                        f"日をまたいだ翌日（{d}）と推定した", "inherited_next_day")
-    return WhenInfo(text, last.date, time, last.date_to, shift, last.estimated,
-                    "日付の記載がなく、直前の記録の日付を使った", "inherited")
-
-
 def resolve_whens(
     heads: list[HeadWhen | None],
     texts: list[str],
     base_date: date | None,
     order_option: str = "auto",
-    skip: set[int] | None = None,
 ) -> tuple[list[WhenInfo | None], str, list[str]]:
     """セグメントごとの先頭日時から WhenInfo を決める。
 
-    heads/texts はセグメントの原文順。skip の位置（見出し型など）は None のまま返す。
-    戻り値: (WhenInfo のリスト, 記入順, 警告)
+    heads/texts はセグメントの原文順。戻り値: (WhenInfo のリスト, 記入順, 警告)
     """
-    skip = skip or set()
     n = len(heads)
-    active = [h if i not in skip else None for i, h in enumerate(heads)]
+    active = list(heads)
     warnings: list[str] = []
     detected, mixed = detect_order(active)
     order = order_option if order_option in ("asc", "desc") else detected
@@ -535,66 +449,31 @@ def resolve_whens(
     base = base_date or first_full_date(active)
 
     resolved: dict[int, WhenInfo] = {}
-    chron = list(range(n))
-    if order == "desc":
-        chron.reverse()
-    prev: date | None = None
-    for i in chron:
+    for i in range(n):
         h = active[i]
-        if h is None:
+        if h is None or not h.has_date:
             continue
-        text = texts[i]
-        if h.has_date:
-            d = date(h.year, h.month, h.day)
-            d_to = None
-            if h.to:
-                y_to = h.to[0] or d.year
-                d_to = _mk(y_to, h.to[1], h.to[2])
-                if d_to and d_to < d and not h.to[0]:
-                    d_to = _mk(y_to + 1, h.to[1], h.to[2])
-            resolved[i] = WhenInfo(text, d.isoformat(), h.time, d_to.isoformat() if d_to else None,
-                                   h.shift, False, "", "explicit", h.time_to)
-            prev = d
-        elif h.relative:
-            if h.relative in UNRESOLVABLE:
-                resolved[i] = WhenInfo(text, None, h.time, None, h.shift, True,
-                                       f"原文「{h.relative}」は基準の日が分からないため日付にできない", "unresolved")
-                continue
-            ref = prev or base
-            if ref is None:
-                resolved[i] = WhenInfo(text, None, h.time, None, h.shift, True,
-                                       f"原文「{h.relative}」の基準になる日付がない", "unresolved")
-                continue
-            d, d_to, est = _relative_range(h, ref)
-            basis = "直前の記録" if prev else "発生日"
-            note = f"原文「{h.relative}」から推定した（基準は{basis}の{ref.isoformat()}）" if est else ""
-            resolved[i] = WhenInfo(text, d.isoformat(), h.time, d_to.isoformat() if d_to else None, h.shift, est, note, "relative")
-            prev = d
+        d = date(h.year, h.month, h.day)
+        d_to = None
+        if h.to:
+            y_to = h.to[0] or d.year
+            d_to = _mk(y_to, h.to[1], h.to[2])
+            if d_to and d_to < d and not h.to[0]:
+                d_to = _mk(y_to + 1, h.to[1], h.to[2])
+        resolved[i] = WhenInfo(texts[i], d.isoformat(), h.time, d_to.isoformat() if d_to else None,
+                               h.shift, False, "", "explicit", h.time_to)
 
     out: list[WhenInfo | None] = []
-    last: WhenInfo | None = None
     for i in range(n):
-        if i in skip:
-            out.append(None)
-            continue
         info = resolved.get(i)
         if info is None:
-            h = heads[i]
-            time = h.time if h else None
-            shift = h.shift if h else None
-            text = texts[i] if h else ""
-            if last is not None:
-                info = _inherited(text, time, shift, last)
-            elif base is not None:
-                info = WhenInfo(text, base.isoformat(), time, None, shift, True,
+            # 日付の書かれていない段落（セルの先頭に日付より前の文があるときだけ起きる）
+            if base is not None:
+                info = WhenInfo("", base.isoformat(), None, None, None, True,
                                 f"日付の記載がなく、発生日（{base.isoformat()}）を仮に使った", "base")
             else:
-                info = WhenInfo(text, None, time, None, shift, False, "日付の記載がない", "none")
-        if info.date:
-            last = info
+                info = WhenInfo("", None, None, None, None, False, "日付の記載がない", "none")
         out.append(info)
-    if any(h is not None and h.relative in UNRESOLVABLE for h in active):
-        warnings.append("「昨日」「本日」など基準の日が分からない表現は日付にしていない")
     return out, order, warnings
 
 
@@ -1232,7 +1111,7 @@ def format_when(when: WhenInfo | None) -> str:
     if when is None:
         return "日付不明"
     if not when.date:
-        return f"日付不明（原文「{when.text}」）" if when.text else "日付不明"
+        return "日付不明"
     s = when.date
     if when.time and when.time_to:
         # 終わりの時刻まで書かれた範囲（「9/25 22:00〜9/26 6:00」）は、日付と時刻を組にして出す。
@@ -1249,14 +1128,8 @@ def format_when(when: WhenInfo | None) -> str:
     if when.shift:
         s += f" {when.shift}"
     if when.estimated:
-        rel = _relative_word(when)
-        s += f"（原文「{rel}」、推定）" if rel else "（推定）"
+        s += "（推定）"
     return s
-
-
-def _relative_word(when: WhenInfo) -> str:
-    m = re.search(r"原文「([^」]+)」", when.note or "")
-    return m.group(1) if (m and when.how == "relative") else ""
 
 
 def format_author(author: AuthorInfo | None) -> str:
@@ -1277,7 +1150,7 @@ def _one_line(text: str) -> str:
     return re.sub(r"\s*\n\s*", " ", text or "").strip()
 
 
-_INHERITED = ("inherited", "inherited_next_day", "base", "none")
+_INHERITED = ("base", "none")
 
 
 def _own_date(seg: Segment) -> bool:
@@ -1355,26 +1228,16 @@ def render_timeline(parse: LogParse, entity_label: str, types: dict[str, list[st
     """時系列の行。例: "1. 2024-04-01 10:00［連絡・初動］田中｜A社 本社改修工事: 本文"
 
     types はセグメントID→種別（AI の結果。なければ［］を付けない）。
-    見出し型セルは「状況: 入金待ち」の形（番号なし）で返す。
     """
     types = types or {}
     lines: list[str] = []
     if parse.kind == "empty":
-        return lines
-    if parse.kind == "header_cell":
-        for seg in parse.segments:
-            body = _one_line(apply_glossary(seg.body, glossary) if glossary else seg.body)
-            lines.append(f"{seg.label}: {body}" if seg.label else body)
         return lines
     for n, seg in enumerate(timeline_order(parse), start=1):
         body = seg.body or seg.raw
         if glossary:
             body = apply_glossary(body, glossary)
         body = _one_line(body)
-        if seg.label:
-            # 【現象】【原因】のような見出し語。同じセルに日付の行があると「見出し型」にならないので、
-            # ここで本文の先頭に残さないと md から消えていた（2026-09-26 の総ざらいで実測）
-            body = f"［{seg.label}］{body}"
         head = format_when(seg.when)
         seg_types = [t for t in types.get(seg.id, []) if t]
         head += f"［{'・'.join(seg_types)}］" if seg_types else " "
@@ -1391,16 +1254,15 @@ def render_timeline(parse: LogParse, entity_label: str, types: dict[str, list[st
 def review_notes(parse: LogParse) -> list[str]:
     """要確認に出す文（推定した日付・引き継いだ記入者・特定できない人物・警告）。番号は render_timeline と同じ。"""
     notes: list[str] = []
-    if parse.kind in ("empty", "header_cell"):
+    if parse.kind == "empty":
         return list(parse.warnings)
     ordered, reordered = order_blocks(parse)
     if reordered:
         notes.append("日付が前後して書かれていたので、日付の順に並べ替えた（番号は並べ替えたあとの順）")
     for n, seg in enumerate(ordered, start=1):
         w = seg.when
-        if w is not None and w.note and (w.estimated or w.how in ("unresolved", "base")):
-            if w.how != "inherited":
-                notes.append(f"{n}の日付は{w.note}。")
+        if w is not None and w.note and w.how == "base":
+            notes.append(f"{n}の日付は{w.note}。")
         a = seg.author
         if a is not None and a.note:
             if a.estimated:
@@ -1422,42 +1284,25 @@ def review_notes(parse: LogParse) -> list[str]:
 #
 # 区切り: 行頭の日付・時刻・相対日・勤務帯、【】、・などの箇条書き、①、「／」「→」直後の日付、
 # 全角空白の後の「10:15：」。※行・→行・目印のない行は直前につなぐ。メール転記は1つの塊にする。
-# 目印のない長いセグメントは「。」でも分ける。【現象】【原因】だけのセルは見出し型（header_cell）。
+# 分けるのは「行頭（飾りを除いた先頭）に年つきの日付がある行」だけ（利用者の指示 2026-09-26）。
 # ====================================================================================================
 
 _BULLETS = "・●■◆◇□○▪►*"
 _CIRCLED_RE = re.compile(r"[\u2460-\u2473\u2776-\u277f]|\(?\d{1,2}\)(?!\d)|\d{1,2}\.(?=[ \t])")
-_EMAIL_START_RE = re.compile(
-    r"\s*(?:-{3,}\s*(?:Original Message|元のメッセージ|Forwarded message)|(?:From|差出人)\s*:|>)", re.IGNORECASE
-)
-_SENTENCE_RE = re.compile(r"[^。]*。|[^。]+$")
 _REFERENCE_RE = re.compile(r"同上|と同じ|別紙|参照")
 _CORRECTION_RE = re.compile(r"訂正|撤回|ではなく")
-_HEADER_LABEL_MAX = 10
 # 先頭の日時を囲む括弧（影テキストは1文字ずつ NFKC をかけた写しなので、（）は () になっている）。
 # 本番のデータでは「(2026/09/25 10:30:00) 田中：…」のように丸括弧で囲む書き方が多い
 _HEAD_BRACKETS = {"【": "】", "[": "]", "(": ")", "<": ">"}
-_LABEL_BRACKETS = "【["
-_MIN_SENTENCE = 15
 
 
 @dataclass
 class _Head:
+    """行の先頭の読み取り結果（飾りを飛ばしたあとの日時と、本文の開始位置）。"""
     pos: int                       # 本文（記入者判定）の開始位置
     when: HeadWhen | None = None
     when_text: str = ""
-    label: str = ""
     marks: list[str] = field(default_factory=list)
-
-    @property
-    def kind(self) -> str | None:
-        if self.when is not None:
-            return head_kind(self.when)
-        if self.label:
-            return "label"
-        if "bullet" in self.marks or "checklist" in self.marks:
-            return "bullet"
-        return None
 
 
 @dataclass
@@ -1477,20 +1322,20 @@ def _skip_ws_until(sh: str, p: int, end: int) -> int:
 _HEAD_MEMO = threading.local()
 
 
-def _parse_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_date_res) -> _Head:
+def _parse_head(clean: str, sh: str, start: int, end: int, not_date_res) -> _Head:
     """セグメント先頭の目印・日時を読む。
 
-    1つのセルの処理（parse_log）の中で、同じ行を見出し型の判定・区切りの判定・分割後の先頭の読み取りで
+    1つのセルの処理（parse_log）の中で、同じ行を区切りの判定と分割後の先頭の読み取りで
     何度も読むので、同じセル（同じ clean・sh・not_date_res の組）の間だけ結果を覚える。戻り値は変更しないこと。
     """
     memo = getattr(_HEAD_MEMO, "value", None)
     if memo is None or memo[0] is not clean or memo[1] is not sh or memo[2] is not not_date_res:
         memo = (clean, sh, not_date_res, {})
         _HEAD_MEMO.value = memo
-    k = (start, end, line_start)
+    k = (start, end)
     head = memo[3].get(k)
     if head is None:
-        head = memo[3][k] = _read_head(clean, sh, start, end, line_start, not_date_res)
+        head = memo[3][k] = _read_head(clean, sh, start, end, not_date_res)
     return head
 
 
@@ -1506,14 +1351,14 @@ def _bracket_when(sh: str, p: int, end: int, not_date_res, limit: int = 32):
     close = sh.find(close_ch, p + 1, stop)
     while close > 0:
         inner_s = _skip_ws_until(sh, p + 1, close)
-        w = parse_when_at(sh, inner_s, line_start=True, not_date_res=not_date_res, end=close)
+        w = parse_when_at(sh, inner_s, not_date_res=not_date_res, end=close)
         if w is not None and _skip_ws_until(sh, w.end, close) == close:
             return w, inner_s, close
         close = sh.find(close_ch, close + 1, stop)
     return None, 0, -1
 
 
-def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_date_res) -> _Head:
+def _read_head(clean: str, sh: str, start: int, end: int, not_date_res) -> _Head:
     p = _skip_ws_until(sh, start, end)
     head = _Head(pos=p)
     if p < end and (sh[p] in _BULLETS or (sh[p] == "-" and p + 1 < end and sh[p + 1] in " \t")):
@@ -1529,81 +1374,12 @@ def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_
             head.when, head.when_text = w, clean[inner_s:w.end].strip()
             head.pos = _skip_ws_until(sh, close + 1, end)
             return head
-        close = sh.find(_HEAD_BRACKETS[sh[p]], p + 1, min(end, p + 32))
-        if close > 0:
-            inner_s = _skip_ws_until(sh, p + 1, close)
-            inner = sh[inner_s:close].strip()
-            # 見出し（ラベル）として扱うのは 【】 [] だけ。丸括弧は「(月)」「(休日)」「(推定)」のような
-            # 但し書きにも使うので、中が日時のときだけ目印にする
-            if sh[p] in _LABEL_BRACKETS and inner and len(inner) <= _HEADER_LABEL_MAX \
-                    and not re.search(r"\d", inner):
-                head.label = clean[inner_s:close].strip()
-                head.pos = _skip_ws_until(sh, close + 1, end)
-                return head
-    w = parse_when_at(sh, p, line_start=line_start and not head.marks, not_date_res=not_date_res, end=end)
+    w = parse_when_at(sh, p, not_date_res=not_date_res, end=end)
     if w is not None:
         head.when, head.when_text = w, clean[w.start:w.end].strip()
         p = w.end
     head.pos = p
     return head
-
-
-def _tail_date(clean: str, sh: str, s: int, e: int, not_date_res):
-    """行末に書いた日時（「受付した　9/1」）。戻り値: (日時, 開始位置)。無ければ (None, -1)。
-
-    本文の後ろに空白を置いて日時を書く書き方。日時のうしろに本文が無いことで見分ける。
-    行頭ではないので「1225」「10.2」のような数字だけの書き方は日付にしない（parse_when_at の決まり）。
-    """
-    end = e
-    while end > s and sh[end - 1] in " \t":
-        end -= 1
-    limit = max(s + 1, end - 40)
-    p = end - 1
-    while p >= limit:
-        if sh[p].isdigit() and sh[p - 1] in " \t":
-            w = parse_when_at(sh, p, line_start=False, not_date_res=not_date_res, end=end)
-            if w is not None and w.has_date and _skip_ws_until(sh, w.end, end) == end and sh[s:p].strip():
-                return w, p
-        p -= 1
-    return None, -1
-
-
-def _line_anchor(clean: str, sh: str, s: int, e: int, options: SplitOptions, not_date_res, extra_res) -> str | None:
-    p = _skip_ws_until(sh, s, e)
-    if p >= e:
-        return None
-    if sh[p] == "※":
-        return "note"
-    if any(r.match(sh, p, min(e, p + USER_PATTERN_WINDOW)) for r in extra_res):
-        return "extra"
-    head = _parse_head(clean, sh, s, e, True, not_date_res)
-    kind = head.kind
-    if kind == "relative":
-        # 相対日は、後ろが空白・時刻・区切り・漢字/カタカナのときだけ区切りにする
-        q = head.when.end
-        if q < e and sh[q] in "のにはもをがでと":
-            return None
-    return kind
-
-
-def _is_email_end(clean: str, sh: str, s: int, e: int, not_date_res) -> bool:
-    """メール転記の塊を終える行（行頭に年月日＋空白/「:」がある行）。"""
-    p = _skip_ws_until(sh, s, e)
-    w = parse_when_at(sh, p, line_start=True, not_date_res=not_date_res, end=e)
-    return w is not None and w.has_date and (w.end >= e or sh[w.end] in " \t:")
-
-
-def _detect_header_cell(clean: str, sh: str, lines, not_date_res) -> bool:
-    labels = dated = 0
-    for s, e in lines:
-        if not sh[s:e].strip():
-            continue
-        head = _parse_head(clean, sh, s, e, True, not_date_res)
-        if head.label:
-            labels += 1
-        elif head.when is not None:
-            dated += 1
-    return labels >= 2 and dated == 0
 
 
 def _compile_all(patterns) -> list[re.Pattern]:
@@ -1626,167 +1402,25 @@ def _lines(text: str) -> list[tuple[int, int]]:
     return out
 
 
-def _split_pieces(clean: str, sh: str, options: SplitOptions, not_date_res, header_mode: bool) -> list[_Piece]:
-    extra_res = _compile_all(options.extra_anchors)
-    # 行末に日付を書くセルか（「受付した　9/1」）。1行だけなら書き方とは言えないので2行以上で見る
-    tail_mode = not header_mode and sum(
-        1 for s, e in _lines(clean)
-        if sh[s:e].strip() and _tail_date(clean, sh, s, e, not_date_res)[0] is not None) >= 2
+def _split_pieces(clean: str, sh: str, not_date_res) -> list[_Piece]:
+    """セルを段落に分ける。分けるのは**行頭に年つきの日付がある行**だけ（利用者の指示 2026-09-26）。
+
+    行頭の飾り（「・」「①」と【 】などの括弧）は飾りとみなし、そのうしろの日付を行頭の日付として読む。
+    それ以外（時刻だけの行・「翌日」・勤務帯・見出し語・空行・長い段落・文章の中の日時・行末の日付）では
+    一切分けない。分けない行は、直前の段落の続きとして同じ段落に入れる。
+    """
     pieces: list[_Piece] = []
     cur: _Piece | None = None
-    in_email = False
-    blank = False
     for s, e in _lines(clean):
         if not sh[s:e].strip():
-            blank = not in_email
-            continue
-        if in_email:
-            if not _is_email_end(clean, sh, s, e, not_date_res):
-                cur.end = e
-                continue
-            in_email = False
-        if _EMAIL_START_RE.match(sh[s:e]):
-            cur = _Piece(s, e, True, ["email"])
-            pieces.append(cur)
-            in_email, blank = True, False
-            continue
-        if header_mode:
-            head = _parse_head(clean, sh, s, e, True, not_date_res)
-            anchor = "label" if head.label else None
-        else:
-            anchor = _line_anchor(clean, sh, s, e, options, not_date_res, extra_res)
-            if anchor is None and tail_mode and _tail_date(clean, sh, s, e, not_date_res)[0] is not None:
-                anchor = "tail_date"
-        new = cur is None or (anchor not in (None, "note")) or (blank and anchor != "note")
-        if anchor == "time" and options.time_only_lines == "join" and cur is not None and not blank:
-            new = False
-        if new:
+            continue            # 空行では分けない（前の段落の続き）
+        head = _parse_head(clean, sh, s, e, not_date_res)
+        if cur is None or (head.when is not None and head.when.has_date):
             cur = _Piece(s, e, True, [])
             pieces.append(cur)
         else:
             cur.end = e
-        if anchor == "note" and "note" not in cur.marks:
-            cur.marks.append("note")
-        if anchor == "tail_date" and "tail_date" not in cur.marks:
-            cur.marks.append("tail_date")
-        blank = False
-    if header_mode:
-        for pc in pieces:
-            if "email" not in pc.marks:
-                pc.marks.append("header_cell")
-        return pieces
-    out: list[_Piece] = []
-    for pc in pieces:
-        if "email" in pc.marks:
-            out.append(pc)
-            continue
-        out.extend(_split_inline(clean, sh, pc, not_date_res))
-    return _split_sentences(clean, sh, out, options, not_date_res)
-
-
-# 文章の中の「(2026/03/05 09:00)」を出来事の日時とみなすかどうかの決まり。
-# 範囲の書き方（「(…9:00)から(…12:00)まで」）では切らない（1件の出来事を2件にしないため）
-_STAMP_BEFORE_NG = ("から", "より", "〜", "~", "-", "―")
-_STAMP_AFTER_NG = ("まで", "迄")
-
-
-def _inline_stamp(sh: str, p: int, end: int, floor: int, not_date_res):
-    """本文の中の「(2026/03/05 09:00)」のような、括弧で囲んだ日時の印（中が日時だけのものに限る）。"""
-    w, _inner_s, close = _bracket_when(sh, p, end, not_date_res)
-    if w is None or not w.has_date:
-        return None
-    before = sh[max(floor, p - 4):p].rstrip(" \t　")
-    if any(before.endswith(x) for x in _STAMP_BEFORE_NG):
-        return None
-    if any(sh.startswith(x, close + 1) for x in _STAMP_AFTER_NG):
-        return None
-    return w
-
-
-def _cut_ok(clean: str, sh: str, pc: _Piece, j: int, not_date_res) -> bool:
-    """この位置で切っていいか（行頭の日時の途中では切らない・前に文字が無いところでは切らない）。"""
-    line_head = clean.rfind("\n", pc.start, j)
-    line_s = max(pc.start, line_head + 1)
-    line_e = clean.find("\n", line_s)
-    line_e = pc.end if line_e < 0 else min(line_e, pc.end)
-    # 行頭の日時の途中では切らない（「2026年　9月　25日」のように日付の中に全角空白がある書き方）
-    if j < _parse_head(clean, sh, line_s, line_e, True, not_date_res).pos:
-        return False
-    return bool(sh[line_s:j].strip())
-
-
-def _split_inline(clean: str, sh: str, pc: _Piece, not_date_res) -> list[_Piece]:
-    """「／」「→」直後の日付、全角空白の後の「10:15：」、文章の中の「(2026/03/05 09:00)」で分ける。"""
-    # 区切りの候補（直前が「/」「→」か全角空白、または括弧つきの日時）がなければ1文字ずつ調べない
-    last = pc.end - 1
-    if ("/" not in sh[pc.start:last] and "→" not in sh[pc.start:last]
-            and "　" not in clean[pc.start:last]
-            and not any(b in sh[pc.start:last] for b in _HEAD_BRACKETS)):
-        return [pc]
-    cuts = []
-    stamps = []
-    for i in range(pc.start + 1, pc.end):
-        ch, prev = sh[i], sh[i - 1]
-        j = None
-        if prev in "/→" and not (prev == "/" and i >= 2 and sh[i - 2].isdigit()):
-            j = _skip_ws_until(sh, i, pc.end)
-            w = parse_when_at(sh, j, line_start=False, not_date_res=not_date_res, end=pc.end)
-            if w is None or not w.has_date:
-                j = None
-        elif clean[i - 1] == "\u3000" and ch.isdigit():
-            w = parse_when_at(sh, i, line_start=False, not_date_res=not_date_res, end=pc.end)
-            if w is not None and (w.has_date or (w.time and w.end < pc.end and sh[w.end] == ":")):
-                line_e = clean.find("\n", i)
-                line_e = pc.end if line_e < 0 else min(line_e, pc.end)
-                # 行末の日時（「受付した　9/1」）はこの行の日付。ここで切ると次の行の記録に付いてしまう
-                j = None if _skip_ws_until(sh, w.end, line_e) >= line_e else i
-        elif ch in _HEAD_BRACKETS and _inline_stamp(sh, i, pc.end, pc.start, not_date_res) is not None:
-            # 印が2つ以上そろってから切る（1つだけなら言及の可能性が高い）ので、ここでは数えるだけ
-            stamps.append(i)
-        if j is not None and j > pc.start and (not cuts or j > cuts[-1]) \
-                and _cut_ok(clean, sh, pc, j, not_date_res):
-            cuts.append(j)
-    if stamps:
-        head = _parse_head(clean, sh, pc.start, pc.end, pc.line_start, not_date_res).when
-        dated = 1 if (head is not None and head.has_date) else 0
-        if len(stamps) + dated >= 2:
-            cuts = sorted({j for j in cuts + stamps
-                           if j > pc.start and _cut_ok(clean, sh, pc, j, not_date_res)})
-    if not cuts:
-        return [pc]
-    out, s = [], pc.start
-    for j in cuts:
-        out.append(_Piece(s, j, s == pc.start and pc.line_start, list(pc.marks)))
-        s = j
-    out.append(_Piece(s, pc.end, False, list(pc.marks)))
-    return out
-
-
-def _split_sentences(clean: str, sh: str, pieces: list[_Piece], options: SplitOptions, not_date_res) -> list[_Piece]:
-    out: list[_Piece] = []
-    limit = options.sentence_split_min_chars
-    for pc in pieces:
-        text = clean[pc.start:pc.end]
-        if "email" in pc.marks or len(text.strip()) <= limit or "。" not in text.rstrip("。"):
-            out.append(pc)
-            continue
-        head = _parse_head(clean, sh, pc.start, pc.end, pc.line_start, not_date_res)
-        if head.kind is not None:
-            out.append(pc)
-            continue
-        parts: list[_Piece] = []
-        for m in _SENTENCE_RE.finditer(text):
-            if not m.group(0).strip():
-                continue
-            s, e = pc.start + m.start(), pc.start + m.end()
-            if parts and len(clean[s:e].strip()) < _MIN_SENTENCE:
-                parts[-1].end = e
-            elif parts and len(clean[parts[-1].start:parts[-1].end].strip()) < _MIN_SENTENCE:
-                parts[-1].end = e
-            else:
-                parts.append(_Piece(s, e, pc.line_start and not parts, list(pc.marks) + ["sentence_split"]))
-        out.extend(parts if len(parts) > 1 else [pc])
-    return out
+    return pieces
 
 
 def _trim(clean: str, s: int, e: int) -> tuple[int, int]:
@@ -1807,54 +1441,37 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
         return LogParse([], "unknown", "empty", [], clean)
     sh = shadow(clean)
     not_date_res = _compile_all(options.not_date_patterns)
-    header_mode = options.header_cells != "off" and _detect_header_cell(clean, sh, _lines(clean), not_date_res)
-    pieces = _split_pieces(clean, sh, options, not_date_res, header_mode)
+    pieces = _split_pieces(clean, sh, not_date_res)
 
     segs: list[Segment] = []
     heads: list[HeadWhen | None] = []
     texts: list[str] = []
     authors = []
-    skip: set[int] = set()
     for pc in pieces:
         s, e = _trim(clean, pc.start, pc.end)
         if s >= e:
             continue
         idx = len(segs)
         marks = list(pc.marks)
-        label = ""
-        head_when, when_text, author = None, "", None
         body_s, body_e = s, e
-        if "email" in marks:
-            skip_author = True
-        else:
-            skip_author = False
-            head = _parse_head(clean, sh, s, e, pc.line_start, not_date_res)
-            for mk in head.marks:
-                if mk not in marks:
-                    marks.append(mk)
-            label = head.label
-            head_when, when_text = head.when, head.when_text
-            body_s = head.pos
-        if "header_cell" in marks:
-            skip.add(idx)
-            head_when, when_text = None, ""
-        elif not skip_author:
-            author, body_s = detect_head_author(sh, body_s, e, people)
-            tail_author, tail_end, dspan = detect_tail_author(sh, body_s, e, people)
-            if author is None and tail_author is not None:
-                author = tail_author
-            if tail_author is not None or dspan is not None:
-                if author is tail_author or dspan is not None:
-                    body_e = tail_end
-            if dspan is not None and head_when is None:
-                w = parse_when_at(sh, dspan[0], line_start=False, not_date_res=not_date_res, end=dspan[1])
-                if w is not None and w.has_date:
-                    head_when, when_text = w, clean[dspan[0]:dspan[1]]
-            if head_when is None and "tail_date" in marks:
-                tw, t_s = _tail_date(clean, sh, body_s, body_e, not_date_res)
-                if tw is not None:
-                    head_when, when_text = tw, clean[t_s:tw.end].strip()
-                    body_e = t_s
+        head = _parse_head(clean, sh, s, e, not_date_res)
+        for mk in head.marks:
+            if mk not in marks:
+                marks.append(mk)
+        head_when, when_text = head.when, head.when_text
+        body_s = head.pos
+        author, body_s = detect_head_author(sh, body_s, e, people)
+        tail_author, tail_end, dspan = detect_tail_author(sh, body_s, e, people)
+        if author is None and tail_author is not None:
+            author = tail_author
+        if tail_author is not None or dspan is not None:
+            if author is tail_author or dspan is not None:
+                body_e = tail_end
+        if dspan is not None and head_when is None:
+            # 行末の括弧に書いた日付（「…済(2024/4/3 西村)」）は、その記録の日付として読む
+            w = parse_when_at(sh, dspan[0], not_date_res=not_date_res, end=dspan[1])
+            if w is not None and w.has_date:
+                head_when, when_text = w, clean[dspan[0]:dspan[1]]
         body = clean[body_s:body_e].strip(" \t　:：、")
         body = body.rstrip(" \t　／/→\n").strip()
         raw = clean[s:e]
@@ -1866,28 +1483,19 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
         segs.append(Segment(
             id=f"s{idx + 1}", raw=raw, body=body, start=s, end=e, when=None, author=author,
             identifiers=extract_identifiers(body), quantities=extract_quantities(body),
-            plans=extract_plans(body), marks=marks, label=label,
+            plans=extract_plans(body), marks=marks,
         ))
         heads.append(head_when)
         texts.append(when_text)
         authors.append(author)
 
     warnings: list[str] = []
-    whens, order, date_warnings = resolve_whens(
-        heads, texts, base_date, options.order, skip)
+    whens, order, date_warnings = resolve_whens(heads, texts, base_date, options.order)
     warnings.extend(date_warnings)
-    authors = inherit_authors(authors, skip)
+    authors = inherit_authors(authors)
     for seg, w, a in zip(segs, whens, authors):
         seg.when, seg.author = w, a
-    if header_mode:
-        kind = "header_cell"
-        order = "unknown"
-    elif len(segs) <= 1:
-        kind = "single"
-    else:
-        kind = "log"
-    if any("email" in s.marks for s in segs):
-        warnings.append("メール転記を含む（1つのセグメントにまとめた）")
+    kind = "single" if len(segs) <= 1 else "log"
     if any("reference" in s.marks for s in segs):
         warnings.append("他の記録や資料への参照がある（内容は推測しない）")
     return LogParse(segs, order, kind, dedupe(warnings), clean)
@@ -4383,9 +3991,6 @@ def _prepare_log(row: dict, data: ImportData, stage, people: PeopleIndex) -> Sta
     limits.update(sget(stage, "limits", {}) or {})
     if parse.kind == "empty":
         work.route, work.reason = "skipped", "対応内容の記載なし"
-        return work
-    if parse.kind == "header_cell":
-        work.route, work.reason = "rule_only", "見出し型のセル（ルールのみ）"
         return work
     if parse.segments and all("reference" in (s.marks or []) for s in parse.segments):
         work.route, work.reason = "rule_only", "他の記録の参照だけ（要確認）"

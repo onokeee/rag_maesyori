@@ -3536,7 +3536,7 @@ def _log_stage_errors(stage: LogStageSpec) -> list[str]:
         if not isinstance(getattr(stage, name), dict):
             errors.append(f"AI整形の{label}（{name}）の書き方が正しくありません")
     splitter = stage.splitter if isinstance(stage.splitter, dict) else {}
-    for key in ("extra_anchors", "not_date_patterns"):
+    for key in ("not_date_patterns",):
         patterns = splitter.get(key)
         if patterns is None:
             continue
@@ -3555,7 +3555,7 @@ def _log_stage_errors(stage: LogStageSpec) -> list[str]:
                 continue
             if _NESTED_QUANTIFIER_RE.search(pat):
                 errors.append(f"AI整形の区切りの正規表現「{text}」は処理が極端に遅くなる形（(…+)+ など）です")
-    for key in ("sentence_split_min_chars", "order_tolerance_days"):
+    for key in ("order_tolerance_days",):
         if splitter.get(key) is not None:
             try:
                 int(splitter[key])
@@ -5893,9 +5893,6 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people)
     from ai import render_timeline
 
     timeline = render_timeline(parse, entity_label, types=types or None, glossary=stage.glossary or None)
-    if parse.kind == "header_cell":
-        out += md_bullet(f"{col.display}（見出しごと）", timeline)
-        return out
     if not timeline:
         return out
     out.append("- 対応の時系列:")
