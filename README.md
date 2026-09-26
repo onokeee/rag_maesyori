@@ -13,7 +13,7 @@ pip install -r requirements.txt
 flask --app app run --host=0.0.0.0 --port=5000
 ```
 
-`--host` `--port` が待ち受け先です。`--host=0.0.0.0` で社内LANの他のPCから開けます。このサーバーの中からだけ開くなら `flask --app app run`（既定は 127.0.0.1:5000）。
+`--app app` はリポジトリ直下の **`app.py`**（アプリ本体のファイル）です。`--host` `--port` が待ち受け先です。`--host=0.0.0.0` で社内LANの他のPCから開けます。このサーバーの中からだけ開くなら `flask --app app run`（既定は 127.0.0.1:5000）。
 
 待ち受け先は **コマンド行（`--host`/`--port`）→ `FLASK_RUN_HOST`/`FLASK_RUN_PORT` → `HOST`/`PORT` → 既定** の順に決めます。ここで決まった値で「他のPCから開ける宛先（Host ヘッダー）」も決まるので、`--host=0.0.0.0` を付けずに LAN から開くと断られます（`ALLOWED_HOSTS` で別名を足せます）。
 
@@ -62,12 +62,12 @@ export OPENAI_MODEL="gpt-5.6-sol"
 ## 構成
 
 ```
-app/__init__.py        設定・土台（DBを含む）・画面・create_app・起動（flask run／serve）
-app/extract.py         Excel/CSV の読み取りと Markdown の組み立て
-app/ai.py              AI整形・AI接続・経過の記録（起動時には読み込まない）
-app/templates/base.html  画面2枚・共通部品のマクロ・エラー画面
-app/static/app.js      画面の動き
-app/static/style.css   見た目
+app.py                 設定・土台（DBを含む）・画面・create_app・起動（flask run／serve）
+extract.py             Excel/CSV の読み取りと Markdown の組み立て
+ai.py                  AI整形・AI接続・経過の記録（起動時には読み込まない）
+templates/base.html    画面2枚・共通部品のマクロ・エラー画面
+static/app.js          画面の動き
+static/style.css       見た目
 requirements.txt       必要なパッケージ
 ```
 

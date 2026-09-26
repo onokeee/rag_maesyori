@@ -14,7 +14,7 @@
 {#- 画面の題。render_template("base.html", screen="forms") のように screen で切り替える -#}
 {%- set SCREEN_TITLES = {"tables": "表の取り込み", "guide": "解説"} -%}
 
-{#- エラー画面（1枚）の題。app/__init__.py が code（400/403/404/413/500）と、必要なら
+{#- エラー画面（1枚）の題。app.py が code（400/403/404/413/500）と、必要なら
     host_refused・home_url・limit を渡す。枠（カード・題・戻るボタン）は共通で、題と本文だけが code で変わる。
     本文は下の {% block content %} の既定値。 -#}
 {%- set TITLES = {400: "このページは開けません", 403: "この操作は受け付けませんでした", 404: "ページが見つかりません",

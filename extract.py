@@ -2912,7 +2912,7 @@ def layout_key(sheet: str, anchors=None, header_row=None, data_end=None, header_
 # 読み取り・判定のコードが入っているファイル。ファイルをまとめたときに古い名前（tables.py）が
 # 残っていて、読めないファイルの名前をハッシュに混ぜる作りだったため、どれだけコードを直しても
 # 控えの版が変わらず、古い判定のまま使われ続けていた（2026-09-23 のレビューで実測）
-_CODE_MODULES = ("extract.py", "__init__.py")
+_CODE_MODULES = ("extract.py", "app.py")
 
 
 @functools.lru_cache(maxsize=1)
@@ -3508,7 +3508,7 @@ _NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*|][^)]*\)[+*{]")
 
 def _log_stage_errors(stage: LogStageSpec) -> list[str]:
     """AI整形の設定（JSON で取り込んだときだけ画面に出ない項目）の問題点。"""
-    from app.ai import normalize_rules
+    from ai import normalize_rules
 
     errors: list[str] = []
     bad = [m for m in stage.mask if not normalize_rules([m])]
@@ -5300,7 +5300,7 @@ class MdFile:
 
 def people_index_for(spec: TableSpec, records: list[dict]):
     """記入者の判定に使う人物の索引（人物一覧＋担当列の値）。"""
-    from app.ai import PeopleIndex, drop_placeholder_names
+    from ai import PeopleIndex, drop_placeholder_names
 
     stage = spec.log_stage
     person_keys = [c.key for c in spec.columns if c.role == "person"]
@@ -5321,7 +5321,7 @@ def _base_date(values: dict, spec: TableSpec) -> date | None:
 
 def parse_log_cell(spec: TableSpec, values: dict, people=None):
     """ログ列のセルをルールで分割する（マスク → parse_log）。AI 整形も同じ関数で分割して ID をそろえる。"""
-    from app.ai import PeopleIndex, SplitOptions, mask_text, parse_log
+    from ai import PeopleIndex, SplitOptions, mask_text, parse_log
 
     stage = spec.log_stage
     if stage is None:
@@ -5350,7 +5350,7 @@ def _ai_item(ai_results: dict | None, key: str) -> tuple[str | None, dict]:
 def _glossary(text: str, glossary: dict | None) -> str:
     if not glossary or not text:
         return text
-    from app.ai import apply_glossary
+    from ai import apply_glossary
 
     return apply_glossary(text, glossary)
 
@@ -5874,7 +5874,7 @@ def _log_lines(col, values: dict, spec: TableSpec, status, result: dict, people)
         types = _segment_types(result)
     _eid, entity_name, entity_text = entity_display(values, spec)
     entity_label = entity_name or entity_text
-    from app.ai import render_timeline
+    from ai import render_timeline
 
     timeline = render_timeline(parse, entity_label, types=types or None, glossary=stage.glossary or None)
     if parse.kind == "header_cell":
@@ -6566,7 +6566,7 @@ def usable_ai_results(import_id: int, imp: dict, spec) -> dict:
     """照合に通った AI の結果のうち、今の行の内容と合うものだけ（md 用の形 {key: {"status","result"}}）。"""
     if spec.log_stage is None or not imp.get("template_id"):
         return {}
-    from app import ai
+    import ai
 
     accepted = ai.results_for_render(imp["template_id"], "log", import_id=import_id)
     if not accepted:

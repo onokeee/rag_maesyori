@@ -1,5 +1,6 @@
 """Flask アプリ本体。設定・土台（DBを含む）・画面を1ファイルにまとめてある。
-起動は flask --app app run --host=0.0.0.0 --port=5000（waitress で動かすときだけ flask --app app serve）。
+起動は flask --app app run --host=0.0.0.0 --port=5000（--app app はこのファイル app.py のこと。
+waitress で動かすときだけ flask --app app serve）。
 
 - 設定（旧 config.py）: env ファイルの読み込み、待ち受け先（HOST・PORT）、受け付ける宛先の名前。
 - 土台（旧 core.py / models/database.py）: SQLite のスキーマ・移行・データアクセス、安全なファイル名、
@@ -7,7 +8,7 @@
 - 画面（旧 views.py）: 2つの Blueprint（home＝「/」の転送と解説、tables＝表の取り込み）と段の断片描画。
 - create_app とエラー画面、待ち受け先の決め方、起動コマンド serve（waitress 用）。
 
-読み取りは app/extract.py（一覧表）、AI は app/ai.py（起動時には読み込まない）。
+読み取りは extract.py（一覧表）、AI は ai.py（起動時には読み込まない）。
 同じ名前で中身の違うものは分けてある（JOB_KIND_LABELS / ROW_KIND_LABELS、_dumps_value /
 _dumps_extraction、save_ai_connection_row と画面側の save_ai_connection ルート）。
 """
@@ -52,7 +53,7 @@ from flask import abort, Blueprint, current_app, flash, Flask, g, has_app_contex
 # 設定（元 config.py）
 # ====================================================================================================
 
-BASE_DIR = Path(__file__).resolve().parent.parent   # プロジェクトの根（env・instance/・data/・uploads/ の置き場所）
+BASE_DIR = Path(__file__).resolve().parent   # プロジェクトの根（env・instance/・data/・uploads/ の置き場所）
 
 # 接続設定は aiagent_minimal_rag_tougou と同じく、ドット無しの "env" ファイル（export KEY="..." 形式も可）から読む
 load_dotenv(BASE_DIR / "env")
@@ -157,7 +158,7 @@ _NO_DEBUG_MSG = (
     "  理由: デバッガが開くと、例外が出たときにブラウザからこのサーバの Python を実行できます。\n"
     "  断ったもの: flask run の --debug / --debugger と、環境変数 FLASK_DEBUG=1。\n"
     "  通常の起動: flask --app app run --host=0.0.0.0 --port=5000\n"
-    "  詳しいエラーを見たいとき: app/__init__.py の DEBUG を True にして flask --app app serve\n"
+    "  詳しいエラーを見たいとき: app.py の DEBUG を True にして flask --app app serve\n"
 )
 
 
@@ -2646,7 +2647,7 @@ def purge_session(session_id, *, include_busy: bool = False) -> int:
 # 画面（旧 views.py）
 ####################################################################################################
 
-from app.extract import (
+from extract import (
     count_levels,
     has_blocking,
     suggest_columns,
@@ -3584,7 +3585,7 @@ def _ai_job(import_id: int) -> dict | None:
 
 def _ai_connection_ctx() -> dict:
     """AI整形の段に要る AI接続の状態（設定そのものはヘッダーの「AI接続」。ai_header_ctx）。"""
-    from app import ai
+    import ai
 
     ready = ai.is_configured()
     external, model = False, ""
@@ -3609,7 +3610,7 @@ def _panel_ai(imp: dict):
     reason = _not_ready_reason(imp, spec)
     if reason:
         return _locked(reason)
-    from app import ai
+    import ai
 
     log_key = spec.log_stage.column
     col = spec.column(log_key)
@@ -3633,10 +3634,10 @@ def _panel_ai(imp: dict):
 
 @tables_bp.post("/imports/<int:import_id>/ai/split-preview")
 def ai_split_preview(import_id: int):
-    from app import ai
-    from app.ai import format_author, format_when, review_notes
-    from app.ai import render_timeline
-    from app import ai
+    import ai
+    from ai import format_author, format_when, review_notes
+    from ai import render_timeline
+    import ai
 
     _load_import(import_id)
     row_key = str(_tables_payload().get("row_key") or "")
@@ -3668,7 +3669,7 @@ def ai_split_preview(import_id: int):
 
 @tables_bp.post("/imports/<int:import_id>/ai/trial")
 def ai_trial(import_id: int):
-    from app import ai
+    import ai
 
     imp = _load_import(import_id)
     spec = _spec_for(imp)
@@ -3726,7 +3727,7 @@ def ai_trial(import_id: int):
 
 @tables_bp.post("/imports/<int:import_id>/ai/estimate")
 def ai_estimate(import_id: int):
-    from app import ai
+    import ai
 
     _load_import(import_id)
     data = _tables_payload()
@@ -3745,7 +3746,7 @@ def ai_estimate(import_id: int):
 
 @tables_bp.post("/imports/<int:import_id>/ai/run")
 def ai_run(import_id: int):
-    from app import ai
+    import ai
 
     imp = _load_import(import_id)
     data = _tables_payload()
@@ -3798,7 +3799,7 @@ def ai_control(import_id: int, action: str):
 @tables_bp.app_context_processor
 def ai_header_ctx() -> dict:
     """どの画面のヘッダーにも「AI接続」の状態を出す。確認しには行かず、覚えている結果を出すだけ。"""
-    from app import ai
+    import ai
 
     try:
         status = ai.connection_status()
@@ -3817,7 +3818,7 @@ def ai_header_ctx() -> dict:
 @tables_bp.post("/ai-connection")
 def save_ai_connection():
     """ヘッダーの「AI接続」の［保存する］。保存したあと、その設定でつながるかを確かめる（結果はヘッダーに出る）。"""
-    from app import ai
+    import ai
 
     data = _tables_payload()
     sid = current_session_id()
@@ -3840,7 +3841,7 @@ def save_ai_connection():
 @tables_bp.post("/ai-connection/clear")
 def clear_ai_key():
     """［キーを消す］（共有PCで使い終わったとき）。このブラウザの APIキーだけ消す。接続先・モデルは残す。"""
-    from app import ai
+    import ai
 
     status = ai.clear_browser_key(current_session_id())
     return jsonify({"ok": True, "message": "このブラウザのAPIキーを消しました", "status": status})
@@ -3849,7 +3850,7 @@ def clear_ai_key():
 @tables_bp.post("/ai-connection/models")
 def refresh_ai_models():
     """APIからモデル一覧を取得し、このブラウザの候補（入力欄の候補）として覚える。"""
-    from app import ai
+    import ai
 
     try:
         catalog = ai.model_catalog(refresh=True)
@@ -3865,7 +3866,7 @@ def refresh_ai_models():
 @tables_bp.post("/ai-connection/test")
 def test_ai_connection():
     """接続の確認: モデル一覧の取得と、1回の短いチャット。パネルを開いたとき・［接続を確かめる］で呼ぶ。"""
-    from app import ai
+    import ai
 
     ok, steps = ai.check_connection()
     ai.record_check(current_session_id(), ok, steps)
