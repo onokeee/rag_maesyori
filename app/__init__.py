@@ -1,13 +1,13 @@
-"""Flask アプリ本体。設定・土台（DBを含む）・画面を1ファイルにまとめてある。起動は flask --app app serve。
+"""Flask アプリ本体。設定・土台（DBを含む）・画面を1ファイルにまとめてある。
+起動は flask --app app run --host=0.0.0.0 --port=5000（waitress で動かすときだけ flask --app app serve）。
 
 - 設定（旧 config.py）: env ファイルの読み込み、待ち受け先（HOST・PORT）、受け付ける宛先の名前。
 - 土台（旧 core.py / models/database.py）: SQLite のスキーマ・移行・データアクセス、安全なファイル名、
-  Markdown テキスト処理、アップロードの保存と事前チェック、帳票登録の Excel の一時的な覚え、
-  ジョブ実行、取り込んだデータの削除。
-- 画面（旧 views.py）: 3つの Blueprint（帳票取り込み・表の取り込み・帳票登録）と段の断片描画。
-- create_app とエラー画面、起動コマンド serve。
+  Markdown テキスト処理、アップロードの保存と事前チェック、ジョブ実行、取り込んだデータの削除。
+- 画面（旧 views.py）: 2つの Blueprint（home＝「/」の転送と解説、tables＝表の取り込み）と段の断片描画。
+- create_app とエラー画面、待ち受け先の決め方、起動コマンド serve（waitress 用）。
 
-読み取りは app/extract.py（帳票と一覧表）、AI は app/ai.py（起動時には読み込まない）。
+読み取りは app/extract.py（一覧表）、AI は app/ai.py（起動時には読み込まない）。
 同じ名前で中身の違うものは分けてある（JOB_KIND_LABELS / ROW_KIND_LABELS、_dumps_value /
 _dumps_extraction、save_ai_connection_row と画面側の save_ai_connection ルート）。
 """
@@ -36,8 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Callable, TYPE_CHECKING
+from typing import Callable
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
@@ -77,13 +76,9 @@ class Config:
     DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
     # 一覧表の行データ・状態ファイルの置き場所（DATA_DIR/tables。create_app で DATA_DIR に合わせて決め直す）
     TABLES_DIR = Path(os.environ.get("TABLES_DIR", DATA_DIR / "tables"))
-    # 帳票（1ファイル＝1件）
-    ALLOWED_EXTENSIONS = {".xlsx", ".xlsm"}
     # 一覧表（Excel/CSV・1行＝1件）
     TABLE_ALLOWED_EXTENSIONS = {".xlsx", ".xlsm", ".csv", ".tsv", ".txt"}
     TABLE_MAX_UPLOAD_BYTES = int(os.environ.get("TABLE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
-    # 帳票1ファイルの上限（画面を開くたびにブックを開き直すので、一覧表とは別に持つ）
-    FORM_MAX_UPLOAD_BYTES = int(os.environ.get("FORM_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))
     # 1回のリクエストの上限（一覧表の大きいCSV/Excelを想定）。受け口はここ。
     # 200MB 固定にしていたころは、TABLE_MAX_UPLOAD_BYTES を広げても Flask が先に 413 で断り、
     # 設定が効かなかった（2026-09-23 のレビューで実測）
@@ -114,21 +109,21 @@ class Config:
 
 _SECRET_FILE = BASE_DIR / ".flask_secret"
 
-# --- 「/」は帳票取り込みへ ------------------------------------------------------------
-# ホーム画面は無い。画面は「帳票取り込み」「表の取り込み」「帳票登録」の3つだけで、
-# 作業中の一覧もダウンロード待ちの一覧も持たない（利用者の指示 2026-09-20）。
+# --- 「/」は表の取り込みへ --------------------------------------------------------------
+# ホーム画面は無い。画面は「表の取り込み」と「解説」の2つだけで、作業中の一覧も
+# ダウンロード待ちの一覧も持たない（利用者の指示 2026-09-20）。
 # ここに残るのは「/」を開いたときの転送だけ（古いブックマーク・開いたままの画面の戻り先も拾う）。
 home_bp = Blueprint("home", __name__)
 
 
 @home_bp.get("/", endpoint="index")
-def to_forms():
-    return redirect(url_for("forms.new"))
+def to_tables():
+    return redirect(url_for("tables.new"))
 
 
 @home_bp.get("/guide", endpoint="guide")
 def guide():
-    """解説（帳票の Markdown がどう作られるか）。上部タブの4つ目。読むだけの画面で、データには触れない
+    """解説（Markdown がどう作られるか）。上部タブの2つ目。読むだけの画面で、データには触れない
     （利用者の求め 2026-09-22）。中身は templates/base.html の screen == "guide" の節。"""
     from flask import render_template
 
@@ -335,7 +330,7 @@ def startup_notice(port: int | None = None) -> str:
         f"[app] 社内LANに公開して起動しました。ほかのPCからは次のアドレスを開いてください。\n"
         f"\n      {url}\n\n"
         f"  ・ログインはありません。このアドレスを知っている人は誰でも使えます。\n"
-        f"    いま取り込んでいる帳票・一覧表の中身も、開かれれば見えます。\n"
+        f"    いま取り込んでいる表の中身も、開かれれば見えます。\n"
         f"    信頼できる社内LANの中だけで使ってください。\n"
         f"  ・ダウンロードするとサーバーからデータが消えます。ダウンロードしていないものも\n"
         f"    しばらくすると捨てます。要るものはその場でダウンロードしてください。\n"
@@ -350,82 +345,18 @@ def startup_notice(port: int | None = None) -> str:
 
 # ====================================================================================================
 # 元 models/database.py
-# SQLite のスキーマ・マイグレーションとデータアクセス（帳票）。
+# SQLite のスキーマ・マイグレーションとデータアクセス。
 #
-# 一覧表・ジョブ・AI のテーブルもここで作る。一覧表のデータアクセスは tables/store.py、
+# 一覧表・ジョブ・AI のテーブルをここで作る。一覧表のデータアクセスは tables/store.py、
 # ジョブは core/jobs.py が持つ。
 # ====================================================================================================
 
-if TYPE_CHECKING:
-    from app.extract import FieldDef, PatternDef, SheetDef
-
 BUSY_TIMEOUT_MS = 5000
 
-# 帳票の状態（導出値）: unread=読み取り前 / reviewing=確認中 / confirmed=確定済み / modified=修正中
-# 画面に出す語は templates/base.html の STATE_LABELS が持つ
-_STATE_SQL = """CASE
-    WHEN d.data_json IS NULL THEN 'unread'
-    WHEN d.confirmed_json IS NULL THEN 'reviewing'
-    WHEN d.confirmed_json != d.data_json THEN 'modified'
-    ELSE 'confirmed' END"""
 
 # ---- スキーマ -----------------------------------------------------------------
 
 # 第1版（作り直し前）のスキーマ。古いDBにも新規DBにも同じ形で適用できるよう IF NOT EXISTS
-_SCHEMA_V1 = """
-CREATE TABLE IF NOT EXISTS patterns (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    version TEXT NOT NULL DEFAULT 'v1',
-    description TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'draft',          -- draft / active / inactive
-    image_processing TEXT NOT NULL DEFAULT 'none', -- none / vision
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS pattern_sheets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
-    sheet_name TEXT NOT NULL
-);
-
--- 古いDBにある required 列（項目の「必須」・シートの「必須」）はもう使わない。画面に必須の設定が
--- 無いので新しいDBでは作らず、読み書きもしない（古いDBには既定値のまま残る。あっても無くても同じ）
-CREATE TABLE IF NOT EXISTS pattern_fields (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    field_name TEXT NOT NULL,
-    display_name TEXT NOT NULL,
-    candidates TEXT NOT NULL DEFAULT '[]',         -- JSON配列
-    data_type TEXT NOT NULL DEFAULT 'string',
-    extraction_rule TEXT NOT NULL DEFAULT '{}'     -- JSON {"direction", "columns", "section"}
-);
-
-CREATE TABLE IF NOT EXISTS pattern_samples (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern_id INTEGER NOT NULL REFERENCES patterns(id) ON DELETE CASCADE,
-    file_name TEXT NOT NULL,
-    file_hash TEXT NOT NULL,
-    stored_path TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_name TEXT NOT NULL,
-    file_hash TEXT NOT NULL,
-    stored_path TEXT NOT NULL,
-    pattern_id INTEGER REFERENCES patterns(id) ON DELETE SET NULL,
-    status TEXT NOT NULL DEFAULT 'uploaded',       -- 旧: uploaded / extracted / registered（使わない）
-    data_json TEXT,
-    markdown TEXT,                                 -- 使わない（互換のため残す）
-    created_at TEXT NOT NULL,
-    registered_at TEXT                             -- 使わない（confirmed_at へ移行）
-);
-"""
-
 _SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS table_templates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -540,27 +471,20 @@ def _run_script(conn: sqlite3.Connection, script: str) -> None:
             conn.execute("\n".join(lines))
 
 
+def _retired_forms(conn: sqlite3.Connection) -> None:
+    """もう無い機能（1ファイル＝1件の取り込み）の表を作っていた版。機能ごと外したので何もしない。
+
+    版の番号は「適用済みの件数」なので、消して番号をずらすと古いDBが壊れる。並びだけ残す。
+    古いDBに残っているその表は、最後の版（_m15_drop_forms）で落とす。
+    """
+
+
 def _m1_base(conn: sqlite3.Connection) -> None:
-    _run_script(conn, _SCHEMA_V1)
+    _retired_forms(conn)
 
 
 def _m2_forms(conn: sqlite3.Connection) -> None:
-    _add_column(conn, "patterns", "title_fields", "TEXT NOT NULL DEFAULT '[]'")
-    _add_column(conn, "patterns", "md_options", "TEXT NOT NULL DEFAULT '{}'")
-    _add_column(conn, "patterns", "version_no", "INTEGER NOT NULL DEFAULT 1")
-    _add_column(conn, "pattern_fields", "unit", "TEXT NOT NULL DEFAULT ''")
-    _add_column(conn, "pattern_fields", "rag_output", "TEXT NOT NULL DEFAULT 'show'")
-    _add_column(conn, "documents", "confirmed_json", "TEXT")
-    _add_column(conn, "documents", "confirmed_at", "TEXT")
-    _add_column(conn, "documents", "title", "TEXT NOT NULL DEFAULT ''")
-    # 旧「登録済み」は確定済みとして引き継ぐ
-    conn.execute("""UPDATE documents SET confirmed_json = data_json,
-                        confirmed_at = COALESCE(registered_at, created_at)
-                    WHERE status = 'registered' AND data_json IS NOT NULL AND confirmed_json IS NULL""")
-    conn.execute("UPDATE documents SET confirmed_at = registered_at "
-                 "WHERE confirmed_at IS NULL AND registered_at IS NOT NULL AND confirmed_json IS NOT NULL")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_hash ON documents(file_hash)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_pattern ON documents(pattern_id)")
+    _retired_forms(conn)
 
 
 def _m3_tables(conn: sqlite3.Connection) -> None:
@@ -568,10 +492,7 @@ def _m3_tables(conn: sqlite3.Connection) -> None:
 
 
 def _m4_form_batches(conn: sqlite3.Connection) -> None:
-    """帳票のまとめ取り込み（1回の選択で複数ファイル）。同じ batch_id の帳票を順に確認して zip で渡す。"""
-    _add_column(conn, "documents", "batch_id", "TEXT NOT NULL DEFAULT ''")
-    _add_column(conn, "documents", "batch_order", "INTEGER NOT NULL DEFAULT 0")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_batch ON documents(batch_id)")
+    _retired_forms(conn)
 
 
 # 使っていない表（8.1 で外した機能のもの）。取り込みを指す列が無く purge の探索に乗らないので、
@@ -644,13 +565,10 @@ def _m8_session_scope(conn: sqlite3.Connection) -> None:
     """取り込んだものに「どのブラウザのものか」を持たせる（社内LANで数人が同時に使うため）。
 
     ログインは無いので利用者は分からないが、セッションのクッキー（views.current_session_id）で
-    ブラウザごとの作業場所は分けられる。ほかのブラウザの帳票・取り込みは見えない（404）。
+    ブラウザごとの作業場所は分けられる。ほかのブラウザの取り込みは見えない（404）。
     古いDBの行は NULL（持ち主が分からない）のままで、これまでどおり扱う（起動時の片付けで消える）。
-    帳票の種類・取り込み設定は「設定」なので分けない（みんなで使う）。
     """
-    _add_column(conn, "documents", "session_id", "TEXT")
     _add_column(conn, "table_imports", "session_id", "TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_session ON documents(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_table_imports_session ON table_imports(session_id)")
 
 
@@ -723,24 +641,11 @@ def _m10_drop_unused(conn: sqlite3.Connection) -> None:
 
 
 def _m11_document_touch(conn: sqlite3.Connection) -> None:
-    """帳票に「最後にさわった時刻」を持たせる（見回りが作業中の帳票を消さないように）。
-
-    一覧表（table_imports）は updated_at を持っていて、design.md 3.3 の「2時間さわられて
-    いないものを捨てる」どおりに動く。帳票だけ取り込んだ時刻で切られていた。
-    """
-    _add_column(conn, "documents", "updated_at", "TEXT")
-    conn.execute("UPDATE documents SET updated_at = COALESCE(confirmed_at, created_at) WHERE updated_at IS NULL")
+    _retired_forms(conn)
 
 
 def _m12_drop_pattern_samples(conn: sqlite3.Connection) -> None:
-    """見本の Excel の控え（pattern_samples）を落とす。
-
-    利用者の指示（2026-09-21）:「帳票登録で、見本のExcelは置かずに、設定だけ保持するように
-    してほしい」。置いた Excel はその場で読み取るだけで、保存も控えもしない（views/form_types.py）。
-    控えが残っていると、もう無いファイルを指し続ける行になるので表ごと落とす。
-    uploads/samples に残ったファイルは、起動時に core.files.remove_sample_dir がフォルダごと片付ける。
-    """
-    conn.execute("DROP TABLE IF EXISTS pattern_samples")
+    _retired_forms(conn)
 
 
 def _m13_ai_connections(conn: sqlite3.Connection) -> None:
@@ -749,7 +654,7 @@ def _m13_ai_connections(conn: sqlite3.Connection) -> None:
     利用者の指示:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる。全部空欄にしておいて
     cookieでユーザー毎に登録内容をずっと保持させるようにしてほしい」。
     これまでは data/model_settings.yaml 1つを全員で使っていたので、社内LANで数人が使うと互いのキーを
-    上書きし合い、1つのキーを共有していた。持ち主は帳票・取り込みと同じ session_id（views.current_session_id）。
+    上書きし合い、1つのキーを共有していた。持ち主は取り込みと同じ session_id（views.current_session_id）。
     この表は「設定」なので、取り込みを捨てる片付け（core.purge_session / sweep_stale / purge_all_pending）の
     対象にしない（core.SETTINGS_TABLES）。最後の接続確認の結果もここに持ち、ヘッダーはそれを表示するだけ
     （画面を開くたびに確認しに行かない）。
@@ -770,23 +675,18 @@ def _m13_ai_connections(conn: sqlite3.Connection) -> None:
 
 
 def _m14_pattern_books(conn: sqlite3.Connection) -> None:
-    """帳票の種類に、登録したときのシートの中身（覚えたシート）を持たせる（利用者の指示 2026-09-22）。
+    _retired_forms(conn)
 
-    利用者の指示:「再度シートを置かなくても、登録したときにシートのセル番地と文字情報を記憶しておけばだせるはず」。
-    Excel のファイルは今までどおり保存しない（2026-09-21「見本のExcelは置かずに、設定だけ保持する」）。
-    覚えるのはシートの中身だけ: シート名・セルの番地と文字（型のある値）・結合・太字・塗りの有る無し。
-    セルの色は覚えない（同日の指示「セル色の情報は不要」。塗りの有る無しと「同じ塗りか」の番号だけ。
-    forms.fill_group）。書き方は forms.WorkbookInfo.to_json。種類1つにつき1つ（最後に置いた Excel の分）で、
-    種類を消せば一緒に消える（ON DELETE CASCADE）。この表は「設定」なので、取り込みを捨てる片付けの
-    対象にしない（core.SETTINGS_TABLES）。
+
+def _m15_drop_forms(conn: sqlite3.Connection) -> None:
+    """もう使わない表（1ファイル＝1件の取り込みと、その種類の登録）を落とす。機能ごと外した（利用者の指示 2026-09-26）。
+
+    残っていても使わないが、置いたままだと「消えないデータ」になる（design.md 3.3）。
+    新しいDBでは作っていないので、古いDBのときだけ効く。
     """
-    conn.execute("""CREATE TABLE IF NOT EXISTS pattern_books (
-        pattern_id INTEGER PRIMARY KEY REFERENCES patterns(id) ON DELETE CASCADE,
-        file_name TEXT NOT NULL,                       -- 置いた Excel のファイル名（表示用。ファイルそのものは無い）
-        file_hash TEXT NOT NULL,                       -- その Excel の sha256（ブラウザが送る book_hash と同じもの）
-        book_json TEXT NOT NULL,                       -- 覚えたシートの中身（forms.WorkbookInfo.to_json）
-        saved_at TEXT NOT NULL                         -- 置いた日時
-    )""")
+    for table in ("pattern_books", "pattern_samples", "pattern_fields", "pattern_sheets",
+                  "documents", "patterns"):
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 # PRAGMA user_version = 適用済みの件数。追加は末尾にだけ行う
@@ -795,7 +695,7 @@ MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_m1_base, _m2_forms, _
                                                           _m7_llm_calls_owner, _m8_session_scope, _m9_import_spec,
                                                           _m10_drop_unused, _m11_document_touch,
                                                           _m12_drop_pattern_samples, _m13_ai_connections,
-                                                          _m14_pattern_books]
+                                                          _m14_pattern_books, _m15_drop_forms]
 
 
 def migrate(conn: sqlite3.Connection) -> int:
@@ -828,7 +728,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
     conn.execute("PRAGMA journal_mode = WAL")
     # 消した行の中身をその場でゼロ埋めする（design.md 3.3）。これが無いと、行を消しても解放された
-    # ページに帳票の値・対象の名前・人名が平文で残り、DBファイル（と app.db-wal）から読めてしまう。
+    # ページに取り込んだ値・対象の名前・人名が平文で残り、DBファイル（と app.db-wal）から読めてしまう。
     # VACUUM は他の接続があると失敗することがあるので、消し方そのものを安全側にしておく。
     conn.execute("PRAGMA secure_delete = ON")
     return conn
@@ -860,325 +760,18 @@ def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _all(sql: str, args=()) -> list[dict]:
-    return [dict(r) for r in get_db().execute(sql, args).fetchall()]
-
-
 def _one(sql: str, args=()) -> dict | None:
     row = get_db().execute(sql, args).fetchone()
     return dict(row) if row else None
-
-
-def _exec(sql: str, args=()) -> int:
-    db = get_db()
-    cur = db.execute(sql, args)
-    db.commit()
-    return cur.lastrowid
 
 
 def _dumps_value(value) -> str:
     return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
-# ---- patterns ---------------------------------------------------------------
-
-def list_patterns() -> list[dict]:
-    return _all("""
-        SELECT p.*,
-               (SELECT COUNT(*) FROM pattern_fields f WHERE f.pattern_id = p.id) AS field_count,
-               (SELECT COUNT(*) FROM documents d WHERE d.pattern_id = p.id AND d.confirmed_json IS NOT NULL) AS document_count,
-               (SELECT COUNT(*) FROM documents d WHERE d.pattern_id = p.id AND d.confirmed_json IS NULL) AS working_count
-        FROM patterns p ORDER BY p.name, p.version
-    """)
-
-
-def count_active_patterns() -> int:
-    return get_db().execute("SELECT COUNT(*) FROM patterns WHERE status = 'active'").fetchone()[0]
-
-
-def create_pattern(name: str) -> int:
-    ts = now()
-    return _exec(
-        "INSERT INTO patterns (name, version, description, created_at, updated_at) VALUES (?, 'v1', '', ?, ?)",
-        (name, ts, ts),
-    )
-
-
-def _field_def(row: dict) -> FieldDef:
-    from app.extract import FieldDef, PatternDef, SheetDef   # extract が core を読み込むので、ここで
-    fd = FieldDef(
-        field_name=row["field_name"],
-        display_name=row["display_name"],
-        candidates=json.loads(row["candidates"]),
-        data_type=row["data_type"],
-        direction=json.loads(row["extraction_rule"]).get("direction", "auto"),
-    )
-    # unit / rag_output は WP-forms が FieldDef に追加する。未追加でも属性として持たせる
-    fd.unit = row.get("unit") or ""
-    fd.rag_output = row.get("rag_output") or "show"
-    rule = json.loads(row["extraction_rule"])
-    fd.table_columns = list(rule.get("columns") or [])
-    # 探す区画（発行側・回答側など、同じラベルが並ぶ帳票でどちらを読むか）
-    fd.section = rule.get("section") or ""
-    # クリックで作った項目の控え（見本でのシート名とセル番地）
-    fd.sheet_name = rule.get("sheet_name") or ""
-    fd.label_cell = rule.get("label_cell") or ""
-    fd.cell = rule.get("cell") or ""
-    fd.renamed = bool(rule.get("renamed"))
-    return fd
-
-
-def _extraction_rule(f: FieldDef) -> dict:
-    """pattern_fields.extraction_rule の JSON。明細表は列見出しも持つ。"""
-    rule = {"direction": f.direction}
-    columns = getattr(f, "table_columns", None)
-    if f.data_type == "table" and columns:
-        rule["columns"] = list(columns)
-    section = getattr(f, "section", "") or ""
-    if section:
-        rule["section"] = section
-    for key in ("sheet_name", "label_cell", "cell"):
-        value = getattr(f, key, "") or ""
-        if value:
-            rule[key] = value
-    if getattr(f, "renamed", False):
-        rule["renamed"] = 1   # 見出しを手で直した項目
-    return rule
-
-
-def load_pattern(pattern_id: int | None) -> PatternDef | None:
-    from app.extract import FieldDef, PatternDef, SheetDef   # extract が core を読み込むので、ここで
-    row = _one("SELECT * FROM patterns WHERE id = ?", (pattern_id,))
-    if row is None:
-        return None
-    sheets = _all("SELECT * FROM pattern_sheets WHERE pattern_id = ? ORDER BY id", (pattern_id,))
-    fields = _all("SELECT * FROM pattern_fields WHERE pattern_id = ? ORDER BY sort_order, id", (pattern_id,))
-    pattern = PatternDef(
-        id=row["id"],
-        name=row["name"],
-        version=row["version"],
-        description=row["description"],
-        status=row["status"],
-        image_processing=row["image_processing"],
-        sheets=[SheetDef(s["sheet_name"]) for s in sheets],
-        fields=[_field_def(f) for f in fields],
-    )
-    pattern.title_fields = json.loads(row.get("title_fields") or "[]")
-    pattern.md_options = json.loads(row.get("md_options") or "{}")
-    pattern.version_no = row.get("version_no") or 1
-    return pattern
-
-
-def load_active_patterns() -> list[PatternDef]:
-    ids = [r["id"] for r in _all("SELECT id FROM patterns WHERE status = 'active' ORDER BY name, version")]
-    return [load_pattern(i) for i in ids]
-
-
-def save_pattern(pattern: PatternDef, status: str) -> None:
-    """種類のメタ情報を更新し、シート・項目定義を置き換える。保存ごとに version_no を+1。"""
-    db = get_db()
-    with db:
-        db.execute(
-            """UPDATE patterns SET name=?, version=?, description=?, image_processing=?, status=?,
-                      title_fields=?, md_options=?, version_no=version_no + 1, updated_at=? WHERE id=?""",
-            (pattern.name, pattern.version, pattern.description, pattern.image_processing, status,
-             json.dumps(list(getattr(pattern, "title_fields", None) or []), ensure_ascii=False),
-             json.dumps(dict(getattr(pattern, "md_options", None) or {}), ensure_ascii=False),
-             now(), pattern.id),
-        )
-        db.execute("DELETE FROM pattern_sheets WHERE pattern_id = ?", (pattern.id,))
-        db.execute("DELETE FROM pattern_fields WHERE pattern_id = ?", (pattern.id,))
-        db.executemany(
-            "INSERT INTO pattern_sheets (pattern_id, sheet_name) VALUES (?, ?)",
-            [(pattern.id, s.sheet_name) for s in pattern.sheets],
-        )
-        db.executemany(
-            """INSERT INTO pattern_fields
-               (pattern_id, sort_order, field_name, display_name, candidates, data_type, extraction_rule,
-                unit, rag_output)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                (pattern.id, i, f.field_name, f.display_name, json.dumps(f.candidates, ensure_ascii=False),
-                 f.data_type, json.dumps(_extraction_rule(f), ensure_ascii=False),
-                 getattr(f, "unit", "") or "", getattr(f, "rag_output", "show") or "show")
-                for i, f in enumerate(pattern.fields)
-            ],
-        )
-    row = db.execute("SELECT version_no FROM patterns WHERE id = ?", (pattern.id,)).fetchone()
-    if row is not None:
-        try:
-            pattern.version_no = row[0]
-        except AttributeError:
-            pass
-
-
-def set_pattern_status(pattern_id: int, status: str) -> None:
-    _exec("UPDATE patterns SET status = ?, updated_at = ? WHERE id = ?", (status, now(), pattern_id))
-
-
-def delete_pattern(pattern_id: int) -> None:
-    _exec("DELETE FROM patterns WHERE id = ?", (pattern_id,))
-
-
-# 見本の Excel は保存しないので、その控え（add_sample / list_samples …）は持たない。
-# 帳票の種類が持つのは設定（シート名・見出しのセル・値のセル・読み取る向き・項目名）と、
-# 登録したときのシートの中身（pattern_books。下）だけ。
-
-
-# ---- pattern_books（覚えたシート）-------------------------------------------------------
-# 帳票の種類1つにつき、最後に置いた Excel のシートの中身（forms.WorkbookInfo.to_json）を1つ持つ。
-# Excel のファイルではない（セルの番地と文字・結合・太字・塗りの有る無しだけ。色は無い）。
-
-def save_pattern_book(pattern_id: int, file_name: str, file_hash: str, book_json: str) -> None:
-    """覚えたシートを入れる（前のものがあれば入れ替える）。"""
-    _exec(
-        """INSERT INTO pattern_books (pattern_id, file_name, file_hash, book_json, saved_at)
-           VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(pattern_id) DO UPDATE SET file_name = excluded.file_name, file_hash = excluded.file_hash,
-                                                book_json = excluded.book_json, saved_at = excluded.saved_at""",
-        (pattern_id, file_name, file_hash, book_json, now()),
-    )
-
-
-def load_pattern_book(pattern_id: int | None) -> dict | None:
-    """覚えたシート（book_json を含む行）。無ければ None（覚える前に登録した種類）。"""
-    return _one("SELECT * FROM pattern_books WHERE pattern_id = ?", (pattern_id,))
-
-
-def pattern_book_meta(pattern_id: int | None) -> dict | None:
-    """覚えたシートの見出し（ファイル名・sha256・置いた日時・JSON の大きさ）。中身は読まない。"""
-    return _one("SELECT pattern_id, file_name, file_hash, saved_at, LENGTH(book_json) AS size "
-                "FROM pattern_books WHERE pattern_id = ?", (pattern_id,))
-
-
-def delete_pattern_book(pattern_id: int) -> None:
-    """覚えたシートだけを捨てる（種類は残る。テスト・覚える前の状態に戻すとき用）。"""
-    _exec("DELETE FROM pattern_books WHERE pattern_id = ?", (pattern_id,))
-
-
-# ---- documents --------------------------------------------------------------
-# 状態は導出する: data_json なし→unread、confirmed_json なし→reviewing、
-# confirmed_json != data_json→modified、それ以外→confirmed
-
-def create_document(file_name: str, file_hash: str, stored_path: str, pattern_id: int | None = None,
-                    batch_id: str = "", batch_order: int = 0, session_id: str | None = None) -> int:
-    """帳票を1件作る。session_id は取り込んだブラウザ（views.current_session_id）。"""
-    return _exec(
-        "INSERT INTO documents (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, session_id, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (file_name, file_hash, stored_path, pattern_id, batch_id, batch_order, session_id, now(), now()),
-    )
-
-
-# 持ち主で絞る条件。持ち主の分からない行（この仕組みより前のDBの行）は、これまでどおり誰からでも扱える
-_OWNED = "(d.session_id IS NULL OR d.session_id = ?)"
-
-
-def _owner_where(session_id: str | None) -> tuple[str, list]:
-    return (_OWNED, [session_id]) if session_id else ("", [])
-
-
-def get_document(doc_id: int) -> dict | None:
-    return _one(f"""
-        SELECT d.*, {_STATE_SQL} AS state,
-               p.name AS pattern_name, p.version AS pattern_version
-        FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id
-        WHERE d.id = ?
-    """, (doc_id,))
-
-
-_LIST_COLUMNS = f"""
-        SELECT d.id, d.file_name, d.file_hash, d.stored_path, d.pattern_id, d.title, d.batch_id, d.batch_order,
-               d.session_id, d.created_at, d.confirmed_at, {_STATE_SQL} AS state,
-               p.name AS pattern_name, p.version AS pattern_version,
-               -- 帳票の種類が削除されても、読み取ったときの種類名を表示に使う
-               CASE WHEN json_valid(d.data_json) THEN json_extract(d.data_json, '$.pattern.name') END
-                   AS extraction_pattern_name
-        FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id"""
-
-
-def list_batch_documents(batch_id: str, session_id: str | None = None) -> list[dict]:
-    """まとめ取り込み（1回の選択で複数ファイル）の帳票を、選んだ順に返す。
-
-    session_id を渡すと、そのブラウザの帳票だけを返す（ほかの人のまとまりは見えない）。
-    """
-    if not batch_id:
-        return []
-    owner, args = _owner_where(session_id)
-    where = "WHERE d.batch_id = ?" + (f" AND {owner}" if owner else "")
-    return _all(f"{_LIST_COLUMNS} {where} ORDER BY d.batch_order, d.id", (batch_id, *args))
-
-
-def list_confirmed_documents(ids: list[int] | None = None, session_id: str | None = None) -> list[dict]:
-    """確定済みの版を持つ帳票（修正中も確定済みの版を持つ）。ids・session_id 指定で絞り込み。"""
-    sql = f"""SELECT d.*, {_STATE_SQL} AS state, p.name AS pattern_name, p.version AS pattern_version
-              FROM documents d LEFT JOIN patterns p ON p.id = d.pattern_id
-              WHERE d.confirmed_json IS NOT NULL"""
-    owner, args = _owner_where(session_id)
-    if owner:
-        sql += f" AND {owner}"
-    if ids is not None:
-        if not ids:
-            return []
-        sql += f" AND d.id IN ({', '.join('?' for _ in ids)})"
-        return _all(sql + " ORDER BY d.id", (*args, *ids))
-    return _all(sql + " ORDER BY d.id", tuple(args))
-
-
-def save_draft(doc_id: int, data_json, title: str | None = None) -> None:
-    """作業中の値を保存する（dict も可）。title は検索用（タイトル項目の値）。"""
-    if title is None:
-        _exec("UPDATE documents SET data_json = ?, updated_at = ? WHERE id = ?",
-              (_dumps_value(data_json), now(), doc_id))
-    else:
-        _exec("UPDATE documents SET data_json = ?, title = ?, updated_at = ? WHERE id = ?",
-              (_dumps_value(data_json), title, now(), doc_id))
-
-
-def confirm_document(doc_id: int, title: str | None = None) -> bool:
-    """作業中の値を確定済みの版にする。読み取り前（data_json なし）なら False。"""
-    sets, args = ["confirmed_json = data_json", "confirmed_at = ?", "updated_at = ?"], [now(), now()]
-    if title is not None:
-        sets.append("title = ?")
-        args.append(title)
-    db = get_db()
-    cur = db.execute(f"UPDATE documents SET {', '.join(sets)} WHERE id = ? AND data_json IS NOT NULL",
-                     (*args, doc_id))
-    db.commit()
-    return cur.rowcount > 0
-
-
-def reset_document(doc_id: int, pattern_id: int | None, data_json) -> None:
-    """選び直して再読み取り：作業中の値を置き換える（確定済みの版は残る→修正中になる）。"""
-    _exec("UPDATE documents SET pattern_id = ?, data_json = ?, updated_at = ? WHERE id = ?",
-          (pattern_id, None if data_json is None else _dumps_value(data_json), now(), doc_id))
-
-
-def find_confirmed_by_hash(file_hash: str, exclude_id: int | None = None,
-                           session_id: str | None = None) -> dict | None:
-    """同じ中身の確定済みの帳票（取り込み直しの注意に出す）。ほかの人の帳票は知らせない。"""
-    owner, args = _owner_where(session_id)
-    sql = ("SELECT d.id, d.file_name, d.title FROM documents d WHERE d.file_hash = ? "
-           "AND d.confirmed_json IS NOT NULL AND d.id != ?")
-    if owner:
-        sql += f" AND {owner}"
-    return _one(sql + " ORDER BY d.id LIMIT 1",
-                (file_hash, exclude_id if exclude_id is not None else -1, *args))
-
-
-def update_document(doc_id: int, **columns) -> None:
-    assignments = ", ".join(f"{name} = ?" for name in columns)
-    _exec(f"UPDATE documents SET {assignments} WHERE id = ?", (*columns.values(), doc_id))
-
-
-# 帳票を消すのは core/purge.py（元のファイルと DB の行をまとめて消す）
-
-
 # ---- ai_connections（ブラウザごとの AI接続） ---------------------------------------------------
 # 持ち主は session_id（views.current_session_id）。行は「保存」か「接続の確認」で初めてできる（読むだけでは作らない）。
 # 取り込みの片付け（core.purge_*）では消えない「設定」。長く使われていない行だけ core.sweep_stale_ai_connections が消す。
-
-AI_CONNECTION_FIELDS = ("api_key", "chat_url", "models_url", "model")
 
 
 def get_ai_connection(session_id: str | None) -> dict | None:
@@ -1247,10 +840,6 @@ def clear_ai_connection_key(session_id: str) -> bool:
     return cur.rowcount > 0
 
 
-
-
-
-
 # ====================================================================================================
 # 元 core/naming.py
 # 出力ファイル名（Windows と LightRAG の両方で安全な名前）。
@@ -1290,7 +879,7 @@ def md_filename(parts: list[str]) -> str:
 
 # ====================================================================================================
 # 元 core/mdtext.py
-# Markdown 出力のテキスト処理（帳票・一覧表で共通）。
+# Markdown 出力のテキスト処理。
 #
 # 決まり（docs/design.md 6章）: UTF-8・LF、レコード内に空行を入れない、パイプ表を使わない（`- 項目: 値`）、
 # 複数行の値は2文字下げの連続行。
@@ -1316,7 +905,7 @@ def _enclosed_marks() -> str:
 
 
 # ①→1 のように囲みが外れると「①破損…」が「1破損…」になり、番号と本文の区切りが消えて読めなくなる。
-# 丸数字は帳票の手順・項目番号でごく普通に使われるので、囲み文字だけは NFKC をかけずに残す。
+# 丸数字は手順や項目番号でごく普通に使われるので、囲み文字だけは NFKC をかけずに残す。
 # （㈱→(株)、⑴→(1) のように区切りが残る表記はそのまま NFKC で正規化する）
 _ENCLOSED = re.compile(f"([{re.escape(_enclosed_marks())}])")
 
@@ -1435,8 +1024,6 @@ def join_blocks(blocks: list[list[str]]) -> str:
 #
 # 保存は分割して読みながら sha256 を計算する（ブック全体を解析してからハッシュを取らない）。
 # Excel の事前チェックは openpyxl で開く前に、先頭バイトと zip の目次だけで行う。
-# 帳票登録の見本の Excel は保存しない（read_upload でメモリに読むだけ）ので、事前チェックは
-# パスのほかに「中身そのもの（bytes）」も受け取れる。
 # ====================================================================================================
 
 logger = logging.getLogger(__name__)
@@ -1456,15 +1043,10 @@ ZIP_RATIO_MIN_BYTES = 16 * 1024 * 1024
 # 結合セルの面積（ブック全体の合計）の上限。openpyxl は開くときに結合範囲のセルを1つずつ作るので、
 # シート全体の結合（A1:XFD1048576 など）が1つあるだけで、上のサイズ制限より前に固まる（数秒〜終わらない）。
 # 行全体の結合（A1:XFD1 = 16,384 セル）や列全体の結合（A:A = 約105万セル）は通す。
+# 一覧表は読み取り専用モードで開き、結合を展開しないので、この値で足りる
 MAX_MERGED_CELLS = 2_000_000
-# 帳票（通常モードで開く）の結合セルの面積の上限。openpyxl は結合範囲ごとに中のセルを1つずつ片付け、
-# 左上のセルに罫線があれば範囲の辺のセルを1つずつ作るので、面積に比例して遅くなる（行全体の結合 120 個
-# ＝約200万セルで約16秒、罫線付きの列全体の結合1つで1分以上）。帳票は画面を開くたびにブックを開き直すので、
-# 1回あたり2秒程度に収まるこの値で断る（行全体の結合なら12個まで通る。ふつうの帳票は数千セル）。
-# 一覧表は読み取り専用モードで開き結合を展開しないので、上の MAX_MERGED_CELLS のまま。
-FORM_MAX_MERGED_CELLS = 200_000
 # ハイパーリンク・コメントの範囲の面積（ブック全体の合計）の上限。openpyxl はリンク（<hyperlink ref>）とコメント
-# （<comment ref>）の範囲のセルを1つずつ作る（帳票の通常モードでも、一覧表の tables.excel_source でも）。
+# （<comment ref>）の範囲のセルを1つずつ作る。
 # シート全体を指す範囲1つで開くのが終わらなくなる（A1:XFD50 の約82万セルで一覧表は約28秒）。
 # ふつうのリンク・コメントは1セルか数セルなので、1回あたり2秒以内に収まるこの値で断る。
 MAX_LINKED_CELLS = 50_000
@@ -1474,9 +1056,9 @@ MAX_LINKED_CELLS = 50_000
 MAX_CELLS = 1_000_000
 # 図形（描画）の上限。openpyxl は開くときに、シートが参照する描画部品（xl/drawings/*.xml）をシートごとに読み直し、
 # 図形（アンカー）を1つずつ作る。1つの大きな描画を多数のシートから参照させると、圧縮後は小さくても
-# 開くたびに（書類の画面を開くたびにも）数十秒〜終わらない。そこで「描画部品の図形数 × 参照するシート数」と
+# 開くたびに数十秒〜終わらない。そこで「描画部品の図形数 × 参照するシート数」と
 # 「描画部品の展開後の大きさ × 参照するシート数」の合計を数えて上限を設ける。
-# 普通の帳票は1シートに数十個程度の図形なので、十分に余裕のある値にしている。
+# 普通の表は1シートに数十個程度の図形なので、十分に余裕のある値にしている。
 MAX_DRAWING_ANCHORS = 10_000
 MAX_DRAWING_BYTES = 20 * 1024 * 1024
 # 図形（アンカー）として数える要素の名前（DrawingML の spreadsheetDrawing）
@@ -1496,12 +1078,9 @@ _WORKBOOK_HEAD_BYTES = 64 * 1024
 # 掴まれているファイルを消すときの再試行（ウイルス対策のスキャンなどは短時間で終わる）
 REMOVE_RETRIES = 3
 REMOVE_RETRY_WAIT = 0.05
-# アップロードの保存先（UPLOAD_DIR 直下）と save_upload が付けるファイル名の形。
-# 帳票登録の見本（samples）はもう保存しないので、ここには入れない（前の版の残骸は remove_sample_dir が消す）
-UPLOAD_SUBDIRS = ("documents", "tables")
+# アップロードの保存先（UPLOAD_DIR 直下）と save_upload が付けるファイル名の形
+UPLOAD_SUBDIRS = ("tables",)
 _STORED_NAME = re.compile(r"[0-9a-f]{32}\.[A-Za-z0-9]+")
-# 前の版が見本の Excel を置いていたフォルダ（UPLOAD_DIR 直下）
-SAMPLE_SUBDIR = "samples"
 
 
 class UploadError(Exception):
@@ -1514,19 +1093,6 @@ class StoredFile:
     file_name: str     # 元のファイル名（表示・ダウンロード用）
     file_hash: str     # sha256
     size: int
-
-
-@dataclass
-class MemoryFile:
-    """保存せずにメモリへ読んだアップロード（帳票登録の見本の Excel）。"""
-
-    data: bytes        # ブックの中身そのもの
-    file_name: str     # 元のファイル名（表示用）
-    file_hash: str     # sha256
-
-    @property
-    def size(self) -> int:
-        return len(self.data)
 
 
 def original_name(storage) -> str:
@@ -1566,32 +1132,6 @@ def _checked_name(storage, allowed: set[str]) -> tuple[str, str]:
     return name, ext
 
 
-def read_upload(storage, allowed: set[str], max_bytes: int) -> MemoryFile:
-    """アップロードをディスクに置かずにメモリへ読む。拡張子・サイズ・空ファイルを確認する。
-
-    帳票登録の見本の Excel に使う。置いた Excel はサーバーに残さない（利用者の指示 2026-09-21
-    「見本のExcelは置かずに、設定だけ保持するようにしてほしい」）ので、保存先を作らずに
-    中身と sha256 だけを返す。呼び出し側は読み取った結果（WorkbookInfo）だけを短い間覚えておく。
-    """
-    name, _ext = _checked_name(storage, allowed)
-    digest = hashlib.sha256()
-    chunks: list[bytes] = []
-    size = 0
-    stream = getattr(storage, "stream", storage)
-    while True:
-        chunk = stream.read(CHUNK_SIZE)
-        if not chunk:
-            break
-        size += len(chunk)
-        if size > max_bytes:
-            raise UploadError(f"ファイルが大きすぎます（上限 {_format_size(max_bytes)}）")
-        digest.update(chunk)
-        chunks.append(chunk)
-    if size == 0:
-        raise UploadError("ファイルが空です")
-    return MemoryFile(data=b"".join(chunks), file_name=name, file_hash=digest.hexdigest())
-
-
 def save_upload(storage, subdir: str, allowed: set[str], max_bytes: int) -> StoredFile:
     """アップロードを UPLOAD_DIR/subdir に保存する。拡張子・サイズ・空ファイルを確認し、失敗時は消して UploadError。"""
     name, ext = _checked_name(storage, allowed)
@@ -1624,14 +1164,10 @@ def precheck_excel(source, max_cells: int | None = None, max_merged: int | None 
                    max_rows: int | None = None) -> None:
     """Excel（.xlsx/.xlsm）として開いてよいかを、中身を展開せずに確かめる。問題があれば UploadError。
 
-    source: ファイルのパス、またはブックの中身そのもの（bytes）。帳票登録の見本の Excel は
-      保存しないので bytes で渡す（zipfile はどちらも同じように読める）。
+    source: ファイルのパス、またはブックの中身そのもの（bytes。zipfile はどちらも同じように読める）。
     max_cells: セル数の上限（省略時は MAX_CELLS）。
-    max_merged: 結合セルの面積の上限（省略時は MAX_MERGED_CELLS。帳票は FORM_MAX_MERGED_CELLS を渡す）。
-    max_rows: 行（<row>）の数の上限（省略時は max_merged と同じ値）。通常モードの openpyxl は、セルの無い
-      <row ht="20" customHeight="1"/> のような行にも行の書式を1つずつ作るので、結合セルと同じくらい開くのが遅くなる
-      （100万行で約9秒）。帳票は画面を開くたびに開き直すので、結合セルと同じ目安（1回あたり2秒程度）で断る。
-      一覧表は読み取り専用モードで開き行の書式を作らないので、MAX_MERGED_CELLS のままで困らない。
+    max_merged: 結合セルの面積の上限（省略時は MAX_MERGED_CELLS）。
+    max_rows: 行（<row>）の数の上限（省略時は max_merged と同じ値）。
     """
     if isinstance(source, (bytes, bytearray)):
         head, book = bytes(source[:8]), io.BytesIO(source)
@@ -1893,20 +1429,6 @@ def remove_upload(stored_path: str | None) -> bool:
     return False
 
 
-def remove_sample_dir(base) -> int:
-    """前の版が置いた見本の Excel（uploads/samples）をフォルダごと消す。消したファイルの件数を返す。
-
-    帳票登録は見本の Excel を受け取っても置かなくなった（利用者の指示 2026-09-21）。
-    前の版で置いたままのファイルが残ることがあるので、起動時に片付ける。
-    """
-    folder = Path(base) / SAMPLE_SUBDIR
-    if not folder.is_dir():
-        return 0
-    count = sum(1 for p in folder.rglob("*") if p.is_file())
-    shutil.rmtree(folder, ignore_errors=True)
-    return count
-
-
 def remove_orphan_import_dirs(tables_dir, known_ids) -> int:
     """DB に無い取り込みの imports/<id>/ フォルダを消す。消した件数を返す。
 
@@ -1983,107 +1505,6 @@ def _long_paths_enabled() -> bool:
 def path_limit() -> int | None:
     """書けるファイルのパスの長さの上限（上限が無ければ None）。"""
     return None if _long_paths_enabled() else MAX_PATH_CHARS
-
-
-# ====================================================================================================
-# 元 core/workbook_cache.py
-# 置かれた Excel を「読み取った形」だけ、しばらくメモリに覚えておく置き場。
-#
-# 帳票登録は見本の Excel をサーバーに置かない（利用者の指示 2026-09-21「見本のExcelは置かずに、
-# 設定だけ保持するようにしてほしい」）。ブラウザはファイルを選んだまま持っているので、セルを
-# クリックするたびに同じ Excel を送り直してくる。そのたびにブックを開き直すと（結合セル・図形を
-# 1つずつ作るので）数秒かかることがあるため、開いた結果（WorkbookInfo）だけをここに置く。
-# 登録したときのシートの中身（セルの番地と文字）は帳票の種類と一緒に DB が覚える
-# （pattern_books。2026-09-22）。ここはそれを開いた結果も同じように短い間だけ置く。
-#
-# 決まりごと:
-#   - ディスクには何も書かない。Excel の中身（bytes）も持たない（開いた結果だけ）。
-#   - アプリを終えれば消える（残るのは読み取りの設定と覚えたシートだけ、という約束を崩さない）。
-#   - 鍵は「ブラウザの作業場所（session_id）＋ファイルの sha256」。ほかの人が置いたブックは見えない。
-#   - 古いもの・多すぎるもの・大きすぎるものは、置いた順に落とす。
-#   - waitress は1つのプロセスを複数のスレッドで回すので、出し入れは錠（Lock）の中で行う。
-# ====================================================================================================
-
-# 覚えておく時間。帳票登録は「置く → セルをクリックする → 使用開始」を続けて行う作業なので、
-# 手が止まっても1回分の作業（30分）で足りる。切れてもブラウザが送り直すので読み直すだけ。
-TTL_SECONDS = 30 * 60
-# 覚えておく数と、その元になった Excel の大きさの合計。数人が同時に使っても RAM を食い尽くさない値。
-MAX_ENTRIES = 8
-MAX_BYTES = 64 * 1024 * 1024
-
-
-@dataclass
-class Book:
-    """ブラウザが置いた Excel を読み取った結果（中身そのものは持たない）。
-
-    帳票の種類が覚えているシート（pattern_books。views._stored_book が戻す）も同じ形で持つ。
-    そのときの size は覚えた JSON の大きさ、saved_at は置いた日時。
-    """
-
-    file_name: str
-    file_hash: str
-    size: int                      # 元の Excel の大きさ（置ける量を数えるため）
-    info: object                   # excel.workbook.WorkbookInfo
-    used_at: float = field(default_factory=time.monotonic)
-    saved_at: str = ""             # 帳票の種類と一緒に覚えたシートなら、その Excel を置いた日時
-
-
-_books: dict[tuple[str, str], Book] = {}
-_lock = threading.Lock()
-
-
-def _expired(book: Book, now: float) -> bool:
-    return now - book.used_at > TTL_SECONDS
-
-
-def _evict(now: float) -> None:
-    """古いもの → 入れた順、の順に落とす（錠の中から呼ぶ）。"""
-    for key in [k for k, b in _books.items() if _expired(b, now)]:
-        del _books[key]
-    total = sum(b.size for b in _books.values())
-    while _books and (len(_books) > MAX_ENTRIES or total > MAX_BYTES):
-        key, dropped = next(iter(_books.items()))   # dict は入れた順に並ぶ＝いちばん古いもの
-        del _books[key]
-        total -= dropped.size
-
-
-def put(session_id: str, book: Book) -> Book:
-    """読み取った結果を覚える（同じブックを置き直したら入れ替える）。"""
-    key = (session_id or "", book.file_hash)
-    with _lock:
-        book.used_at = time.monotonic()
-        _books.pop(key, None)       # 入れ直して「いちばん新しい」にする
-        _books[key] = book
-        _evict(book.used_at)
-    return book
-
-
-def get(session_id: str, file_hash: str) -> Book | None:
-    """覚えているブックを返す（無ければ None。呼び出し側はブラウザに置き直してもらう）。"""
-    key = (session_id or "", file_hash or "")
-    now = time.monotonic()
-    with _lock:
-        book = _books.get(key)
-        if book is None:
-            return None
-        if _expired(book, now):
-            del _books[key]
-            return None
-        book.used_at = now
-        _books.pop(key)
-        _books[key] = book          # 使ったものを「いちばん新しい」にする
-        return book
-
-
-def clear() -> None:
-    """全部忘れる（テスト・片付け用）。"""
-    with _lock:
-        _books.clear()
-
-
-def count() -> int:
-    with _lock:
-        return len(_books)
 
 
 # ====================================================================================================
@@ -2677,18 +2098,16 @@ def wait_job(job_id: int, timeout: float = 30.0, statuses=TERMINAL_STATUSES) -> 
 #
 # このアプリはダウンロードが終わった時点で、その取り込みに属するものをすべて消す。
 # 消すもの: アップロードした元のファイル、imports/<id>/（読み込んだ行・控え・作った md）、
-#           DB の行（documents / table_imports / jobs / ai_items / llm_calls とそれらの子）。
-# 残すもの: 帳票の種類（patterns とその子）・ブラウザごとの AI接続（ai_connections）。これらは「設定」で
-#           データではない（SETTINGS_TABLES。取り込みを指す列が後から足されても、ここからは消さない）。
+#           DB の行（table_imports / jobs / ai_items / llm_calls とそれらの子）。
+# 残すもの: ブラウザごとの AI接続（ai_connections）。これは「設定」でデータではない
+#           （SETTINGS_TABLES。取り込みを指す列が後から足されても、ここからは消さない）。
 #
-# DB の行は表の名前を決め打ちせず、その取り込みを指す列（document_id / import_id）を持つ表を
+# DB の行は表の名前を決め打ちせず、その取り込みを指す列（import_id / table_import_id）を持つ表を
 # sqlite_master から探して消す（後から表が増えても消し残さないため）。
 # ====================================================================================================
 
 log = logging.getLogger(__name__)
 
-# 取り込み1件を指す外部キーの列名（この列を持つ表は、その取り込みと一緒に消す）
-DOCUMENT_REF_COLUMNS = ("document_id",)
 IMPORT_REF_COLUMNS = ("import_id", "table_import_id")
 # 取り込みを指す列があっても、まとめては消さない表。llm_calls は AI の生の応答で、同じ文面の行なら
 # 別の取り込みの ai_items が同じ応答を使っていることがある（消すと再実行で再課金になる）。
@@ -2696,10 +2115,8 @@ IMPORT_REF_COLUMNS = ("import_id", "table_import_id")
 SHARED_TABLES = ("llm_calls",)
 # 「設定」の表。取り込みを捨てる片付け（purge_* / sweep_stale / purge_session）では決して消さない。
 # ai_connections はブラウザごとの AI接続（APIキー・接続先。利用者の指示 2026-09-21「ずっと保持」）で、
-# 帳票・一覧表と同じ session_id を持ち主に持つが、その人の取り込みを捨てても残す。
-# pattern_books は帳票の種類が覚えているシートの中身（セルの番地と文字。Excel のファイルではない。
-# 利用者の指示 2026-09-22）で、種類と一緒にしか消えない。
-SETTINGS_TABLES = ("patterns", "pattern_sheets", "pattern_fields", "pattern_books", "ai_connections")
+# 取り込みと同じ session_id を持ち主に持つが、その人の取り込みを捨てても残す。
+SETTINGS_TABLES = ("ai_connections",)
 
 
 def _tables_with_column(db, column: str) -> list[str]:
@@ -2876,56 +2293,6 @@ def purge_after_send(response, fn, *args):
     return response
 
 
-# ---- 帳票 --------------------------------------------------------------------------
-
-# 帳票を消したときに呼ぶ関数（画面側がメモリに持っている帳票ごとの目印を一緒に捨てるため）。
-# 引数は消した帳票の id のリスト。
-_DOCUMENT_PURGE_HOOKS: list = []
-
-
-def on_documents_purged(fn):
-    """帳票を消したあとに fn(doc_ids) を呼ぶよう登録する（同じ関数は1回だけ）。デコレーターとしても使える。"""
-    if fn not in _DOCUMENT_PURGE_HOOKS:
-        _DOCUMENT_PURGE_HOOKS.append(fn)
-    return fn
-
-
-def purge_documents(doc_ids) -> int:
-    """帳票を消す（元のファイルと DB の行）。戻り値: 消した帳票の件数。"""
-    ids = [int(i) for i in doc_ids]
-    if not ids:
-        return 0
-    db = get_db()
-    marks = ", ".join("?" for _ in ids)
-    stored = [row[0] for row in db.execute(f"SELECT stored_path FROM documents WHERE id IN ({marks})", ids)]
-    # DB の行を先に消す。ファイルを先に消すと、DB の削除が失敗したとき（ロック・強制終了）に
-    # 「ファイルの無い帳票」が作業中として残ってしまう。逆なら残るのは行の無いファイルで、起動時に片付く。
-    removed = 0
-    for doc_id in ids:
-        _delete_by_columns(db, DOCUMENT_REF_COLUMNS, doc_id)
-        _delete_jobs(db, "document", doc_id)
-        removed += db.execute("DELETE FROM documents WHERE id = ?", (doc_id,)).rowcount
-    db.commit()
-    for path in stored:
-        if not remove_upload(path):
-            _mark_incomplete()
-    for hook in _DOCUMENT_PURGE_HOOKS:
-        try:
-            hook(ids)
-        except Exception:  # 目印の片付けに失敗しても、消すこと自体は終わっている
-            log.exception("帳票を消したあとの片付けに失敗しました")
-    _shrink(db)
-    return removed
-
-
-def purge_batch(batch_id: str) -> int:
-    """まとめ取り込み1回分（同じ batch_id の帳票）をすべて消す。"""
-    if not batch_id:
-        return 0
-    ids = [row[0] for row in get_db().execute("SELECT id FROM documents WHERE batch_id = ?", (batch_id,))]
-    return purge_documents(ids)
-
-
 # ---- 一覧表 ------------------------------------------------------------------------
 
 def import_dir(import_id: int) -> Path:
@@ -2941,7 +2308,7 @@ def purge_table_import(import_id: int) -> int:
         # DB の行が無くてもフォルダが残っていることがあるので、そこだけ片付ける
         shutil.rmtree(import_dir(import_id), ignore_errors=True)
         return 0
-    # DB の行を先に消し、ファイルはそのあと（purge_documents と同じ理由。残ったフォルダ・ファイルは起動時に片付く）
+    # DB の行を先に消し、ファイルはそのあと消す（残ったフォルダ・ファイルは起動時に片付く）
     # この取り込みが使っていた AI の応答のキー（行を消す前に控える。消したあと、ほかで使われていなければ消す）
     keys = [r[0] for r in db.execute("SELECT cache_key FROM ai_items WHERE import_id = ? AND cache_key IS NOT NULL",
                                      (import_id,))]
@@ -2987,8 +2354,8 @@ def _shrink(db) -> None:
     一時停止中のジョブがあるときは VACUUM をしない（消した中身は secure_delete で上書き済み。
     ファイルの大きさは、ジョブが無いときの次の削除か起動時の片付けで戻る）。
 
-    さらに、空きページが少ないうちは VACUUM をしない。帳票の取り込みはジョブを作らないので、
-    .md を1件ダウンロードするだけでも上の判定を素通りして毎回 DB 全体を書き直していた
+    さらに、空きページが少ないうちは VACUUM をしない。ジョブが1件も無ければ上の判定を素通りするので、
+    .md を1件ダウンロードするだけでも毎回 DB 全体を書き直していた
     （118MB で1秒、その間ほかの人の自動保存が最長0.75秒待たされた。2026-09-23 のレビューで実測）。
     """
     forget_id_counters(db)
@@ -3029,7 +2396,7 @@ def _jobs_active(db) -> bool:
 # ---- 番号の続きを忘れる ------------------------------------------------------------
 # 取り込むたびに行を作り、ダウンロードで消す表。AUTOINCREMENT の表は、消したあとも sqlite_sequence に
 # 「これまでに使った一番大きい番号」が残り、何件取り込んだかの記録になってしまう（design.md 3.3「履歴は持たない」）。
-WORK_TABLES = ("documents", "table_imports", "jobs", "ai_items")
+WORK_TABLES = ("table_imports", "jobs", "ai_items")
 # 表が空になったら、続きの番号をこの範囲の乱数にする。最初の番号（1〜）とも前回の番号とも重ならないので、
 # 開いたままの古い画面やブラウザに残った画面が、消した番号で別の取り込みを開いたり書き換えたりしない
 # （重なる確率は 1回あたり 取り込み件数 / 約4.5×10^15。JavaScript で正確に扱える 2^53 未満に収める）。
@@ -3062,12 +2429,12 @@ def forget_id_counters(db) -> int:
 # ---- まとめて捨てる（作業中の表示を持たない） ----------------------------------------------
 # この アプリは「作業中の一覧」も「ダウンロード待ちの一覧」も持たない（利用者の指示 2026-09-20）。
 # 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）ので、捨てる機会は4つ:
-#   - 画面を離れたとき: その人が触っていた分を捨てる（purge_session / discard_documents / discard_table_imports）
+#   - 画面を離れたとき: その人が触っていた分を捨てる（purge_session / discard_table_imports）
 #   - 新しいファイルを置いたとき: 同じ人の前の分を捨てる（同上）
 #   - 動いている間: IDLE_HOURS さわられていないものを捨てる（sweep_stale）
-#   - 起動時: ダウンロードしていない帳票・一覧表をすべて捨てる（purge_all_pending）
+#   - 起動時: ダウンロードしていない取り込みをすべて捨てる（purge_all_pending）
 # あとの2つ（時間切れ・起動時）は、動いているジョブが付いているものには手を出さない（_busy_ids）。
-# 残すのは「設定」（帳票の種類・ブラウザごとの AI接続 = SETTINGS_TABLES）だけで、これは purge の対象ではない。
+# 残すのは「設定」（ブラウザごとの AI接続 = SETTINGS_TABLES）だけで、これは purge の対象ではない。
 # AI接続だけは、クッキーの寿命（約1年。views.SESSION_LIFETIME）より長くさわられていない行を
 # sweep_stale_ai_connections が消す（もう戻って来ないブラウザの APIキーを DB に残さない）。
 
@@ -3082,15 +2449,11 @@ def _import_ids(db, where: str = "", args=()) -> list[int]:
     return [row[0] for row in db.execute(f"SELECT id FROM table_imports {where}", args)]
 
 
-def _document_ids(db, where: str = "", args=()) -> list[int]:
-    return [row[0] for row in db.execute(f"SELECT id FROM documents {where}", args)]
-
-
-def purge_all_pending() -> tuple[int, int]:
-    """ダウンロードしていない帳票・一覧表をすべて捨てる。戻り値: (帳票の件数, 一覧表の件数)。
+def purge_all_pending() -> int:
+    """ダウンロードしていない取り込みをすべて捨てる。戻り値: 捨てた件数。
 
     ダウンロードが終わったものはその時点で消えている（purge_after_send）ので、DB に残っている
-    帳票・取り込みは「途中のもの」か「確定したがダウンロードしていないもの」しかない。
+    取り込みは「途中のもの」か「確定したがダウンロードしていないもの」しかない。
     続きを開く入口（作業中の一覧）を持たないので、起動時にまとめて捨てる。
 
     動いているジョブが付いているものには手を出さない。起動直後は _recover_jobs が動いていた
@@ -3099,27 +2462,12 @@ def purge_all_pending() -> tuple[int, int]:
     消してしまわないようにする。
     """
     db = get_db()
-    busy_docs = _busy_ids(db, "document")
     busy_imports = _busy_ids(db, "table_import")
-    forms = purge_documents([i for i in _document_ids(db) if i not in busy_docs])
     tables = 0
     for import_id in _import_ids(db):
         if import_id not in busy_imports:
             tables += purge_table_import(import_id)
-    return forms, tables
-
-
-def purge_old_sample_files() -> int:
-    """前の版が置いた見本の Excel（uploads/samples）を片付ける。戻り値: 消した件数。
-
-    帳票登録は見本の Excel を置かなくなった（利用者の指示 2026-09-21「見本のExcelは置かずに、
-    設定だけ保持するようにしてほしい」）。置いた Excel はその場で読み取るだけで保存しないので、
-    ふつうは1件も無い。前の版で置いたままのファイルだけを、起動時にフォルダごと捨てる。
-    """
-    from flask import current_app
-
-
-    return remove_sample_dir(current_app.config["UPLOAD_DIR"])
+    return tables
 
 
 def _stale_before(hours: float) -> str:
@@ -3161,12 +2509,10 @@ def _sweep_orphan_uploads() -> int:
         return 0     # 片付けは best effort。ここで見回り全体を止めない
 
 
-def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
-    """しばらくさわられていない帳票・一覧表を捨てる。戻り値: (帳票の件数, 一覧表の件数)。
+def sweep_stale(hours: float = STALE_HOURS) -> int:
+    """しばらくさわられていない取り込みを捨てる。戻り値: 捨てた件数。
 
-    帳票も一覧表も「最後にさわった日時」（途中保存・読み取り → 確定 → 取り込み の順に見る）で切る。
-    まとめ取り込みは、そのまとまりのどれか1件でも新しければ、まとまりごと残す（50件を上から順に
-    見ていくと、まだ手が届いていない帳票だけが画面から消えてしまうため）。
+    「最後にさわった日時」（途中保存・読み取り → 確定 → 取り込み の順に見る）で切る。
     動いているジョブが付いているものは、そのジョブが終わるまで残す。
     """
     try:
@@ -3176,17 +2522,9 @@ def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
     _sweep_orphan_uploads()
     db = get_db()
     limit = _stale_before(hours)
-    busy_docs = _busy_ids(db, "document")
     busy_imports = _busy_ids(db, "table_import")
     # 見るのは updated_at が先。confirmed_at は「最後に確定した時刻」で、そのあと直し続けても
-    # 進まない。先に見ていたころは、10:00 に確定して 12:30 まで直していた帳票が 12:05 の見回りで
-    # 消えていた（画面の説明とも逆。2026-09-23 のレビューで実測）
-    forms = purge_documents([i for i in _document_ids(
-        db,
-        "WHERE COALESCE(updated_at, confirmed_at, created_at) < ? "
-        "AND (batch_id = '' OR NOT EXISTS (SELECT 1 FROM documents s WHERE s.batch_id = documents.batch_id "
-        "AND COALESCE(s.updated_at, s.confirmed_at, s.created_at) >= ?))",
-        (limit, limit)) if i not in busy_docs])
+    # 進まない（2026-09-23 のレビューで実測）
     tables = 0
     for import_id in _import_ids(
             db, "WHERE COALESCE(updated_at, confirmed_at, created_at) < ?", (limit,)):
@@ -3194,7 +2532,7 @@ def sweep_stale(hours: float = STALE_HOURS) -> tuple[int, int]:
             continue
         tables += purge_table_import(import_id)
     sweep_stale_ai_connections()
-    return forms, tables
+    return tables
 
 
 # ブラウザごとの AI接続を消すまでの日数。クッキーの寿命（views.SESSION_LIFETIME = 365日）を過ぎたブラウザは
@@ -3219,10 +2557,10 @@ def sweep_stale_ai_connections(days: float = AI_CONNECTION_KEEP_DAYS) -> int:
 # ---- 使っている人ごとに捨てる ---------------------------------------------------------
 # 社内LANに置いて数人が同時に使う（利用者の指示 2026-09-20）ので、「作業中のもの」は
 # 全員分がひとつの DB に混ざっている。画面を離れた人の分だけを捨てられるように、
-# documents / table_imports は持ち主（session_id。views.current_session_id() がブラウザごとに配る）を持つ。
+# table_imports は持ち主（session_id。views.current_session_id() がブラウザごとに配る）を持つ。
 #
 # 持ち主の列がまだ無い古い DB でも動くようにしてある:
-#   - 番号を指して捨てる（discard_documents / discard_table_imports）… 持ち主を確かめずに捨てる
+#   - 番号を指して捨てる（discard_table_imports）… 持ち主を確かめずに捨てる
 #     （1人で使っていた頃と同じ動き。指された番号は、その画面が自分で取り込んだものしかない）
 #   - まとめて捨てる（purge_session）… 誰のものか分からないので何も捨てない（他人の分を巻き込まない）
 
@@ -3266,20 +2604,6 @@ def _session_ids(db, table: str, session_id) -> list[int]:
         return []
 
 
-def discard_documents(doc_ids, session_id=None) -> int:
-    """指された帳票のうち、その人のもので、処理中でないものを捨てる。戻り値: 捨てた件数。
-
-    画面を離れたとき・新しいファイルを置いたときに呼ぶ。もう無いもの・他人のもの・処理中のものは
-    黙って飛ばす（何度呼んでも安全で、無駄な読み書きもしない）。
-    """
-    db = get_db()
-    ids = _owned_ids(db, "documents", doc_ids, session_id)
-    if not ids:
-        return 0
-    busy = _busy_ids(db, "document")
-    return purge_documents([i for i in ids if i not in busy])
-
-
 def discard_table_imports(import_ids, session_id=None) -> int:
     """指された一覧表の取り込みのうち、その人のもので、処理中でないものを捨てる。戻り値: 捨てた件数。"""
     db = get_db()
@@ -3294,73 +2618,34 @@ def discard_table_imports(import_ids, session_id=None) -> int:
     return removed
 
 
-def purge_session(session_id, *, include_busy: bool = False,
-                  documents: bool = True, tables: bool = True) -> tuple[int, int]:
-    """その人の、まだダウンロードしていない帳票・一覧表をすべて捨てる。戻り値: (帳票の件数, 一覧表の件数)。
+def purge_session(session_id, *, include_busy: bool = False) -> int:
+    """その人の、まだダウンロードしていない取り込みをすべて捨てる。戻り値: 捨てた件数。
 
     捨てるのは、元のファイル・imports/<id>/（読み込んだ行・控え・作った md）・DB の行・
-    AI整形の控えと、ほかから使われなくなった AI の応答（purge_documents / purge_table_import と同じ）。
-    残すのは設定（帳票の種類・一覧表の取り込み設定・AI接続）だけ。
-
-    documents / tables で片方だけにできる。帳票取り込みの画面を閉じた合図で
-    表の取り込みの画面（同じブラウザの別のタブ）の作業まで巻き込まないために使う。
+    AI整形の控えと、ほかから使われなくなった AI の応答（purge_table_import と同じ）。
+    残すのは設定（AI接続）だけ。
 
     動いているジョブ（読み込み・下書き・AI整形）が付いているものは、そのジョブが壊れるので捨てない。
     捨て損ねた分は、ジョブが終わったあと sweep_stale が IDLE_HOURS で片付ける。
     どうしても今すぐ捨てるときだけ include_busy=True（ジョブは次の書き込みで失敗して終わる）。
     """
     if not session_id:
-        return 0, 0
+        return 0
     db = get_db()
-    doc_ids = _session_ids(db, "documents", session_id) if documents else []
-    import_ids = _session_ids(db, "table_imports", session_id) if tables else []
+    import_ids = _session_ids(db, "table_imports", session_id)
     if not include_busy:
-        busy_docs = _busy_ids(db, "document")
-        busy_imports = _busy_ids(db, "table_import")
-        doc_ids = [i for i in doc_ids if i not in busy_docs]
-        import_ids = [i for i in import_ids if i not in busy_imports]
-    forms = purge_documents(doc_ids)
+        busy = _busy_ids(db, "table_import")
+        import_ids = [i for i in import_ids if i not in busy]
     tables = 0
     for import_id in import_ids:
         tables += purge_table_import(import_id)
-    return forms, tables
+    return tables
 
 
 ####################################################################################################
 # 画面（旧 views.py）
 ####################################################################################################
 
-from app.extract import (
-    apply_manual_values,
-    extract_document,
-    is_blank_value,
-    refresh_summary,
-    clean_table_value,
-    is_table_value,
-    parse_table_text,
-    table_text_lines,
-    EXCEL_ERROR_WARNING,
-    WorkbookInfo,
-    load_workbook_info,
-    build_markdown,
-    markdown_filename,
-    rank_patterns,
-    rank_batch,
-    table_like_sheets,
-    suggest_title_fields,
-    click_field,
-    merge_labels,
-    merge_target,
-    same_sheet_field,
-    separate_names,
-    split_rows,
-    table_cells,
-    pattern_to_meta,
-    pattern_to_rows,
-    rows_to_pattern,
-    match_pattern,
-    PatternDef,
-)
 from app.extract import (
     count_levels,
     has_blocking,
@@ -3400,10 +2685,10 @@ from app.extract import (
 # ---- 使っている人ごとの作業場所 ---------------------------------------------------------
 # 社内LANのサーバーで動かし、数人が同時に別々のPCから使う（2026-09-20 の利用者の指示）。
 # ログインは無いので「誰か」は分からないが、「どのブラウザか」はセッションのクッキーで分かる。
-# 取り込んだ帳票・一覧表はそのブラウザのものとして持ち主を記録し、ほかのブラウザからは
-# 見えない・触れないようにする（views/forms.py・views/tables.py の 404）。
-# 「設定」のうち帳票の種類はみんなで使うので分けない。AI接続（APIキー・接続先）だけは、同じ id で
-# ブラウザごとに持つ（利用者の指示 2026-09-21「cookieでユーザー毎に登録内容をずっと保持」。ai.py・core.ai_connections）。
+# 取り込んだ表はそのブラウザのものとして持ち主を記録し、ほかのブラウザからは
+# 見えない・触れないようにする（views/tables.py の 404）。
+# 「設定」のうち AI接続（APIキー・接続先）も、同じ id でブラウザごとに持つ
+# （利用者の指示 2026-09-21「cookieでユーザー毎に登録内容をずっと保持」。ai.py・core.ai_connections）。
 # そのためクッキーは約1年もたせる（SESSION_LIFETIME。create_app が PERMANENT_SESSION_LIFETIME に入れる）。
 # 長くしても分かれ方は変わらない: id は uuid4 で、署名鍵（SECRET_KEY）付きの HttpOnly・SameSite=Lax のクッキー
 # にしか無く、ほかのブラウザからは推測も持ち出しもできない。
@@ -3423,7 +2708,7 @@ def current_session_id() -> str:
 
 
 def owns(row) -> bool:
-    """帳票・取り込みの行がこのブラウザのものか。
+    """取り込みの行がこのブラウザのものか。
 
     session_id が空の行は持ち主が分からない（この仕組みを入れる前のDBの行・テストで直接作った行）ので、
     これまでどおり誰からでも扱えるものとして扱う。起動時の片付けで消えるので、普段は残らない。
@@ -3459,17 +2744,17 @@ def set_download_name(response, name: str, default_stem: str):
 
 # ---- 書き込みの発火元を確かめる（他サイトからの操作を断る） ----------------------------
 # 127.0.0.1 だけで待ち受けても、「利用者が開いた別のサイトのページが、そのブラウザから
-# このアプリへ POST する」ことは防げない（AI接続先の書き換え・帳票の削除などができてしまう）。
+# このアプリへ POST する」ことは防げない（AI接続先の書き換え・取り込みの削除などができてしまう）。
 # ブラウザは POST に必ず Origin を付け、最近のブラウザは Sec-Fetch-Site も付けるので、
 # 他サイト発と分かる書き込みだけを断る（curl などヘッダの無い要求はアプリを直接たたく操作として許す）。
 
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 SAME_SITE_FETCH = ("same-origin", "none")
 
-# GET でもデータを消すルート（Markdown をダウンロードすると、その帳票・取り込みを消す。design.md 3.3）。
+# GET でもデータを消すルート（zip をダウンロードすると、その取り込みを消す。design.md 3.3）。
 # 他サイトのページの <img>・リンク・window.open からでも GET は出せるので、書き込みと同じく発火元を確かめる。
 # アドレス欄に打った URL（Sec-Fetch-Site: none）とアプリ内のクリック（same-origin）は通す。
-PURGING_ENDPOINTS = frozenset({"forms.download_md", "forms.download_batch", "tables.download_zip"})
+PURGING_ENDPOINTS = frozenset({"tables.download_zip"})
 
 
 def _origin_of(url: str) -> str:
@@ -3498,7 +2783,7 @@ def is_cross_site_write(req=None) -> bool:
 
 
 def render_part(template: str, part: str, **ctx) -> str:
-    """画面のテンプレート（forms.html など）の中のマクロ part_* を1つだけ描いて、HTML の断片を返す。
+    """画面のテンプレート（base.html）の中のマクロ part_* を1つだけ描いて、HTML の断片を返す。
 
     段の中身は fetch でそのつど取りに来るので、ページ全体ではなく断片だけを描く。マクロは render_template と同じ
     文脈（url_for・request・ctx の変数）を見る。マクロに引数があれば ctx の同じ名前の値を渡す。
@@ -3507,1337 +2792,6 @@ def render_part(template: str, part: str, **ctx) -> str:
     module = current_app.jinja_env.get_template(template).make_module(ctx)
     fn = getattr(module, part)
     return str(fn(**{k: ctx[k] for k in fn.arguments if k in ctx}))
-
-
-# ====================================================================================================
-# 元 views/forms.py
-# 帳票取り込み（1ファイル＝1件）。画面は /forms の1枚だけ。
-#
-# 上から順に「ファイルを置く」「帳票の種類とシート」「読み取り結果」「確定してダウンロード」の
-# 欄が現れる。画面の移動はなく、どの操作も fetch でこのファイルのルートを呼び、返ってきた
-# HTML の断片をその場に入れ替える（views/forms.py のルートは JSON か HTML の断片を返す）。
-#
-# Markdown は常にデータから作る（読み取り結果のプレビュー＝作業中の値、ダウンロード＝確定済みの値）。
-# 複数ファイルをまとめて置くと「取り込みのまとまり（batch）」になり、同じフォームの帳票として
-# まとめて1回だけ種類とシートを決め、読み取り結果は全部の帳票を縦に並べて見ていく（タブで1件ずつ
-# 切り替えない。利用者の指示 2026-09-20）。最後に zip でまとめて渡す。
-# ダウンロードしたデータはその場で消す（design.md 3.3）。消すのは Markdown を作り終え、本文を送り終えたあとだけ
-# （途中で切れたときは消さない: core.purge.purge_after_send）。
-# ====================================================================================================
-
-forms_bp = Blueprint("forms", __name__, url_prefix="/forms")
-
-# 左のシートプレビューに出す範囲の上限（大きいシートで画面が重くならないように）
-GRID_MAX_ROWS = 300
-GRID_MAX_COLS = 60
-CONFIRMED_STATES = ("confirmed", "modified")
-MAX_BATCH_FILES = 50
-# ダウンロードでデータが消えることの案内（画面の文言・確認ダイアログで使う）
-FORMS_DELETE_ON_DOWNLOAD_NOTE = ("ダウンロードすると、この帳票の元のファイルと読み取り結果はサーバーから消えます。"
-                           "同じものをもう一度ダウンロードすることはできません。")
-FORMS_DELETE_ON_DOWNLOAD_CONFIRM = "ダウンロードすると、この帳票のデータはサーバーから消えます。もう一度ダウンロードすることはできません。"
-# 確定したあとに直した（修正中の）帳票は、直した値が .md に入るよう確定し直してから渡す
-MODIFIED_DOWNLOAD_CONFIRM = "確定し直してから、直した値で Markdown を作ります。" + FORMS_DELETE_ON_DOWNLOAD_CONFIRM
-BATCH_DELETE_CONFIRM = ("ダウンロードすると、このまとまりの帳票のデータはサーバーからすべて消えます。"
-                        "もう一度ダウンロードすることはできません。")
-LOST_WORK_MESSAGE = "読み取り直すと、手で修正した値は失われます"
-# 別のタブ・古い画面から保存・確定されたときの案内
-STALE_MESSAGE = "別の画面で内容が変わりました。画面を読み込み直してください"
-
-
-# ---- 共通 -------------------------------------------------------------------------
-
-def _get_document(doc_id: int) -> dict:
-    """この画面（このブラウザ）の帳票を返す。ほかの人の帳票は「無い」として扱う（404）。
-
-    403 にすると「その番号の帳票はある」ことが分かってしまうので、404 にそろえる。
-    """
-    doc = get_document(doc_id)
-    if doc is None or not owns(doc):
-        abort(404)
-    return doc
-
-
-def _load_info(doc: dict) -> WorkbookInfo | None:
-    """元のファイルを読む。消えている・壊れている場合は None。"""
-    try:
-        return load_workbook_info(upload_path(doc["stored_path"]))
-    except Exception:
-        return None
-
-
-def _data(doc: dict, column: str = "data_json") -> dict | None:
-    raw = doc.get(column)
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except ValueError:
-        return None
-
-
-def _dumps_extraction(extraction: dict) -> str:
-    # 状態（修正中かどうか）は文字列の比較で決まるので、保存は常にこの形にそろえる
-    return json.dumps(extraction, ensure_ascii=False)
-
-
-def _search_title(doc: dict, extraction: dict) -> str:
-    """一覧に出す見出し（Markdown の1行目）。"""
-    first = build_markdown(doc, extraction).split("\n", 1)[0]
-    return first[2:].strip() if first.startswith("# ") else first.strip()
-
-
-def _display_text(value) -> str:
-    if is_table_value(value):
-        return table_json(value)
-    return "" if value is None else str(value)
-
-
-@forms_bp.app_template_filter("table_json")
-def table_json(value) -> str:
-    """明細表の値を画面の入力欄（hidden）に入れる JSON。"""
-    return json.dumps(value, ensure_ascii=False) if is_table_value(value) else ""
-
-
-@forms_bp.app_template_filter("field_text")
-def field_text(value) -> str:
-    """一覧・読み取りテスト用の表示。明細表は1行1明細の「品番: X／品名: Y」。"""
-    if is_table_value(value):
-        return "\n".join(table_text_lines(value))
-    return "" if value is None else str(value)
-
-
-def _same_text(a: str, b: str) -> bool:
-    norm = lambda s: s.replace("\r\n", "\n").replace("\r", "\n").strip()  # noqa: E731
-    return norm(a) == norm(b)
-
-
-def _apply_values(extraction: dict, values: dict, confirmed: dict | None = None) -> bool:
-    """画面の入力値を反映する。表示中の値と同じ文字列の項目は触らない（勝手に「手で修正」にしない）。
-
-    confirmed（確定済みの版）を渡すと、確定済みと同じ値に戻した項目は確定済みの項目そのものに戻す。
-    戻り値: 変わった項目があれば True。
-    """
-    before = _dumps_extraction(extraction)
-    fields = {f["field_name"]: f for f in extraction["fields"]}
-    changed = {}
-    for name, text in values.items():
-        f = fields.get(name)
-        if f is None or text is None:
-            continue
-        text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False)
-        if f["data_type"] == "table":
-            parsed, warning = parse_table_text(text)
-            # 行の無い表（列見出しだけ）と空の値は同じもの
-            if warning is None and (parsed == clean_table_value(f["value"])
-                                    or (is_blank_value(parsed) and is_blank_value(f["value"]))):
-                continue
-        elif _same_text(text, _display_text(f["value"])):
-            continue
-        changed[f"value-{name}"] = text
-    if changed:
-        apply_manual_values(extraction, changed)
-        _restore_confirmed_fields(extraction, confirmed)
-    else:
-        refresh_summary(extraction)
-    return _dumps_extraction(extraction) != before
-
-
-# 手で直すと変わる項目のキー。これ以外（表示名・Markdownへの出し方など）が違う項目は戻さない
-_EDIT_KEYS = {"value", "unit", "warning", "edited"}
-_LOCATION_KEYS = {"sheet", "value_cell"}
-
-
-def _restore_confirmed_fields(extraction: dict, confirmed: dict | None) -> None:
-    """確定済みと同じ値（数値は単位も）になった項目を、確定済みの項目の中身に戻す。"""
-    new_pattern, old_pattern = extraction.get("pattern", {}), (confirmed or {}).get("pattern", {})
-    if (not confirmed or old_pattern.get("id") != new_pattern.get("id")
-            or old_pattern.get("version_no") != new_pattern.get("version_no")
-            or confirmed.get("sheets") != extraction.get("sheets")):
-        return  # 別の種類・版・シートで読み直した版は比べない
-    before = {f["field_name"]: f for f in confirmed.get("fields", [])}
-    for i, f in enumerate(extraction["fields"]):
-        old = before.get(f["field_name"])
-        same_value = old is not None and (old.get("value") == f.get("value") or (
-            f.get("data_type") == "table" and is_blank_value(old.get("value")) and is_blank_value(f.get("value"))))
-        if (old is not None and old != f and same_value
-                and (old.get("unit") or "") == (f.get("unit") or "")
-                and {k: v for k, v in old.items() if k not in _EDIT_KEYS | _LOCATION_KEYS}
-                == {k: v for k, v in f.items() if k not in _EDIT_KEYS | _LOCATION_KEYS}):
-            extraction["fields"][i] = json.loads(json.dumps(old))
-    refresh_summary(extraction)
-
-
-def _is_blank(value) -> bool:
-    return is_blank_value(value)
-
-
-_UNIT_WARNING_PREFIXES = ("この項目の単位は", "単位が書かれていません")
-
-
-def _field_status(f: dict) -> dict:
-    """項目の状態タグ: 値の出どころ（auto/manual/blank）と要確認かどうか。"""
-    blank = _is_blank(f["value"])
-    if f.get("edited"):
-        source = "manual"
-    elif blank:
-        source = "blank"
-    else:
-        source = "auto"
-    # 単位の食い違い・単位なしの警告は、手で直した値でも Markdown に誤った単位で出るので要確認のまま
-    unit_issue = f["data_type"] == "number" and str(f.get("warning") or "").startswith(_UNIT_WARNING_PREFIXES)
-    date_issue = f["data_type"] == "date" and bool(f.get("warning"))
-    value = f["value"]
-    number_issue = f["data_type"] == "number" and (
-        "数値の部分だけ" in str(f.get("warning") or "")
-        or not isinstance(value, (int, float)) or isinstance(value, bool))
-    error_value = source == "blank" and str(f.get("warning") or "").startswith(EXCEL_ERROR_WARNING)
-    issue = error_value or (
-        not blank and bool(f.get("warning")) and (source == "auto" or unit_issue or date_issue or number_issue))
-    return {"source": source, "issue": bool(issue), "blank": blank}
-
-
-def _summary(doc: dict, extraction: dict) -> dict:
-    """読み取り結果の欄の数値（チップ・Markdownプレビュー・項目ごとの状態）。"""
-    statuses = {f["field_name"]: _field_status(f) for f in extraction["fields"]}
-    return {
-        "markdown": build_markdown(doc, extraction),
-        "file_name": markdown_filename(doc, extraction),
-        "state": doc["state"],
-        "counts": {
-            "issue": sum(1 for s in statuses.values() if s["issue"]),
-            "manual": sum(1 for s in statuses.values() if s["source"] == "manual"),
-            "blank": sum(1 for s in statuses.values() if s["blank"]),
-        },
-        "fields": {name: {**s, "warning": f.get("warning") or ""}
-                   for name, s, f in ((f["field_name"], statuses[f["field_name"]], f) for f in extraction["fields"])},
-    }
-
-
-def _sheet_grids(info: WorkbookInfo | None, sheet_names: list[str]) -> list[dict]:
-    """元のシートを HTML の表にするための行データ（結合セルは rowspan/colspan）。"""
-    if info is None:
-        return []
-    from openpyxl.utils import get_column_letter
-
-    sheets = []
-    for name in sheet_names:
-        grid = info.grids.get(name)
-        if grid is None:
-            continue
-        max_row, max_col = min(grid.max_row, GRID_MAX_ROWS), min(grid.max_col, GRID_MAX_COLS)
-        rows = []
-        for r in range(1, max_row + 1):
-            cells = []
-            for c in range(1, max_col + 1):
-                top, left, bottom, right = grid.bounds(r, c)
-                if (top, left) != (r, c):
-                    continue  # 結合範囲の左上以外は描かない
-                cell = grid.cells.get((r, c))
-                cells.append({
-                    "coord": f"{get_column_letter(c)}{r}",
-                    "text": cell.text if cell else "",
-                    "rowspan": min(bottom, max_row) - r + 1,
-                    "colspan": min(right, max_col) - c + 1,
-                    "label": bool(cell and (cell.bold or cell.filled)),
-                })
-            rows.append({"index": r, "cells": cells})
-        sheets.append({
-            "name": name,
-            "rows": rows,
-            "letters": [get_column_letter(c) for c in range(1, max_col + 1)],
-            "truncated": grid.max_row > GRID_MAX_ROWS or grid.max_col > GRID_MAX_COLS,
-            "images": len(info.images_in([name])),
-        })
-    return sheets
-
-
-def _version(doc: dict) -> str:
-    """読み取り結果を出したときの作業データの版（古い画面からの保存・確定を見分ける）。"""
-    return hashlib.sha1(str(doc.get("data_json") or "").encode("utf-8")).hexdigest()[:16]
-
-
-def _forms_payload() -> dict:
-    payload = request.get_json(force=True, silent=True)
-    return payload if isinstance(payload, dict) else {}
-
-
-def _is_stale(doc: dict) -> bool:
-    """画面が送ってきた版が今の作業データと違うか。版を送らない呼び出しは比べない。"""
-    sent = _forms_payload().get("version") or request.form.get("version")
-    return bool(sent) and str(sent) != _version(doc)
-
-
-# ---- 1枚の画面 ----------------------------------------------------------------------
-
-@forms_bp.get("/", endpoint="index")
-@forms_bp.get("/new", endpoint="new")
-def forms_page():
-    """帳票取り込みの1枚の画面。ここから先はすべて fetch で欄が増えていく。"""
-    current_session_id()   # 画面を開いた時点で作業場所（クッキー）を決めておく（同時に置かれても取り違えない）
-    return render_template("base.html", screen="forms",
-                           active_pattern_count=count_active_patterns(),
-                           pattern_count=len(list_patterns()),
-                           max_files=MAX_BATCH_FILES,
-                           max_mb=(current_app.config.get("MAX_CONTENT_LENGTH") or 0) // (1024 * 1024))
-
-
-# ---- ファイルを置く ------------------------------------------------------------------
-
-def upload_error_text(storage, exc: Exception, position: int | None = None) -> str:
-    """取り込めなかったファイルのメッセージ。まとめて置いたときは「3件目のファイル」と位置で示す。"""
-    message = str(exc)
-    name = original_name(storage)
-    if name and message.startswith(f"{name}: "):
-        message = message[len(name) + 2:]
-    return f"{position}件目のファイル: {message}" if position else message
-
-
-def _store_document(storage, batch_id: str = "", order: int = 0) -> int:
-    """1ファイルを保存して帳票を作る。読めないファイルは保存先から消して UploadError。"""
-    cfg = current_app.config
-    # 帳票1ファイルの上限はここ。一覧表むけの設定（TABLE_MAX_UPLOAD_BYTES）を広げても
-    # 帳票の上限は動かさない（別の話なので連動させない。2026-09-23 のレビュー）
-    stored = save_upload(storage, "documents", cfg["ALLOWED_EXTENSIONS"], cfg["FORM_MAX_UPLOAD_BYTES"])
-    try:
-        path = upload_path(stored.stored_path)
-        precheck_excel(path, cfg.get("EXCEL_MAX_CELLS"), max_merged=FORM_MAX_MERGED_CELLS)
-        try:
-            info = load_workbook_info(path)
-        except Exception as exc:
-            current_app.logger.warning("帳票を読み込めませんでした: %s", exc.__class__.__name__)
-            raise UploadError("Excelファイルとして読み込めませんでした") from exc
-        if not info.grids:
-            raise UploadError("シートがないブックです。シートのあるブックを選んでください")
-    except Exception:
-        remove_upload(stored.stored_path)   # 思わぬエラーでもアップロードしたファイルを残さない（design.md 3.3）
-        raise
-    return create_document(stored.file_name, stored.file_hash, stored.stored_path,
-                              batch_id=batch_id, batch_order=order, session_id=current_session_id())
-
-
-@forms_bp.post("/upload", endpoint="upload")
-def forms_upload():
-    """置かれたファイルを取り込む（fetch）。複数なら1つのまとまり（batch）にして、同じ画面で1件ずつ読む。"""
-    storages = [s for s in request.files.getlist("file") if s is not None and s.filename]
-    if not storages:
-        return jsonify(error="ファイルを置いてください"), 400
-    if len(storages) > MAX_BATCH_FILES:
-        return jsonify(error=f"一度に置けるのは{MAX_BATCH_FILES}ファイルまでです（置かれたのは{len(storages)}ファイル）"), 400
-    batch_id = uuid4().hex if len(storages) > 1 else ""
-    docs, errors = [], []
-    for order, storage in enumerate(storages):
-        try:
-            doc_id = _store_document(storage, batch_id=batch_id, order=order)
-        except UploadError as exc:
-            errors.append(upload_error_text(storage, exc, order + 1 if len(storages) > 1 else None))
-            continue
-        doc = get_document(doc_id)
-        docs.append({"id": doc_id, "file_name": doc["file_name"] if doc else ""})
-    if not docs:
-        return jsonify(error=errors[0] if errors else "取り込めるファイルがありませんでした", errors=errors), 400
-    return jsonify(docs=docs, batch_id=batch_id, errors=errors)
-
-
-# ---- 画面を離れたので捨てる ------------------------------------------------------------
-# 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）。
-# 画面を閉じた・隠したときに static/app.js の ragDiscard がここへ「捨てて」と送ってくる。
-# 送り主は navigator.sendBeacon なので、
-#   - 中身の型は text/plain（get_json(force=True) で読む）
-#   - 応答は読めず、やり直しもできない（いつでも 204 を返し、4xx にしない）
-# もう無い番号・ほかの人の番号・処理中のものは core.purge 側で黙って外れる。
-
-@forms_bp.post("/discard", endpoint="discard")
-def forms_discard():
-    """この画面（このブラウザ）の、まだダウンロードしていない帳票を捨てる。"""
-    payload = request.get_json(force=True, silent=True)
-    # sendBeacon は中身の形を選べない。辞書以外（"x" や [1,2]）が届いても 204 を返す
-    payload = payload if isinstance(payload, dict) else {}
-    ids = payload.get("doc_ids") or []
-    sid = current_session_id()
-    try:
-        if ids:
-            discard_documents(ids, sid)
-        else:
-            purge_session(sid, tables=False)   # 表の取り込み（別のタブ）は巻き込まない
-    except Exception as exc:   # 捨て損ねてもブラウザには伝えられない。時間切れの片付けに任せる
-        current_app.logger.warning("帳票の片付けに失敗しました: %s", exc.__class__.__name__)
-    return "", 204
-
-
-# ---- 2 帳票の種類とシート ---------------------------------------------------------------
-
-def _id_list(raw: str) -> list[int]:
-    # 桁の大きい数は SQLite に渡すと OverflowError（500）になるので、ここで落とす
-    return [n for n in (int(part) for part in raw.split(",") if part.strip().isdigit())
-            if 0 < n < 2 ** 63]
-
-
-@forms_bp.get("/type", endpoint="type_all")
-def type_all_fragment():
-    """帳票の種類とシートの欄（まとめて置いた分すべてに同じ設定を使う）。?ids=1,2,3"""
-    docs = _docs_of(_id_list(request.args.get("ids", "")))
-    if not docs:
-        return jsonify(error="取り込んだ帳票がありません。ファイルを置き直してください"), 404
-    return _type_response(docs)
-
-
-@forms_bp.get("/<int:doc_id>/type")
-def type_fragment(doc_id: int):
-    """帳票1件の「帳票の種類とシート」（まとまりでも同じ欄を使う）。"""
-    return _type_response([_get_document(doc_id)])
-
-
-def _batch_matches(ranked: list[dict]) -> list[SimpleNamespace]:
-    """置かれたファイル全部をまとめた帳票の種類の候補（合う順。並べ方は forms.rank_batch）。
-
-    同じフォームの帳票をまとめて置く前提なので、種類は1つだけ選ぶ。件数で違う分は
-    「3項目中2〜3項目」のように幅で出し、ファイルごとの数は下のファイルの行に出す。
-    先頭（先に選んでおく種類）は、最も多くのファイルで最も合った種類。「見つかった割合」だけで
-    並べると 4項目中4項目の小さな種類が 33項目中32項目の本物に勝つので、割合ではなく
-    forms.match_score（見つかった数・割合・シート名の一致）の点で並べる。
-    """
-    out = []
-    for b in rank_batch(ranked):
-        lo, hi, total = b.found_min, b.found_max, b.total_fields
-        out.append(SimpleNamespace(
-            pattern=b.pattern, total_fields=total, found_fields=lo, sheet_names=b.sheet_names,
-            votes=b.votes, score=b.score, files=len(b.matches),
-            found_label=(f"{total}項目中{lo}項目が見つかりました" if lo == hi
-                         else f"{total}項目中{lo}〜{hi}項目が見つかりました")))
-    return out
-
-
-def _type_response(docs: list[dict]):
-    patterns = load_active_patterns()
-    ranked: list[dict] = []
-    sheets: list[dict] = []
-    by_name: dict[str, dict] = {}
-    table_sheets: list[str] = []
-    # ブックは1件ずつ開いて、必要な数だけ取り出したらすぐ手放す。50件を同時にメモリへ広げると
-    # サーバーが落ちるので、置かれたファイル全部の WorkbookInfo を持ち続けない
-    for doc in docs:
-        info = _load_info(doc)
-        if info is None:
-            return jsonify(error="元のファイルを読み込めませんでした。ファイルを置き直してください"), 409
-        ranked.append({m.pattern.id: m for m in rank_patterns(info, patterns)})
-        for name, grid in info.grids.items():
-            sheet = by_name.get(name)
-            if sheet is None:
-                sheet = {"name": name, "cells": len(grid.cells), "images": len(info.images_in([name])),
-                         "hidden": grid.hidden, "files": 0}
-                by_name[name] = sheet
-                sheets.append(sheet)
-            sheet["files"] += 1
-        table_sheets.extend(n for n in table_like_sheets(info) if n not in table_sheets)
-        info = grid = None   # 次の1件を開く前にブックを手放す
-
-    matches = _batch_matches(ranked)
-    suggested = {str(m.pattern.id): m.sheet_names for m in matches}
-    first = docs[0]
-    selected_id = first["pattern_id"] if any(m.pattern.id == first["pattern_id"] for m in matches) else None
-    selected_id = selected_id or (matches[0].pattern.id if matches else None)
-    # 読み取り済みの帳票が読んだシートを全部合わせる。1件分の "sheets" には、そのファイルに
-    # 在ったシートしか残らないので、先頭ファイルだけを見ると選んだチェックが消えてしまう
-    selected_sheets: list[str] = []
-    for d in docs:
-        data = _data(d) if d["pattern_id"] == selected_id else None
-        for name in (data or {}).get("sheets") or []:
-            if name not in selected_sheets:
-                selected_sheets.append(name)
-    if not selected_sheets:
-        selected_sheets = suggested.get(str(selected_id)) or []
-
-    files = [{"id": d["id"], "file_name": d["file_name"],
-              "found": ranked[i].get(selected_id).found_fields if selected_id in ranked[i] else 0}
-             for i, d in enumerate(docs)]
-    # 種類を選び直したときにファイルごとの項目数を出し直すための表（画面の JS が使う）
-    file_counts = {str(pid): {str(d["id"]): ranked[i][pid].found_fields for i, d in enumerate(docs)}
-                   for pid in (ranked[0] if ranked else {})}
-    html = render_part("base.html", "part_type", doc=first,
-        docs=docs,
-        files=files,
-        file_counts=file_counts,
-        matches=matches,
-        sheets=sheets,
-        suggested=suggested,
-        selected_id=selected_id,
-        selected_sheets=selected_sheets,
-        table_sheets=table_sheets,
-        duplicate=any(find_confirmed_by_hash(d["file_hash"], exclude_id=d["id"],
-                                                session_id=current_session_id()) for d in docs),
-        lost_work=any(d["state"] in CONFIRMED_STATES for d in docs),
-        form_types_url=url_for("form_types.index"),
-    )
-    return jsonify(html=html, file_name=first["file_name"], has_types=bool(matches),
-                   docs=[{"id": d["id"], "file_name": d["file_name"]} for d in docs])
-
-
-@forms_bp.post("/read", endpoint="read_all")
-def read_all():
-    """置かれた帳票を1つの種類・シートでまとめて読み取り、全部の読み取り結果を返す。"""
-    return _read_documents(_docs_of(_id_list(request.form.get("ids", ""))))
-
-
-@forms_bp.get("/review", endpoint="review_all")
-def review_all():
-    """いま保存されている読み取り結果を描き直す（読み取りはやり直さない）。
-
-    まとめ置きから1件だけ外したときに使う。以前は残りの帳票の③まで画面から消え、
-    ［読み取る］で取り直すしかなく、手で直した値が警告なしに失われていた
-    （2026-09-23 のレビューで実測）。ここは保存済みの内容をそのまま描くので何も失われない。
-    """
-    ids = [d["id"] for d in _docs_of(_id_list(request.args.get("ids", ""))) if d.get("data_json")]
-    if not ids:
-        return jsonify(error="読み取り結果がありません。［読み取る］を押してください"), 404
-    return _review_response(ids)
-
-
-@forms_bp.post("/<int:doc_id>/read")
-def read(doc_id: int):
-    """帳票1件を読み取る（まとまりでも同じ道すじを通る）。"""
-    return _read_documents([_get_document(doc_id)])
-
-
-def _read_documents(docs: list[dict]):
-    if not docs:
-        return jsonify(error="取り込んだ帳票がありません。ファイルを置き直してください"), 404
-    pattern = load_pattern(request.form.get("pattern_id", type=int))
-    sheets = request.form.getlist("sheets")
-    if pattern is None or not sheets:
-        return jsonify(error="帳票の種類と読み取るシートを選んでください"), 400
-    if any(d["state"] in CONFIRMED_STATES for d in docs) and request.form.get("acknowledge") != "on":
-        return jsonify(error=f"{LOST_WORK_MESSAGE}。確認のチェックを入れてから読み取り直してください"), 400
-
-    read_ids, errors = [], []
-
-    def failed(doc: dict, reason: str) -> None:
-        """読み取れなかった帳票。③に並ばないので、前の読み取り結果も残さない
-        （残すと、画面に出ていない帳票を④が数えて zip の件数と合わなくなる）。"""
-        errors.append(f"{doc['file_name']}: {reason}")
-        if doc["state"] not in CONFIRMED_STATES and doc.get("data_json"):
-            reset_document(doc["id"], doc["pattern_id"], None)
-
-    for doc in docs:
-        info = _load_info(doc)
-        if info is None:
-            failed(doc, "元のファイルを読み込めませんでした")
-            continue
-        use = [s for s in sheets if s in info.grids]
-        if not use:
-            failed(doc, "選んだシートがファイルにありません")
-            continue
-        extraction = extract_document(info, pattern, use)
-        reset_document(doc["id"], pattern.id, _dumps_extraction(extraction))
-        if doc["state"] not in CONFIRMED_STATES:
-            update_document(doc["id"], title=_search_title(doc, extraction))
-        read_ids.append(doc["id"])
-    if not read_ids:
-        return jsonify(error=errors[0] if errors else "読み取れる帳票がありませんでした", errors=errors), 400
-    return _review_response(read_ids, errors=errors)
-
-
-def _state_label(doc: dict, summary: dict) -> str:
-    """読み取り結果の見出しに出す、その帳票の今の状態。"""
-    if doc["state"] == "confirmed":
-        return "確定済み"
-    if doc["state"] == "modified":
-        return "修正中"
-    issue = summary["counts"]["issue"]
-    return f"要確認 {issue}件" if issue else "未確定"
-
-
-STATE_COLORS = {"確定済み": "green", "修正中": "violet", "未確定": "gray"}
-
-
-def _review_response(doc_ids, errors=None):
-    """読み取り結果の欄（帳票を縦に並べた HTML の断片）。
-
-    重くならないよう、元のシートの表を作るのは先頭の帳票だけにする。残りは画面に入った時点で
-    GET /forms/<id>/grid を呼んで読み込む（static/review.js）。
-    """
-    ids = [doc_ids] if isinstance(doc_ids, int) else list(doc_ids)
-    items, docs = [], []
-    for no, doc_id in enumerate(ids, start=1):
-        doc = _get_document(doc_id)
-        extraction = _data(doc)
-        if extraction is None:
-            if len(ids) == 1:
-                return jsonify(error="まだ読み取りをしていません"), 409
-            continue
-        summary = _summary(doc, extraction)
-        info = _load_info(doc) if no == 1 else None
-        label = _state_label(doc, summary)
-        items.append({
-            "no": no, "doc": doc, "extraction": extraction, "summary": summary,
-            "grids": _sheet_grids(info, extraction["sheets"]) if no == 1 else None,
-            "info_missing": no == 1 and info is None,
-            "version": _version(doc), "state_label": label,
-            "state_color": STATE_COLORS.get(label, "amber"),
-        })
-        docs.append({"id": doc["id"], "file_name": doc["file_name"], "state": doc["state"],
-                     "version": _version(doc), "summary": summary, "state_label": label})
-    if not items:
-        return jsonify(error="まだ読み取りをしていません"), 409
-    html = render_part("base.html", "part_review", items=items,
-        confirmed=sum(1 for d in docs if d["state"] in CONFIRMED_STATES),
-    )
-    first = items[0]
-    return jsonify(html=html, version=first["version"], summary=first["summary"], doc_id=first["doc"]["id"],
-                   docs=docs, errors=errors or [])
-
-
-@forms_bp.get("/<int:doc_id>/grid")
-def grid_fragment(doc_id: int):
-    """1件の帳票の「元のシート」（読み取り結果の欄が画面に入ったときに読み込む）。"""
-    doc = _get_document(doc_id)
-    extraction = _data(doc)
-    if extraction is None:
-        return jsonify(error="まだ読み取りをしていません"), 409
-    info = _load_info(doc)
-    html = render_part("base.html", "part_grid", grids=_sheet_grids(info, extraction["sheets"]),
-                           info_missing=info is None)
-    return jsonify(html=html, doc_id=doc_id)
-
-
-# ---- 3 読み取り結果（その場で直す・途中保存） -----------------------------------------------
-
-# 途中保存をした画面の目印（doc_id → (保存後の版, 画面の目印)）。
-_DRAFT_TOKENS: dict[int, tuple[str, str]] = {}
-
-
-@on_documents_purged
-def _forget_draft_tokens(doc_ids) -> None:
-    for doc_id in doc_ids:
-        _DRAFT_TOKENS.pop(int(doc_id), None)
-
-
-def _page_token() -> str:
-    token = _forms_payload().get("page_token")
-    return str(token)[:64] if token else ""
-
-
-def _saved_by_same_page(doc_id: int, doc: dict) -> bool:
-    token = _page_token()
-    saved = _DRAFT_TOKENS.get(doc_id)
-    return bool(token) and saved is not None and saved == (_version(doc), token)
-
-
-def _json_values() -> dict:
-    payload = _forms_payload()
-    if payload:
-        values = payload.get("values", payload)
-        return {str(k): v for k, v in values.items()} if isinstance(values, dict) else {}
-    return {key[len("value-"):]: request.form[key] for key in request.form.keys() if key.startswith("value-")}
-
-
-@forms_bp.post("/<int:doc_id>/draft")
-def draft(doc_id: int):
-    """入力内容の途中保存（fetch）。変わった項目だけ保存し、204 を返す。"""
-    doc = _get_document(doc_id)
-    extraction = _data(doc)
-    if extraction is None:
-        return jsonify(error="まだ読み取りをしていません"), 409
-    if _is_stale(doc) and not _saved_by_same_page(doc_id, doc):
-        return jsonify(error=STALE_MESSAGE), 409
-    version = _version(doc)
-    if _apply_values(extraction, _json_values(), _data(doc, "confirmed_json")):
-        title = None if doc["state"] in CONFIRMED_STATES else _search_title(doc, extraction)
-        new_json = _dumps_extraction(extraction)
-        save_draft(doc_id, new_json, title=title)
-        version = _version({"data_json": new_json})
-        token = _page_token()
-        if token:
-            _DRAFT_TOKENS[doc_id] = (version, token)
-    return "", 204, {"X-Doc-Version": version}
-
-
-@forms_bp.post("/<int:doc_id>/preview")
-def preview(doc_id: int):
-    """入力中の値で作った Markdown と状態（保存はしない）。"""
-    doc = _get_document(doc_id)
-    extraction = _data(doc)
-    if extraction is None:
-        return jsonify(error="まだ読み取りをしていません"), 409
-    if _is_stale(doc):
-        return jsonify(error=STALE_MESSAGE), 409
-    _apply_values(extraction, _json_values(), _data(doc, "confirmed_json"))
-    return jsonify(_summary(doc, extraction))
-
-
-# ---- 4 確定してダウンロード ---------------------------------------------------------------
-
-@forms_bp.post("/<int:doc_id>/confirm", endpoint="confirm")
-def forms_confirm(doc_id: int):
-    """読み取り結果を確定する（fetch）。値は途中保存で入っているので、ここでは版だけ確かめる。"""
-    doc = _get_document(doc_id)
-    extraction = _data(doc)
-    if extraction is None:
-        return jsonify(error="まだ読み取りをしていません"), 409
-    if _is_stale(doc):
-        return jsonify(error=STALE_MESSAGE), 409
-    values = _json_values()
-    if values and _apply_values(extraction, values, _data(doc, "confirmed_json")):
-        save_draft(doc_id, _dumps_extraction(extraction))
-    confirm_document(doc_id, title=_search_title(doc, extraction))
-    return jsonify(ok=True, doc_id=doc_id)
-
-
-def _docs_of(ids: list[int]) -> list[dict]:
-    """この画面の帳票だけ（ほかのブラウザの帳票は、番号を送られても無いものとして外す）。"""
-    return [d for d in (get_document(i) for i in ids) if d is not None and owns(d)]
-
-
-@forms_bp.get("/finish", endpoint="finish")
-def finish_fragment():
-    """確定してダウンロードの欄（HTML の断片）。?ids=1,2,3 は同じ画面で扱っている帳票。"""
-    docs = _docs_of(_id_list(request.args.get("ids", "")))
-    if not docs:
-        return jsonify(html="", ready=False, confirmed=0, total=0)
-    # 読み取れていない帳票は確定できない＝zip に入らないので、件数には数えない
-    # （数えると「残り12件も確定して…」と書いてあるのに .md が4件しか入らない zip になる）
-    ready = [d for d in docs if d.get("data_json")]
-    unread = [d for d in docs if not d.get("data_json")]
-    current_id = request.args.get("current", type=int)
-    current = next((d for d in ready if d["id"] == current_id), None) or (ready[0] if ready else docs[0])
-    confirmed = [d for d in ready if d["state"] in CONFIRMED_STATES]
-    pending = [d for d in ready if d["state"] not in CONFIRMED_STATES]
-    batch_id = current.get("batch_id") or ""
-    working = _data(current)
-    read_yet = working is not None or any(_data(d) is not None for d in docs)
-    extraction = _data(current, "confirmed_json") or working
-    html = render_part("base.html", "part_finish", docs=docs,
-        ready=ready,
-        unread=unread,
-        current=current,
-        confirmed=confirmed,
-        pending=pending,
-        batch_id=batch_id if len(docs) > 1 else "",
-        read_yet=read_yet,
-        to_confirm=_to_confirm(ready),
-        confirmed_states=CONFIRMED_STATES,
-        file_name=markdown_filename(current, extraction) if extraction else "",
-        markdown=build_markdown(current, _data(current, "confirmed_json")) if current["state"] in CONFIRMED_STATES else "",
-        delete_note=FORMS_DELETE_ON_DOWNLOAD_NOTE,
-        delete_confirm=(MODIFIED_DOWNLOAD_CONFIRM if current["state"] == "modified"
-                        else FORMS_DELETE_ON_DOWNLOAD_CONFIRM),
-        batch_confirm=_batch_zip_confirm(ready, unread),
-    )
-    return jsonify(html=html, ready=bool(confirmed), confirmed=len(confirmed), total=len(ready),
-                   read_yet=read_yet,
-                   next_id=(pending[0]["id"] if pending else None))
-
-
-def _to_confirm(docs: list[dict]) -> list[dict]:
-    """まとめてのダウンロードの前に確定し直す帳票（未確定と、直したまま確定していない修正中）。"""
-    return [d for d in docs if d["state"] != "confirmed"]
-
-
-def _batch_zip_confirm(docs: list[dict], unread: list[dict] | None = None) -> str:
-    """まとまりの zip ダウンロードの確認文（確定していない分はこのボタンで確定してから渡す）。
-
-    docs は zip に入る帳票（読み取り済み）だけ。読み取れていない帳票はサーバーに残るので、
-    「すべて消えます」とは言わない。
-    """
-    rest = _to_confirm(docs)
-    head = (f"まだ確定していない{len(rest)}件も確定してから、{len(docs)}件をまとめて zip でダウンロードします。"
-            if rest else f"{len(docs)}件をまとめて zip でダウンロードします。")
-    if unread:
-        return (head + "ダウンロードすると、渡したこの"
-                f"{len(docs)}件のデータはサーバーから消えます。"
-                f"まだ読み取れていない{len(unread)}件はサーバーに残ります（②に戻ってもう一度読み取ってください）。")
-    if rest:
-        return head + "ダウンロードすると、このまとまりの帳票のデータはサーバーからすべて消えます。"
-    return BATCH_DELETE_CONFIRM
-
-
-# ---- ダウンロード -------------------------------------------------------------------
-
-@forms_bp.get("/<int:doc_id>/download.md")
-def download_md(doc_id: int):
-    """Markdown を渡し、渡し終えた帳票のデータを消す（design.md 3.3）。"""
-    name, body = _single_markdown(doc_id)
-    response = send_file(io.BytesIO(body), mimetype="text/markdown", as_attachment=True, download_name=name,
-                         conditional=False)   # Range でも全体を返す
-    set_download_name(response, name, "form")
-    return purge_after_send(response, purge_documents, [doc_id])
-
-
-def _single_markdown(doc_id: int) -> tuple[str, bytes]:
-    doc = _get_document(doc_id)
-    if doc["confirmed_json"] is None:
-        abort(404)   # まだ確定していない帳票は渡さない
-    # 直したまま確定していない（修正中）帳票は、直した値で作る（design.md 3.3）。画面の JS を
-    # 通さずにリンクを開いたとき（中クリック・「名前を付けてリンク先を保存」）でも同じにする
-    extraction = _data(doc) if doc["state"] == "modified" else _data(doc, "confirmed_json")
-    if extraction is None:
-        abort(404)
-    return markdown_filename(doc, extraction), build_markdown(doc, extraction).encode("utf-8")
-
-
-def _unique_name(name: str, used: set[str]) -> str:
-    """まとまりの中で重ならない名前（大文字・小文字だけの違いも重なりとみなす）。"""
-    stem, suffix = Path(name).stem, Path(name).suffix or ".md"
-    candidate, n = name, 2
-    while candidate.casefold() in used:
-        candidate = f"{stem}_{n}{suffix}"
-        n += 1
-    used.add(candidate.casefold())
-    return candidate
-
-
-def _batch_markdown_files(confirmed_ids: list[int]) -> list[tuple[str, bytes]]:
-    files, used = [], set()
-    for doc in list_confirmed_documents(confirmed_ids, session_id=current_session_id()):
-        # 修正中（確定したあとに直した）帳票は、直した値で作る（1件の .md と同じ）
-        column = "data_json" if doc["state"] == "modified" else "confirmed_json"
-        try:
-            extraction = json.loads(doc[column])
-        except (TypeError, ValueError):
-            continue
-        files.append((_unique_name(markdown_filename(doc, extraction), used),
-                      build_markdown(doc, extraction).encode("utf-8")))
-    return files
-
-
-@forms_bp.get("/batches/<batch_id>/download.zip")
-def download_batch(batch_id: str):
-    """まとめ取り込み1回分の Markdown を zip で渡し、渡し終えた分のデータを消す。
-
-    確定済みの帳票だけを zip にして、その分だけ消す（未確定の帳票はサーバーに残る）。
-    """
-    docs = list_batch_documents(batch_id, session_id=current_session_id())
-    if not docs:
-        abort(404)   # ほかのブラウザのまとまりも「無い」として扱う
-    pending = [d for d in docs if d["state"] not in CONFIRMED_STATES]
-    confirmed_ids = [d["id"] for d in docs if d["state"] in CONFIRMED_STATES]
-    if not confirmed_ids:
-        abort(404)
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, body in _batch_markdown_files(confirmed_ids):
-            zf.writestr(name, body)
-    buffer.seek(0)
-    zip_name = f"帳票Markdown_{datetime.now():%Y%m%d_%H%M%S}.zip"
-    response = send_file(buffer, mimetype="application/zip", as_attachment=True, download_name=zip_name,
-                         conditional=False)   # Range でも全体を返す
-    set_download_name(response, zip_name, "forms_markdown")
-    if pending:
-        return purge_after_send(response, purge_documents, confirmed_ids)
-    return purge_after_send(response, purge_batch, batch_id)
-
-
-@forms_bp.get("/<int:doc_id>/original")
-def original(doc_id: int):
-    doc = _get_document(doc_id)
-    try:
-        path = upload_path(doc["stored_path"])
-    except UploadError:
-        abort(404)
-    if not path.exists():
-        abort(404)
-    return send_file(path, as_attachment=True, download_name=doc["file_name"])
-
-
-@forms_bp.post("/<int:doc_id>/delete", endpoint="delete")
-def forms_delete(doc_id: int):
-    """この帳票の取り込みをやめる（元のファイルと読み取り結果を消す）。"""
-    _get_document(doc_id)
-    purge_documents([doc_id])
-    incomplete = purge_incomplete()
-    return jsonify(ok=True, incomplete=incomplete)
-
-
-# 画面を作り直す前の URL（お気に入り・古いリンク）は1枚の画面へ送る
-@forms_bp.get("/<int:doc_id>", endpoint="legacy")
-@forms_bp.get("/<int:doc_id>/done", endpoint="legacy")
-def forms_legacy(doc_id: int):
-    return redirect(url_for(".index"))
-
-
-# ====================================================================================================
-# 元 views/form_types.py
-# 帳票登録。画面は /form-types の1枚だけ。
-#
-# 上から「登録済みの帳票の種類」、その下に「新しく登録する」。Excel を1つ置くと、同じ画面に
-# 名前（ファイル名から入れる）・置いた Excel のシート・読み取る項目・読み取りテストの結果・
-# ［使用開始］が現れる。画面の移動はなく、どの操作も fetch でこのファイルのルートを呼び、
-# HTML の断片を入れ替える。
-#
-# 項目は「見出しのセル → 値のセル」をクリックするだけで作る。キー名・型・単位・探す見出しは
-# pattern.clicks が見本の値から決めるので、画面には出さない。
-# 保存しても使用中にはしない。使用中になるのは［使用開始］を押したときだけ。
-#
-# 置いた Excel のファイルはサーバーに残さない（利用者の指示 2026-09-21「見本のExcelは置かずに、設定だけ
-# 保持するようにしてほしい」）。受け取った要求の中で読み取り、中身（bytes）はそのまま捨てる。
-# その代わり、読み取ったシートの中身（セルの番地と文字・結合・太字・塗りの有る無し）を帳票の種類と一緒に
-# DB が覚える（core.pattern_books。利用者の指示 2026-09-22「再度シートを置かなくても、登録したときに
-# シートのセル番地と文字情報を記憶しておけばだせるはず」）。開き直したときはそれでシートを出し、同じ
-# クリックの操作で直せる。セルの色は覚えない（同日の指示「セル色の情報は不要」）。
-# 置いた直後の操作（セルのクリック・項目の作り直し・読み取りテスト）ではブラウザが同じ Excel を送り直して
-# くることがある。開き直すのが遅いので、読み取った結果だけを core.workbook_cache が短い間メモリに覚えておく。
-# 残すのは設定（シート名・見出しのセル・値のセル・読み取る向き・項目名）と覚えたシートだけ。
-# ====================================================================================================
-
-form_types_bp = Blueprint("form_types", __name__, url_prefix="/form-types")
-
-# excel/extractor.number_unit の単位不明の警告の書き出し
-_NO_UNIT_WARNING = "単位が書かれていません"
-TEST_NO_UNIT_WARNING = ("帳票に単位が書かれていません。取り込んだあとの「読み取り結果」で、"
-                        "値に単位（分・時間など）を付けて入力できます")
-
-
-def _get_pattern(pattern_id: int) -> PatternDef:
-    pattern = load_pattern(pattern_id)
-    if pattern is None:
-        abort(404)
-    return pattern
-
-
-def _confirmed_count(pattern_id: int) -> int:
-    row = get_db().execute(
-        "SELECT COUNT(*) FROM documents WHERE pattern_id = ? AND confirmed_json IS NOT NULL", (pattern_id,)
-    ).fetchone()
-    return row[0] if row else 0
-
-
-# ---- ブラウザが置いた Excel（ファイルは保存しない。シートの中身だけ覚える） -------------------
-# 置かれた Excel は、この要求の中で読み取って中身を捨てる。読み取ったシートの中身は帳票の種類と
-# 一緒に DB が覚える（_remember_book）。次の操作のときはブラウザが同じファイルを送り直してくることが
-# あるので、2回目からは読み取った結果（core.workbook_cache）を使い回す。送ってこなければ覚えたシートで出す。
-
-BOOK_FIELD = "book"            # ブラウザが送ってくる Excel（<input type=file name=book>）
-BOOK_HASH_FIELD = "book_hash"  # 送り直さずに、さっき読んだブックを指すとき（sha256）
-# 覚えたシートが無い種類（覚える前に登録したもの）で、Excel も送られてこなかったとき
-NO_BOOK_ERROR = ("この帳票のExcelをもう一度置いてください（この種類は登録したときのシートを覚えていません。"
-                 "置くとシートを覚えて、次からは置かずに開けます）")
-# ここで受け取る Excel の大きさの上限。保存せずにメモリで読む（数人が同時に置く）ので、
-# 取り込みの上限（MAX_CONTENT_LENGTH＝まとめ置きの合計）より小さくしておく。
-# 帳票は1枚の紙なので、写真付きでもこの大きさに収まる（見本のいちばん大きいもので約0.1MB）。
-BOOK_MAX_BYTES = 50 * 1024 * 1024
-# 覚えるシートの中身（JSON）の上限。帳票は1枚の紙なので、ふつうは数KB〜数十KB（見本の報告書で約4KB）。
-# 何万セルもある一覧表のようなブックは帳票ではないので、覚えずに断る（画面に減らし方を書く）。
-SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
-# 覚えない、と画面に書くもの。読み取りに要らないものは覚えない（利用者の指示 2026-09-22「セル色の情報は不要」）
-SNAPSHOT_NOTE = ("Excel のファイルは保存しません。登録したときのシートの中身（セルの番地と文字）だけを覚えておき、"
-                 "あとから開いたときにその画面を出します。セルの色は覚えません"
-                 "（塗りの有る無しだけを、見出しの判定のために覚えます）。")
-
-
-def _snapshot_json(book: Book) -> str:
-    """覚えるシートの中身（JSON）。大きすぎるブックは UploadError（帳票ではない大きさ）。"""
-    text = book.info.to_json()
-    size = len(text.encode("utf-8"))
-    if size > SNAPSHOT_MAX_BYTES:
-        raise UploadError(
-            f"このExcelはシートの中身が大きすぎて覚えられません（{size / (1024 * 1024):.1f}MB。"
-            f"上限 {SNAPSHOT_MAX_BYTES // (1024 * 1024)}MB）。帳票の様式だけの Excel（記入例が1件のもの）にするか、"
-            "使わないシート・値の入った余分な行や列を消して、置き直してください")
-    return text
-
-
-def _remember_book(pattern_id: int, book: Book, book_json: str | None = None) -> None:
-    """置かれた Excel のシートの中身を、この種類の「覚えたシート」にする（前のものと入れ替える）。"""
-    save_pattern_book(pattern_id, book.file_name, book.file_hash, book_json or _snapshot_json(book))
-    book.saved_at = now()
-
-
-def _stored_book(pattern_id: int) -> Book | None:
-    """この種類が覚えているシート。開いた結果は core.workbook_cache にも置く（クリックのたびに JSON を読み直さない）。"""
-    row = load_pattern_book(pattern_id)
-    if row is None:
-        return None
-    known = get(current_session_id(), row["file_hash"])
-    if known is not None and known.file_name == row["file_name"]:
-        known.saved_at = row["saved_at"]
-        return known
-    try:
-        info = WorkbookInfo.from_json(row["book_json"])
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
-        current_app.logger.warning("覚えたシートを読めませんでした（pattern %s）: %s", pattern_id, exc.__class__.__name__)
-        return None
-    if not info.grids:
-        return None
-    return put(current_session_id(), Book(file_name=row["file_name"], file_hash=row["file_hash"],
-                                          size=len(row["book_json"]), info=info, saved_at=row["saved_at"]))
-
-
-def _read_book(storage) -> Book:
-    """置かれた Excel をメモリで読み、読み取った結果だけを覚える。読めなければ UploadError。
-
-    受け取ったファイルは werkzeug が 500KB まではメモリに、それを超える分だけ OS の一時ファイルに
-    置く（要求が終わると消える、名前の無いファイル）。こちらからディスクに書くことはしない。
-    """
-    cfg = current_app.config
-    limit = min(cfg["MAX_CONTENT_LENGTH"] or BOOK_MAX_BYTES, BOOK_MAX_BYTES)
-    memory = read_upload(storage, cfg["ALLOWED_EXTENSIONS"], limit)
-    known = get(current_session_id(), memory.file_hash)
-    if known is not None:
-        known.file_name = memory.file_name   # 同じ中身を別の名前で置き直したとき
-        return known
-    precheck_excel(memory.data, cfg.get("EXCEL_MAX_CELLS"), max_merged=FORM_MAX_MERGED_CELLS)
-    try:
-        # BytesIO で渡すので、どこにもファイルを作らずに読める
-        info = load_workbook_info(io.BytesIO(memory.data))
-    except Exception as exc:
-        current_app.logger.warning("置かれたExcelを読み込めませんでした: %s", exc.__class__.__name__)
-        raise UploadError("Excelファイルとして読み込めませんでした") from exc
-    if not info.grids:
-        raise UploadError("シートがないブックです。シートのあるブックを選んでください")
-    return put(current_session_id(),
-                              Book(file_name=memory.file_name, file_hash=memory.file_hash,
-                                   size=memory.size, info=info))
-
-
-def _request_book(pattern_id: int | None = None) -> tuple[Book | None, str]:
-    """この操作で見ている Excel。戻り値: (ブック, エラー文)。
-
-    順に探す: ブラウザが送ってきたファイル → さっき読んだブック（sha256。core.workbook_cache）→
-    その種類が覚えているシート（core.pattern_books）。
-    どれも無ければ (None, "")＝シートの無い画面（覚える前に登録した種類。項目の一覧と見出しの手直しはできる）。
-    """
-    storage = request.files.get(BOOK_FIELD)
-    if storage is not None and storage.filename:
-        try:
-            return _read_book(storage), ""
-        except UploadError as exc:
-            return None, upload_error_text(storage, exc)
-    file_hash = (request.form.get(BOOK_HASH_FIELD) or request.args.get(BOOK_HASH_FIELD) or "").strip()
-    if file_hash:
-        known = get(current_session_id(), file_hash)
-        if known is not None:
-            return known, ""
-    if pattern_id is not None:
-        return _stored_book(pattern_id), ""
-    return None, ""
-
-
-# ---- 1枚の画面 --------------------------------------------------------------------
-
-@form_types_bp.get("/", endpoint="index")
-def form_types_page():
-    # 帳票の種類は「設定」なのでみんなで使う（ブラウザごとに分けない）。
-    # 作業場所のクッキーだけは、ここで開いたときにも決めておく（ほかの画面での取り違えを防ぐ）
-    current_session_id()
-    return render_template("base.html", screen="form_types", list_html=_list_html(),
-                           max_mb=BOOK_MAX_BYTES // (1024 * 1024), snapshot_note=SNAPSHOT_NOTE)
-
-
-def _list_html() -> str:
-    return render_part("base.html", "part_list", patterns=list_patterns())
-
-
-# 画面を作り直す前の URL（お気に入り・古いリンク）は1枚の画面へ送る
-@form_types_bp.get("/new", endpoint="legacy")
-@form_types_bp.get("/<int:pattern_id>/build", endpoint="legacy")
-@form_types_bp.get("/<int:pattern_id>/edit", endpoint="legacy")
-@form_types_bp.get("/<int:pattern_id>/review", endpoint="legacy")
-@form_types_bp.get("/<int:pattern_id>/test", endpoint="legacy")
-def form_types_legacy(pattern_id: int | None = None):
-    return redirect(url_for(".index"))
-
-
-# ---- 新しく登録する ---------------------------------------------------------------
-
-@form_types_bp.post("/new")
-def create():
-    """Excel を1つ置いて帳票の種類を作る（fetch）。名前は画面でファイル名から入れてある。
-
-    作るのは設定と、覚えたシート（置かれた Excel のシートの中身）。Excel のファイルはサーバーに残さない。
-    覚えられない大きさのブックなら種類も作らない（半端な種類を残さない）。
-    """
-    storage = request.files.get(BOOK_FIELD)
-    if storage is None or not storage.filename:
-        return jsonify(error="帳票のExcelファイルを置いてください"), 400
-    name = request.form.get("name", "").strip() or Path(storage.filename).stem.strip()
-    if not name:
-        return jsonify(error="帳票の種類の名前を入れてください"), 400
-    try:
-        book = _read_book(storage)
-        book_json = _snapshot_json(book)
-    except UploadError as exc:
-        return jsonify(error=upload_error_text(storage, exc)), 400
-    pattern_id = create_pattern(name)
-    _remember_book(pattern_id, book, book_json)
-    return jsonify(pattern_id=pattern_id, html=_build_html(pattern_id, book), list_html=_list_html(),
-                   message=f"「{name}」を作りました。読み取りたい欄の見出しと値をクリックしてください"
-                           "（Excel のファイルは保存せず、シートの中身だけを覚えました）")
-
-
-# ---- 読み取る欄をクリックして決める ＋ 読み取りテスト ------------------------------------
-
-def _build_html(pattern_id: int, book: Book | None = None, notes: list[str] | None = None) -> str:
-    """登録中の帳票の種類の欄（HTML の断片）。book が無ければシートの無い（設定だけの）画面。
-
-    remembered は覚えたシートの見出し（ファイル名・置いた日時）。いま出しているブックがそれなら画面に書く。
-    """
-    pattern = _get_pattern(pattern_id)
-    info = book.info if book is not None else None
-    grids = _sheet_grids(info, list(info.grids)) if info is not None else []
-    for g in grids:
-        g["click_cells"] = table_cells(info.grids[g["name"]])
-    remembered = pattern_book_meta(pattern_id)
-    if remembered is not None and (book is None or book.file_hash != remembered["file_hash"]):
-        remembered = None   # 覚えたシートとは別の Excel を見ている（置き替えの途中）
-    return render_part("base.html", "part_build", pattern=pattern,
-        book=book,
-        grids=grids,
-        remembered=remembered,
-        rows=_field_view_rows(pattern, info),
-        test=_test_result(pattern, book),
-        confirmed_count=_confirmed_count(pattern_id),
-        notes=notes or [],
-        snapshot_note=SNAPSHOT_NOTE,
-    )
-
-
-@form_types_bp.get("/<int:pattern_id>/panel")
-@form_types_bp.post("/<int:pattern_id>/panel")
-def build_fragment(pattern_id: int):
-    """項目の一覧とシートを出す（GET）。Excel を一緒に置くと（POST）、そのシートに置き替えて覚え直す。
-
-    保存済みの種類を開き直したときは、登録したときに覚えたシートで同じ画面を出す（Excel は要らない）。
-    別の Excel（書き方の違う同じ帳票）を置くと、シートが替わり、覚えたシートもそれに入れ替わる（種類は増えない）。
-    覚える前に登録した種類（覚えたシートが無い）は、Excel を置くまでシートが出ない。
-    """
-    _get_pattern(pattern_id)
-    book, error = _request_book(pattern_id)
-    if error:
-        return jsonify(error=error), 400
-    message = ""
-    placed = request.files.get(BOOK_FIELD)
-    # 覚えたシートを入れ替えるのは、ファイルを実際に置いたときだけ。名前の無い空の部品（ファイルを選ばずに送った form）と
-    # 合図（book_hash）だけの要求では、いま見ているブックが別のものでも覚えは変えない
-    if request.method == "POST" and book is not None and placed is not None and placed.filename:
-        remembered = pattern_book_meta(pattern_id)
-        if remembered is None or remembered["file_hash"] != book.file_hash or remembered["file_name"] != book.file_name:
-            try:
-                _remember_book(pattern_id, book)
-            except UploadError as exc:
-                return jsonify(error=str(exc)), 400
-        message = (f"「{book.file_name}」を読み込みました。読み取りたい欄の見出しと値をクリックしてください"
-                   "（Excel のファイルは保存せず、シートの中身だけを覚えました。次からは置かずに開けます）")
-    return jsonify(html=_build_html(pattern_id, book), list_html=_list_html(), message=message)
-
-
-def _soften_unit_warning(f: dict) -> None:
-    """この欄では値を直せないので、単位なしの警告はどこで直せるかを書く。"""
-    if f.get("data_type") == "number" and str(f.get("warning") or "").startswith(_NO_UNIT_WARNING):
-        f["warning"] = TEST_NO_UNIT_WARNING
-
-
-def _field_view_rows(pattern: PatternDef, info) -> list[dict]:
-    """項目の一覧（見出し・置いた Excel で見つかった値・セル）。値はいま登録されている設定で読み直す。
-
-    Excel を置いていないとき（info が None）は値の欄を空にする。見出しの手直しはそれでもできる。
-    """
-    found: dict[str, dict] = {}
-    if info is not None and pattern.fields:
-        sheets = [s.sheet_name for s in pattern.sheets if s.sheet_name in info.grids] or list(info.grids)[:1]
-        found = {f["field_name"]: f for f in extract_document(info, pattern, sheets)["fields"]}
-    for f in found.values():
-        _soften_unit_warning(f)
-    rows = []
-    for fd in pattern.fields:
-        f = found.get(fd.field_name) or {}
-        rows.append({
-            "field": fd,
-            "label": (fd.candidates[0] if fd.candidates else "") or "（見出しなし）",
-            "value": f.get("value"),
-            "warning": f.get("warning") or "",
-            "sheet": f.get("sheet") or fd.sheet_name,
-            "label_cell": f.get("label_cell") or fd.label_cell,
-            "value_cell": f.get("value_cell") or fd.cell,
-        })
-    return rows
-
-
-def _test_result(pattern: PatternDef, book: Book | None) -> dict | None:
-    """いま置いている Excel を、この設定で読み取った結果（Markdown・見つかった件数）。"""
-    if book is None or not pattern.fields:
-        return None
-    info = book.info
-    match = match_pattern(info, pattern)
-    sheets = match.sheet_names or info.sheet_names[:1]
-    extraction = extract_document(info, pattern, sheets)
-    doc = {"id": 0, "file_name": book.file_name, "file_hash": book.file_hash}
-    return {
-        "sheets": sheets,
-        "found": sum(1 for f in extraction["fields"] if f["value"] not in (None, "")),
-        "total": len(extraction["fields"]),
-        "markdown": build_markdown(doc, extraction),
-        "file_name": markdown_filename(doc, extraction),
-    }
-
-
-@form_types_bp.post("/<int:pattern_id>/fields")
-def add_field(pattern_id: int):
-    """クリックした見出しセル（と値セル）から項目を1つ作る（fetch）。
-
-    どのセルを指しているかは、ブラウザが一緒に送ってくる Excel か、その種類が覚えているシートで確かめる
-    （Excel のファイルはサーバーに置いていないため）。
-    """
-    pattern = _get_pattern(pattern_id)
-    book, error = _request_book(pattern_id)
-    if error:
-        return jsonify(error=error), 400
-    if book is None:
-        return jsonify(error=NO_BOOK_ERROR), 400
-    info = book.info
-    sheet = request.form.get("sheet", "")
-    grid = info.grids.get(sheet)
-    if grid is None:
-        return jsonify(error="シートが見つかりません。同じ帳票のExcelを置き直してください"), 400
-
-    label_cell = request.form.get("label_cell", "")
-    value_cell = request.form.get("value_cell", "")
-    row, error = click_field(grid, label_cell, value_cell, {f.field_name for f in pattern.fields})
-    if row is None:
-        return jsonify(error=error), 400
-    if any(f.sheet_name == sheet and f.label_cell == row["label_cell"] and f.cell == row["cell"]
-           for f in pattern.fields):
-        return jsonify(html=_build_html(pattern_id, book), list_html=_list_html(),
-                       message="そのセルはもう項目になっています")
-
-    sheet_rows, field_rows = pattern_to_rows(pattern)
-    # 番号と名前を1つのセルにまとめた「使用設備」欄は、設備番号・設備名の2項目になる
-    added, separated, merged = [], [], []
-    for part in split_rows(row, {f.field_name for f in pattern.fields}):
-        # 別の見本で書き方の違う同じ欄（「設備No」と「設備番号」）をクリックしたときは、新しい項目にせず
-        # その項目の探す見出しに足す
-        same = merge_target(field_rows, part, grid)
-        if same is not None:
-            merge_labels(same, part)
-            merged.append(same["display_name"])
-            continue
-        # 同じ見本の別のセル（「担当者」と「報告者」）なら、辞書の名前が同じでも別の項目にする
-        twin = same_sheet_field(field_rows, part, grid)
-        if twin is not None:
-            separate_names(twin, part)
-            separated.append((part["display_name"], twin["display_name"]))
-        else:
-            added.append(part["display_name"])
-        field_rows.append(part)
-    message = "。".join(_add_messages(row, added, separated, merged))
-    if not any(r["sheet_name"] == sheet for r in sheet_rows):
-        sheet_rows.append({"use": True, "sheet_name": sheet})
-    _save_rows(pattern, sheet_rows, field_rows)
-    return jsonify(html=_build_html(pattern_id, book), list_html=_list_html(), message=message)
-
-
-def _add_messages(row: dict, added: list[str], separated: list[tuple[str, str]], merged: list[str]) -> list[str]:
-    """クリックの結果の知らせ（項目にした／別の項目にした／見出しに足した、のどれをしたか）。"""
-    out = []
-    if added:
-        out.append(f"「{'」「'.join(added)}」を項目にしました")
-    for name, twin in separated:
-        out.append(f"「{name}」を「{twin}」とは別の項目にしました（同じ帳票の別のセルなので、両方を読み取ります）")
-    if merged:
-        label = (row["candidates"].splitlines() or [""])[0]
-        out.append(f"「{'」「'.join(merged)}」の見出しに「{label}」を足しました"
-                   "（書き方の違う同じ欄なので、1つの項目として読み取ります）")
-    return out
-
-
-@form_types_bp.post("/<int:pattern_id>/fields/<field_name>/delete")
-def delete_field(pattern_id: int, field_name: str):
-    pattern = _get_pattern(pattern_id)
-    sheet_rows, field_rows = pattern_to_rows(pattern)
-    rest = [r for r in field_rows if r["field_name"] != field_name]
-    if len(rest) == len(field_rows):
-        abort(404)
-    kept = {r["sheet_name"] for r in rest if r["sheet_name"]}
-    sheet_rows = [s for s in sheet_rows if not kept or s["sheet_name"] in kept]
-    # 読み取る項目が無くなった使用中の種類は、使用を停止する。そのままだと帳票取り込みの候補に出て、
-    # 中身の無い Markdown ができてしまう（［使用開始］も同じ決まりで断っている）
-    stopped = not rest and pattern.status == "active"
-    _save_rows(pattern, sheet_rows, rest, status="inactive" if stopped else None)
-    message = "項目を削除しました"
-    if stopped:
-        message += "。読み取る項目が無くなったので、この種類の使用を停止しました（帳票取り込みの候補に出なくなります）"
-    # 覚えたシート（またはブラウザが一緒に送ってきた Excel）で、シートを出したままにする
-    return jsonify(html=_build_html(pattern_id, _request_book(pattern_id)[0]), list_html=_list_html(), message=message)
-
-
-@form_types_bp.post("/<int:pattern_id>/fields/<field_name>/label")
-def rename_field(pattern_id: int, field_name: str):
-    """読み取る項目の見出しを手で直す（fetch）。
-
-    直すのは Markdown に書き出す名前だけ。探す見出し（クリックしたときの見出しの言葉）と
-    読み取るセルはそのままにする。書き出す名前は項目どうしで重ならないようにする。
-    """
-    pattern = _get_pattern(pattern_id)
-    payload = request.get_json(force=True, silent=True) or {}
-    name = " ".join(str(payload.get("name") or request.form.get("name", "")).split())
-    if not name:
-        return jsonify(error="見出しを入れてください"), 400
-    sheet_rows, field_rows = pattern_to_rows(pattern)
-    target = next((r for r in field_rows if r["field_name"] == field_name), None)
-    if target is None:
-        abort(404)
-    if any(r["display_name"] == name for r in field_rows if r is not target):
-        return jsonify(error=f"「{name}」はほかの項目が使っています。別の見出しにしてください"), 400
-    # 探す見出しを持たない項目（見出しのない表など）は、書き出す名前をそのまま探していた。
-    # 書き替えで探す先が変わらないよう、いまの見出しを探す見出しとして控えてから名前を変える
-    if not target["candidates"] and not target["cell"]:
-        target["candidates"] = target["display_name"]
-    target["display_name"] = name
-    target["renamed"] = True   # このあと別の欄をクリックしても、手で付けた見出しに戻さない
-    _save_rows(pattern, sheet_rows, field_rows)
-    return jsonify(html=_build_html(pattern_id, _request_book(pattern_id)[0]), list_html=_list_html(),
-                   message=f"見出しを「{name}」にしました")
-
-
-@form_types_bp.post("/<int:pattern_id>/name")
-def rename(pattern_id: int):
-    pattern = _get_pattern(pattern_id)
-    payload = request.get_json(force=True, silent=True) or {}
-    name = str(payload.get("name") or request.form.get("name", "")).strip()
-    if not name:
-        return jsonify(error="帳票の種類の名前を入れてください"), 400
-    sheet_rows, field_rows = pattern_to_rows(pattern)
-    _save_rows(pattern, sheet_rows, field_rows, name=name)
-    return jsonify(ok=True, list_html=_list_html(), message="名前を変えました")
-
-
-def _save_rows(pattern: PatternDef, sheet_rows: list[dict], field_rows: list[dict], name: str | None = None,
-               status: str | None = None) -> None:
-    """状態は変えずに保存する（使用開始は［使用開始］を押したときだけ）。タイトル項目は自動で決める。
-
-    status を渡したときだけ状態も変える（読み取る項目が無くなったら使用を停止する）。
-    """
-    meta = pattern_to_meta(pattern)
-    if name:
-        meta["name"] = name
-    meta["title_fields"] = suggest_title_fields(field_rows)
-    save_pattern(rows_to_pattern(pattern.id, meta, sheet_rows, field_rows), status or pattern.status)
-
-
-# ---- 使用開始・停止・削除 --------------------------------------------------------------
-
-@form_types_bp.post("/<int:pattern_id>/status")
-def change_status(pattern_id: int):
-    pattern = _get_pattern(pattern_id)
-    payload = request.get_json(force=True, silent=True) or {}
-    status = payload.get("status") or request.form.get("status")
-    # 画面から出来るのは「使用開始」だけ（「使用を停止」のボタンは無くした。利用者の指示 2026-09-22）。
-    # 使わなくなった種類は削除する。項目を全部消したときだけ、delete_field が使用中を解く
-    if status != "active":
-        abort(400)
-    if not pattern.fields:
-        return jsonify(error="読み取る項目がありません。シートで見出しのセルと値のセルをクリックしてください"), 400
-    set_pattern_status(pattern_id, status)
-    # 残すのは設定と覚えたシートだけ（Excel のファイルはもともと置いていない）。画面はそのまま続けて使える
-    message = f"「{pattern.name}」の使用を開始しました。帳票取り込みの候補に出ます"
-    return jsonify(ok=True, status=status, html=_build_html(pattern_id, _request_book(pattern_id)[0]),
-                   list_html=_list_html(), message=message)
-
-
-@form_types_bp.post("/<int:pattern_id>/delete", endpoint="delete")
-def form_types_delete(pattern_id: int):
-    pattern = _get_pattern(pattern_id)
-    delete_pattern(pattern_id)
-    return jsonify(ok=True, list_html=_list_html(), message=f"帳票の種類「{pattern.name}」を削除しました")
 
 
 # ====================================================================================================
@@ -4873,7 +2827,7 @@ SCREEN_ROLES = [("key", "識別番号"), ("date", "日付"), ("entity", "対象�
 SCREEN_ROLE_KEYS = {role for role, _label in SCREEN_ROLES}
 ROW_KIND_LABELS = {"header": "見出し", "data": "データ", "subtotal": "小計・合計", "note": "注記", "continuation": "継続行",
                "excluded": "除外", "title": "表題", "blank": "空行"}
-TABLE_KIND_LABELS = {"list": "一覧表", "crosstab": "クロス集計", "form_like": "帳票らしい", "unknown": "不明"}
+TABLE_KIND_LABELS = {"list": "一覧表", "crosstab": "クロス集計", "form_like": "項目名と値の縦並び", "unknown": "不明"}
 SCOPE_LABELS = {"pending": "まだ整形していない行と、内容が変わった行", "errors": "エラーになった行だけ",
                 "flagged": "要確認の行だけ", "all": "すべての行をやり直す"}
 # CSV の文字コード・区切り文字は画面の選択肢だけを受け付ける（他の値は読み込みで落ちて画面が開けなくなるため）
@@ -5146,14 +3100,15 @@ def tables_upload():
 @tables_bp.post("/discard", endpoint="discard")
 def tables_discard():
     """この画面（このブラウザ）の、まだダウンロードしていない取り込みを捨てる。"""
-    payload = request.get_json(force=True, silent=True) or {}
-    ids = payload.get("import_ids") or []
+    payload = request.get_json(force=True, silent=True)
+    # sendBeacon は画面を閉じる途中で送るので、中身が辞書でないこともある（"x" や [1,2] など）
+    ids = (payload.get("import_ids") or []) if isinstance(payload, dict) else []
     sid = current_session_id()
     try:
         if ids:
             discard_table_imports(ids, sid)
         else:
-            purge_session(sid, documents=False)   # 帳票取り込み（別のタブ）は巻き込まない
+            purge_session(sid)
     except Exception as exc:   # 捨て損ねてもブラウザには伝えられない。時間切れの片付けに任せる
         current_app.logger.warning("取り込みの片付けに失敗しました: %s", exc.__class__.__name__)
     return "", 204
@@ -6166,8 +4121,7 @@ def create_app(overrides: dict | None = None) -> Flask:
         app.config["ALLOWED_HOSTS"] = {"*"} if "*" in given else given | {"127.0.0.1", "localhost", "::1"}
 
     app.register_blueprint(home_bp)
-    for bp in (forms_bp, form_types_bp, tables_bp):
-        app.register_blueprint(bp)
+    app.register_blueprint(tables_bp)
 
     @app.before_request
     def _refuse_other_host():
@@ -6284,8 +4238,8 @@ def create_app(overrides: dict | None = None) -> Flask:
     if _start_command() == "run":
         # serve は自分で出すので run のときだけ。ログインが無いことの注意を必ず見せる
         print(startup_notice(), flush=True)
-    # ヘッダーは「帳票取り込み／表の取り込み／帳票登録」の3つだけ。使うAIモデルの選択は
-    # 「表の取り込み」画面の AI整形の段の中（AI接続）に移したので、共通の値は渡さない。
+    # ヘッダーの行き先は「表の取り込み」と「解説」の2つだけ。使うAIモデルの選択は
+    # ヘッダー右上の「AI接続」のパネルに移したので、共通の値は渡さない。
     return app
 
 
@@ -6301,24 +4255,21 @@ def _sweep_interval(stale_hours: float) -> int:
 
 
 def _purge_pending(app: Flask) -> None:
-    """起動時：ダウンロードしていない帳票・一覧表をすべて捨てる（作業中の一覧を持たないため）。"""
+    """起動時：ダウンロードしていない取り込みをすべて捨てる（作業中の一覧を持たないため）。"""
     if app.config.get("TESTING"):
         return
 
     try:
         with app.app_context():
-            forms_removed, tables_removed = purge_all_pending()
-            samples_removed = purge_old_sample_files()
-        if forms_removed or tables_removed:
-            print(f"[app] 途中だった取り込みを捨てました（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
-        if samples_removed:
-            print(f"[app] 前の版が置いた見本のExcelを捨てました（{samples_removed} 件・見本はもう置きません）")
+            tables_removed = purge_all_pending()
+        if tables_removed:
+            print(f"[app] 途中だった取り込みを捨てました（{tables_removed} 件）")
     except Exception as exc:  # 起動は止めない
         print(f"[app] 途中だった取り込みの片付けに失敗しました（{exc.__class__.__name__}: {exc}）")
 
 
 def _start_sweeper(app: Flask) -> None:
-    """動いている間：しばらくさわられていない帳票・一覧表を捨て続ける（daemon スレッド）。"""
+    """動いている間：しばらくさわられていない取り込みを捨て続ける（daemon スレッド）。"""
     if app.config.get("TESTING"):
         return
 
@@ -6329,10 +4280,9 @@ def _start_sweeper(app: Flask) -> None:
             _stop.wait(interval)
             try:
                 with app.app_context():
-                    forms_removed, tables_removed = sweep_stale(STALE_HOURS)
-                if forms_removed or tables_removed:
-                    print(f"[app] {STALE_HOURS}時間さわられていない取り込みを捨てました"
-                          f"（帳票 {forms_removed} 件・一覧表 {tables_removed} 件）")
+                    removed = sweep_stale(STALE_HOURS)
+                if removed:
+                    print(f"[app] {STALE_HOURS}時間さわられていない取り込みを捨てました（{removed} 件）")
             except Exception as exc:   # 次の回でやり直す
                 print(f"[app] 古い取り込みの片付けに失敗しました（{exc.__class__.__name__}: {exc}）")
 

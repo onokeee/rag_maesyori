@@ -1,8 +1,8 @@
 {#- 画面共通の部品。base.html を extends した画面から ui_step(...) のように裸の名前で呼ぶ -#}
 
-{#- 状態 → (表示語, 色)。ui_badge で出すものだけ（帳票・帳票の種類・ジョブ）。
+{#- 状態 → (表示語, 色)。ui_badge で出すものだけ（ジョブ）。
     AI整形の行の状態は aiproc/items.STATUS_LABELS、読み取った値の出どころは
-    templates/forms.html の part_review_block の SOURCE_LABELS と static/app.js（帳票取り込み）の SOURCES が持つ。 -#}
+    static/app.js が持つ。 -#}
 {% set STATE_LABELS = {
   "unread": ("読み取り前", "gray"), "reviewing": ("確認中", "amber"), "modified": ("修正中", "violet"),
   "confirmed": ("確定済み", "green"),
@@ -12,7 +12,7 @@
 } %}
 
 {#- 画面の題。render_template("base.html", screen="forms") のように screen で切り替える -#}
-{%- set SCREEN_TITLES = {"forms": "帳票取り込み", "tables": "表の取り込み", "form_types": "帳票登録", "guide": "解説"} -%}
+{%- set SCREEN_TITLES = {"tables": "表の取り込み", "guide": "解説"} -%}
 
 {#- エラー画面（1枚）の題。app/__init__.py が code（400/403/404/413/500）と、必要なら
     host_refused・home_url・limit を渡す。枠（カード・題・戻るボタン）は共通で、題と本文だけが code で変わる。
@@ -111,7 +111,7 @@
 {%- endmacro %}
 
 {#- 元のシート・見本のシートの表示（views の _sheet_grids が作る grids）。
-    click_cells=True にすると、1回のクリックで表ごと項目にできるセルに目印を付ける（帳票登録）。 -#}
+    -#}
 {%- macro ui_sheet_grid(grids, click_cells=False) -%}
 {%- for g in grids %}
 <div class="sheet-grid" data-sheet="{{ g.name }}" {% if not loop.first %}hidden{% endif %}>
@@ -154,7 +154,7 @@
 
 {#- ファイル選択（ドラッグ＆ドロップ可）。accept: ".xlsx,.xlsm" -#}
 {%- macro ui_file_drop(name="file", accept="", label="ファイルをここにドラッグ＆ドロップ", hint=None, multiple=False, fid=None) -%}
-{#- fid: 同じ name の置き場が1画面に2つあるとき（帳票登録の「新しく登録する」と「項目を直す」）に id を分ける -#}
+{#- fid: 同じ name の置き場が1画面に2つあるときに id を分ける -#}
 {%- set fid = fid or ("drop-" ~ name) -%}
 <div class="file-drop" data-file-drop>
   <input type="file" id="{{ fid }}" name="{{ name }}" {% if accept %}accept="{{ accept }}"{% endif %} {{ 'multiple' if multiple }} required class="file-drop-input">
@@ -167,318 +167,6 @@
   </label>
 </div>
 {%- endmacro -%}
-
-{#- ========================================================================================
-    元 forms.html — 段の断片のマクロ（views.render_part が1つずつ描く）
-    ======================================================================================== -#}
-{#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("base.html", "part_x", ...)
-    が、この画面のマクロを1つだけ描いて返す（ページ全体は描かない）。 -#}
-
-{%- macro part_type() -%}
-{#- 帳票の種類とシートの欄（HTML の断片。fetch でこの中身だけ入れ替える）。
-    まとめて置いた帳票は同じフォームなので、ここで決める種類とシートは置かれた全部に使う。 -#}
-
-{% if duplicate %}
-<div class="notice" role="note">同じ内容のファイルをこの画面でもう一度置いています（先に確定した分は、ダウンロードするまでサーバーに残っています）。</div>
-{% endif %}
-
-{% if table_sheets %}
-<div class="notice info" role="note">
-  <strong>一覧表のようです。</strong>
-  シート「{{ table_sheets | join('」「') }}」は、見出し行の下に同じ形の行が10行以上続いています。1行＝1件の表なら
-  <a href="{{ url_for('tables.new') }}">表の取り込み</a>へ進むと、行ごとの Markdown を作れます。
-</div>
-{% endif %}
-
-{% if not matches %}
-  <p class="muted">使用中の帳票の種類がありません。<a href="{{ form_types_url }}">帳票登録</a>でこの帳票の Excel を置いて読み取る欄を決め、
-    ［使用開始］を押すと、ここに出ます。</p>
-{% else %}
-<form data-type-form data-doc="{{ doc.id }}" data-read-url="{{ url_for('forms.read_all') }}"
-      data-suggested='{{ suggested | tojson }}' data-file-counts='{{ file_counts | tojson }}'>
-  <input type="hidden" name="ids" value="{{ files | map(attribute='id') | join(',') }}">
-
-  {% if files | length > 1 %}
-  <p>置かれた<strong>{{ files | length }}件</strong>すべてに、下で選んだ帳票の種類とシートを使います
-    （同じフォームの帳票をまとめて読み取ります）。合わないファイルは［このファイルは外す］で外してください。</p>
-  <ul class="file-chips" aria-label="まとめて読み取るファイル">
-    {% for f in files %}
-    <li class="file-chip" data-file-row="{{ f.id }}">
-      <span class="file-chip-name">{{ loop.index }}. {{ f.file_name }}</span>
-      <span class="file-chip-count"><span data-file-count="{{ f.id }}">{{ f.found }}</span>項目</span>
-      <button type="button" class="file-chip-drop" data-drop-doc="{{ f.id }}"
-              title="このファイルは外す" aria-label="{{ f.file_name }} は外す"
-              data-confirm="{{ f.file_name }} の取り込みをやめ、元のファイルと読み取り結果をサーバーから消します。元に戻せません。"
-              data-confirm-ok="このファイルを外す">✕</button>
-    </li>
-    {% endfor %}
-  </ul>
-  {% endif %}
-
-  <div class="type-sheet-grid">
-    <fieldset class="plain">
-      <legend>帳票の種類</legend>
-      <div class="stack" role="radiogroup" aria-label="帳票の種類">
-        {% for m in matches %}
-        <label class="check">
-          <input type="radio" name="pattern_id" value="{{ m.pattern.id }}" {{ 'checked' if m.pattern.id == selected_id }} required>
-          <span><strong>{{ m.pattern.name }}</strong></span>
-          <small>{{ m.found_label }}{% if m.sheet_names %}（シート: {{ m.sheet_names | join('、') }}）{% endif %}</small>
-        </label>
-        {% endfor %}
-      </div>
-      {% if matches[0].total_fields and matches[0].found_fields * 2 < matches[0].total_fields %}
-        <p class="hint">どの種類とも見つかった項目が少なめです。別の帳票かもしれません。
-          <a href="{{ form_types_url }}">帳票登録</a>で新しい種類を作ることもできます。</p>
-      {% endif %}
-    </fieldset>
-
-    <fieldset class="plain">
-      <legend>読み取るシート</legend>
-      <div class="sheet-list">
-        {% for s in sheets %}
-        <label class="check">
-          <input type="checkbox" name="sheets" value="{{ s.name }}" {{ 'checked' if s.name in selected_sheets }}>
-          <span>{{ s.name }}{% if s.hidden %} <small class="muted">（非表示のシート）</small>{% endif %}</span>
-          <small>値のあるセル {{ s.cells }}個{% if s.images %} / 画像 {{ s.images }}件{% endif %}{% if s.name in table_sheets %} / 一覧表らしい{% endif %}{% if files | length > 1 and s.files < files | length %} / {{ files | length }}件中{{ s.files }}件のファイルにあります{% endif %}</small>
-        </label>
-        {% endfor %}
-      </div>
-    </fieldset>
-  </div>
-
-  <p class="hint">帳票の種類を選び直すと、その種類で見つかったシートにチェックが付け直されます。
-    下の読み取り結果は、［読み取る］を押すたびに作り直されます（手で直した値は元に戻ります）。</p>
-
-  {% if lost_work %}
-  <div class="notice" role="alert">
-    <p>{% if files | length > 1 %}確定済み・修正中の帳票があります{% else %}この帳票は{{ '確定済み' if doc.state == 'confirmed' else '修正中' }}です{% endif %}。読み取り直すと、手で修正した値は失われます。</p>
-    <label class="check"><input type="checkbox" name="acknowledge"> 手で修正した値が失われることを確認しました</label>
-  </div>
-  {% endif %}
-
-  <div class="form-actions">
-    <button type="submit" class="btn primary">{% if lost_work %}読み取り直す{% elif files | length > 1 %}{{ files | length }}件をまとめて読み取る{% else %}読み取る{% endif %}</button>
-    {% if files | length == 1 %}
-    <button type="button" class="btn ghost" data-drop-doc="{{ doc.id }}"
-            data-confirm="この帳票の取り込みをやめ、元のファイルと読み取り結果をサーバーから消します。元に戻せません。"
-            data-confirm-ok="取り込みをやめる">この帳票はやめる</button>
-    {% endif %}
-  </div>
-</form>
-{% endif %}
-{%- endmacro %}
-
-{%- macro part_review() -%}
-{#- 読み取り結果の欄（HTML の断片）。置かれた帳票を縦に全部並べ、スクロールして確かめていく
-    （利用者の指示 2026-09-20「②タブで切り替えるのではなく、全部まとめて表示する」）。 -#}
-
-{% if items | length > 1 %}
-<div class="batch-bar" data-batch-bar>
-  <p class="batch-bar-text" data-batch-text>{{ items | length }}件中1件目を表示中</p>
-  <span class="spacer"></span>
-  <button type="button" class="btn small" data-next-doc>次の帳票へ</button>
-</div>
-{% endif %}
-
-<div class="review-stack{{ ' is-batch' if items | length > 1 }}" data-review-stack>
-  {% for item in items %}{{ part_review_block(item) }}{% endfor %}
-</div>
-{%- endmacro %}
-
-{%- macro part_review_block(item) -%}
-{#- 読み取り結果の1件分（帳票1つ）。左に元のシート、右に読み取った値（その場で直せる）。
-    まとめて置いたときは、この塊が帳票の数だけ縦に並ぶ（タブで切り替えない）。 -#}
-{% set doc = item.doc %}
-{% set extraction = item.extraction %}
-{% set summary = item.summary %}
-{% set SOURCE_LABELS = {"auto": ("自動で読み取り", "blue"), "manual": ("手で修正", "teal"), "blank": ("空欄", "gray")} %}
-
-<section class="review-doc" id="doc-{{ doc.id }}" data-doc="{{ doc.id }}" data-state="{{ doc.state }}"
-         data-file-name="{{ doc.file_name }}"
-         data-draft-url="{{ url_for('forms.draft', doc_id=doc.id) }}"
-         data-preview-url="{{ url_for('forms.preview', doc_id=doc.id) }}"
-         data-grid-url="{{ url_for('forms.grid_fragment', doc_id=doc.id) }}"
-         data-version="{{ item.version }}">
-
-  <div class="review-doc-head">
-    <span class="review-doc-no" aria-hidden="true">{{ item.no }}</span>
-    <strong class="review-doc-name">{{ doc.file_name }}</strong>
-    <span class="badge badge-{{ item.state_color }}" data-doc-state>{{ item.state_label }}</span>
-    <span class="spacer"></span>
-    <span class="muted small" data-doc-save aria-live="polite"></span>
-  </div>
-
-  <div class="review-toolbar cluster">
-    <ul class="chips" aria-label="項目の状態">
-      <li><button type="button" class="chip chip-warn{{ ' is-zero' if not summary.counts.issue }}" data-next-issue title="押すと次の要確認の項目へ移動します">要確認 <strong data-count="issue">{{ summary.counts.issue }}</strong></button></li>
-      <li><span class="chip chip-manual{{ ' is-zero' if not summary.counts.manual }}">手で修正 <strong data-count="manual">{{ summary.counts.manual }}</strong></span></li>
-      <li><span class="chip chip-plain{{ ' is-zero' if not summary.counts.blank }}">空欄 <strong data-count="blank">{{ summary.counts.blank }}</strong></span></li>
-    </ul>
-    <span class="muted small">帳票の種類: {{ extraction.pattern.name }} ／ シート: {{ extraction.sheets | join('、') }}</span>
-    <span class="spacer"></span>
-    <a class="btn small ghost" href="{{ url_for('forms.original', doc_id=doc.id) }}">元のファイルをダウンロード（消えません）</a>
-  </div>
-
-  <div class="split">
-    <section class="split-pane sticky" aria-label="元のシート">
-      <div class="split-pane-head">
-        <h3>元のシート</h3>
-        {% if extraction.sheets | length > 1 %}
-        <div class="tabs" role="tablist">
-          {% for name in extraction.sheets %}<button type="button" role="tab" data-sheet-tab="{{ name }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ name }}</button>{% endfor %}
-        </div>
-        {% endif %}
-      </div>
-      <div class="split-pane-body" data-grid-slot>
-        {% if item.grids is not none %}
-          {{ part_grid(item.grids, item.info_missing) }}
-        {% else %}
-          <p class="muted" data-grid-wait>この帳票までスクロールすると、元のシートを表示します。</p>
-        {% endif %}
-      </div>
-    </section>
-
-    <section class="split-pane" aria-label="読み取った値">
-      <div class="split-pane-head">
-        <div class="tabs" role="tablist">
-          <button type="button" role="tab" data-pane-tab="fields" aria-selected="true">読み取った値</button>
-          <button type="button" role="tab" data-pane-tab="markdown" aria-selected="false">Markdownの下書き</button>
-        </div>
-      </div>
-      <div class="split-pane-body">
-        <form id="reviewForm-{{ doc.id }}" data-review-form onsubmit="return false">
-          <input type="hidden" name="version" value="{{ item.version }}" data-version-input>
-          <div data-pane="fields">
-            {% for f in extraction.fields %}
-            {% set st = summary.fields[f.field_name] %}
-            {% set src = SOURCE_LABELS[st.source] %}
-            {% set fid = "value-" ~ doc.id ~ "-" ~ f.field_name %}
-            <div class="field review-field{{ ' is-issue' if st.issue }}" data-field="{{ f.field_name }}" data-issue="{{ 1 if st.issue else 0 }}"
-                 data-sheet="{{ f.sheet or '' }}" data-label-cell="{{ f.label_cell or '' }}" data-value-cell="{{ f.value_cell or '' }}">
-              <div class="cluster">
-                <label class="field-label" for="{{ fid }}">{{ f.display_name }}{% if f.unit %} <small class="muted">（{{ f.unit }}）</small>{% endif %}</label>
-                <span class="badge badge-{{ src[1] }}" data-source-badge>{{ src[0] }}</span>
-                {% if f.value_cell %}<small class="muted">{{ f.sheet }}!{{ f.value_cell }}</small>{% endif %}
-              </div>
-              {% set text = '' if f.value is none else f.value %}
-              {% if f.data_type == 'table' %}
-                {% set tcolumns = f.value.columns if f.value else (f.table_columns or []) %}
-                {% set trows = f.value.rows if f.value else [] %}
-                <input type="hidden" id="{{ fid }}" name="value-{{ f.field_name }}" value="{{ f.value | table_json }}" data-table-value>
-                {% if tcolumns %}
-                <p class="hint">1行＝1明細として Markdown に出します。余分な行は［行を削除］で外してください。{% if not trows %}元のファイルから読み取れなかったので、［行を追加］で入力してください。{% endif %}</p>
-                {% if f.table_blocks and f.table_blocks > 1 %}
-                <p class="hint">同じ形の列見出しが{{ f.table_blocks }}組、縦に積み重なっていました。すべての組を1つの表にまとめています。</p>
-                {% endif %}
-                <div class="table-wrap">
-                  <table class="table compact table-editor" data-table-editor aria-label="{{ f.display_name }}（1行＝1明細）">
-                    <thead><tr>{% for c in tcolumns %}<th scope="col">{{ c }}</th>{% endfor %}<th class="center"><span class="sr-only">行の操作</span></th></tr></thead>
-                    <tbody>
-                    {% for row in trows %}
-                      <tr>{% for cell in row %}<td><textarea class="cell-input" rows="1" aria-label="{{ tcolumns[loop.index0] if loop.index0 < tcolumns | length else '' }}">{{ cell }}</textarea></td>{% endfor %}
-                        <td class="center"><button type="button" class="btn small ghost" data-remove-table-row>行を削除</button></td></tr>
-                    {% endfor %}
-                    </tbody>
-                  </table>
-                </div>
-                <button type="button" class="btn small" data-add-table-row>行を追加</button>
-                {% else %}
-                <p class="muted small">明細表が見つかりませんでした。元のファイルを確かめ、見つからないときは上で帳票の種類・シートを選び直してください。</p>
-                {% endif %}
-              {% elif f.data_type == 'text' or (text is string and '\n' in text) %}
-                <textarea class="input" rows="{{ [3, (text | string).count('\n') + 2] | max }}" id="{{ fid }}" name="value-{{ f.field_name }}">{{ text }}</textarea>
-              {% else %}
-                <input class="input" id="{{ fid }}" name="value-{{ f.field_name }}" value="{{ text }}" {% if f.data_type == 'date' %}placeholder="例: 2026-09-14"{% elif f.data_type == 'number' %}inputmode="decimal"{% endif %}>
-              {% endif %}
-              <p class="warn" data-warning {% if not st.warning %}hidden{% endif %}>{{ st.warning }}</p>
-            </div>
-            {% endfor %}
-            {% if extraction.attachments %}
-            <p class="hint">添付画像: {{ extraction.attachments | length }}枚（Markdownには枚数だけ書きます）</p>
-            {% endif %}
-          </div>
-
-          <div data-pane="markdown" hidden>
-            <p class="hint">入力中の値から作った Markdown です（ファイル名: <code data-md-name>{{ summary.file_name }}</code>）。</p>
-            <pre class="code md-preview" data-md-preview>{{ summary.markdown }}</pre>
-          </div>
-        </form>
-      </div>
-    </section>
-  </div>
-</section>
-{%- endmacro %}
-
-{%- macro part_grid(grids, info_missing) -%}
-{#- 1件の帳票の「元のシート」。読み取り結果の欄が画面に入った時点で読み込む（重くしないため）。 -#}
-{% if info_missing %}
-  <p class="muted">元のファイルを読み込めませんでした。値の確認は右の項目だけで行ってください。</p>
-{% endif %}
-<p class="hint">項目の入力欄を選ぶと、見出しのセル（橙）と値のセル（青）が光ります。入力欄を選んだ状態でセルをクリックすると、そのセルの値を入れます。</p>
-{{ ui_sheet_grid(grids) }}
-{%- endmacro %}
-
-{%- macro part_finish() -%}
-{#- 確定してダウンロードの欄（HTML の断片） -#}
-{% set done = current.state in confirmed_states %}
-{% set batch = docs | length > 1 %}
-
-{% if batch and read_yet %}
-<p>確定済み <strong>{{ confirmed | length }}</strong> / {{ ready | length }} 件。下のボタンで、まだ確定していない帳票も確定してから zip にまとめます。</p>
-<ul class="list-plain list-rows">
-  {% for d in ready %}
-  <li>
-    <div class="item-main">
-      <span class="item-title">{{ loop.index }}. {{ d.title or d.file_name }}</span>
-      <span class="item-sub">{{ d.file_name }}</span>
-    </div>
-    <div class="cluster">
-      {{ ui_badge(d.state) }}
-      <button type="button" class="btn small" data-goto-doc="{{ d.id }}">読み取り結果を見る</button>
-    </div>
-  </li>
-  {% endfor %}
-</ul>
-{% if unread %}
-<p class="warn">まだ読み取れていない{{ unread | length }}件（zip には入りません）:
-  {{ unread | map(attribute="file_name") | join("、") }}</p>
-<p class="hint">ダウンロードのあと、この{{ unread | length }}件だけ②に戻って読み取るシートを選び直してください。</p>
-{% endif %}
-{% endif %}
-
-{% if not read_yet %}
-  <p class="muted">上で帳票の種類とシートを選び、［読み取る］を押してください。読み取った値を確かめてから、ここで確定します。</p>
-{% elif batch %}
-  <p class="notice" role="note">{{ batch_confirm }} zip には帳票1件につき1つの .md が入っています。</p>
-  <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('forms.download_batch', batch_id=batch_id) }}"
-       data-confirm-all data-download data-confirm="{{ batch_confirm }}" data-confirm-ok="確定してダウンロード">
-      {% if to_confirm %}残り{{ to_confirm | length }}件も確定して、まとめてダウンロード（zip）{% else %}まとめて Markdown をダウンロード（zip）{% endif %}
-    </a>
-  </div>
-  <p class="hint">要確認の項目が残っていても確定できます（要確認は「ここを見てください」という目印です）。</p>
-{% elif not done %}
-  <div class="form-actions">
-    <button type="button" class="btn primary" data-confirm-doc="{{ current.id }}">確定して Markdown を作る</button>
-  </div>
-  <p class="hint">確定すると、入力中の値で Markdown が作られます。確定したあとでも、上の読み取り結果を直して確定し直せます。</p>
-{% else %}
-  <p>ファイル名: <code>{{ file_name }}</code></p>
-  <p class="notice" role="note">{{ delete_note }}</p>
-  <div class="btn-row">
-    {#- 直したまま確定していない（修正中）ときは、zip と同じように確定し直してから渡す -#}
-    <a class="btn primary" href="{{ url_for('forms.download_md', doc_id=current.id) }}"
-       data-confirm-all data-download data-confirm="{{ delete_confirm }}" data-confirm-ok="ダウンロードして消す">Markdown をダウンロード（.md）</a>
-    <button type="button" class="btn" data-copy="#mdText">Markdownをコピー</button>
-  </div>
-  <details class="fold">
-    <summary>Markdownの内容を見る</summary>
-    <pre class="code md-preview" id="mdText">{{ markdown }}</pre>
-  </details>
-  <p class="hint">ダウンロードした .md は、LightRAG の画面にそのままドラッグして入れてください。</p>
-{% endif %}
-{%- endmacro %}
 
 {#- ========================================================================================
     元 tables.html — 段の断片のマクロ（views.render_part が1つずつ描く）
@@ -897,214 +585,30 @@
 </div>
 {%- endmacro %}
 
-{#- ========================================================================================
-    元 form_types.html — 段の断片のマクロ（views.render_part が1つずつ描く）
-    ======================================================================================== -#}
-{#- 段の中身（HTML の断片）は、この下のマクロ part_* で作る。views.render_part("base.html", "part_x", ...)
-    が、この画面のマクロを1つだけ描いて返す（ページ全体は描かない）。 -#}
-
-{%- macro part_list() -%}
-{#- 登録済みの帳票の種類（HTML の断片） -#}
-{% if not patterns %}
-  <p class="muted">まだありません。下で、この種類の帳票の Excel を置いてください。</p>
-{% else %}
-<div class="table-wrap">
-<table class="table">
-  <thead><tr><th>名前</th><th>状態</th><th>読み取る項目</th><th>操作</th></tr></thead>
-  <tbody>
-  {% for p in patterns %}
-    <tr data-pattern="{{ p.id }}">
-      <td><strong>{{ p.name }}</strong></td>
-      <td>{{ ui_badge(p.status) }}</td>
-      <td>{{ p.field_count }}</td>
-      <td>
-        <div class="btn-row">
-          <button type="button" class="btn small" data-open-type="{{ p.id }}">項目を見る・直す</button>
-          {% if p.status != 'active' %}
-          <button type="button" class="btn small" data-set-status="active" data-pattern="{{ p.id }}">使用開始</button>
-          {% endif %}
-          <button type="button" class="btn danger-outline small" data-delete-type="{{ p.id }}"
-                  data-confirm="帳票の種類「{{ p.name }}」（読み取りの設定）を削除します。元に戻せません。"
-                  data-confirm-ok="削除">削除</button>
-        </div>
-      </td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
-{% endif %}
-{%- endmacro %}
-
-{%- macro part_build() -%}
-{#- 読み取る欄をクリックする欄（HTML の断片）。Excel のファイルはサーバーに残さないが、登録したときの
-    シートの中身（セルの番地と文字）は種類と一緒に覚えている（views._stored_book）ので、開き直しても
-    シートは出る。出ないのは、覚える前に登録した種類だけ（そのときは置き場を出す）。 -#}
-<div id="cellBuilder" data-pattern="{{ pattern.id }}"
-     data-add-url="{{ url_for('form_types.add_field', pattern_id=pattern.id) }}"
-     {#- いま画面に出ているブックの合図（sha256）。ブラウザがファイルを持っていないとき、
-         これを送れば「さっき読んだブック」を指せる（無ければサーバーは覚えたシートを使う） -#}
-     data-book="{{ book.file_hash if book }}">
-
-  {% for note in notes %}<p class="warn">{{ note }}</p>{% endfor %}
-
-  <div class="cluster build-top">
-    <label class="field"><span>帳票の種類の名前</span>
-      <input class="input" value="{{ pattern.name }}" data-rename="{{ url_for('form_types.rename', pattern_id=pattern.id) }}"></label>
-    <span>{{ ui_badge(pattern.status) }}</span>
-    {#- 直した内容はその場で保存される（確定の操作は無い）。それが分かるように、保存のたびにここを書き換える
-        （トーストは消えるので残る表示にする。利用者の指摘 2026-09-22「変更した内容を確定させるボタンがない」） -#}
-    <span class="muted small" data-save-line aria-live="polite">変更はその場で保存されます（確定の操作はありません）</span>
-    <span class="spacer"></span>
-    {% if pattern.status != 'active' %}
-      <button type="button" class="btn primary" data-set-status="active" data-pattern="{{ pattern.id }}">使用開始</button>
-    {% endif %}
-    <button type="button" class="btn" data-close-build title="この欄を閉じて一覧に戻ります（直した内容は保存済みです）">編集を終える</button>
-    <button type="button" class="btn danger-outline" data-delete-type="{{ pattern.id }}"
-            data-confirm="帳票の種類「{{ pattern.name }}」を削除します。元に戻せません。&#10;確定済みの帳票{{ confirmed_count }}件は削除されずに残ります。"
-            data-confirm-ok="削除">この種類を削除</button>
-  </div>
-
-  <p class="page-lead">左のシートで<strong>見出しのセル</strong>、次に<strong>値のセル</strong>をクリックすると、その欄が読み取る項目になります。
-    「受注番号：SO-1042」のように1つのセルに見出しと値が入っているときは、同じセルを2回クリックしてください。
-    表（1行＝1明細）は、列見出しのセルを1回クリックすると表ごと項目になります。</p>
-
-  <div class="split">
-    <section class="split-pane sticky" aria-label="置いた帳票のシート">
-      <div class="split-pane-head">
-        <h3>置いた帳票のシート{% if book %} <small class="muted">{{ book.file_name }}</small>{% endif %}
-          {% if grids %}
-          {#- 書き方の違う同じ帳票（「設備No」と「設備番号」など）に替えて同じ欄をクリックすると、どちらでも読めるようになる。
-              置き替えると、覚えているシートもその Excel のものに入れ替わる -#}
-          <form class="inline" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
-            <label class="link-like small" title="書き方の違う同じ帳票に替えて同じ欄をクリックすると、どちらの書き方でも読めるようになります。置き替えると、覚えておくシートもその Excel のものに入れ替わります（ファイルは保存しません）">別のExcelに替える<input type="file" name="book" accept=".xlsx,.xlsm" hidden></label>
-          </form>
-          {% endif %}
-        </h3>
-        {% if remembered %}
-        {#- 覚えたシートで出している（Excel は要らない）。いつ置いたものかを書く -#}
-        <p class="hint" data-remembered-book>登録したときに覚えたシートです（{{ remembered.file_name }}、{{ remembered.saved_at[:16] | replace('T', ' ') }} に置いたもの）。
-          Excel のファイルは保存していません。セルの番地と文字だけを覚えています（セルの色は覚えません）。</p>
-        {% endif %}
-        {% if grids | length > 1 %}
-        <div class="tabs" role="tablist">
-          {% for g in grids %}<button type="button" role="tab" data-sheet-tab="{{ loop.index0 }}" aria-selected="{{ 'true' if loop.first else 'false' }}">{{ g.name }}</button>{% endfor %}
-        </div>
-        {% endif %}
-      </div>
-      <div class="split-pane-body">
-        {% if not grids %}
-          {#- 覚えたシートが無い種類（シートを覚えるようになる前に登録したもの）だけ、ここに置き場を出す。
-              置くとシートを覚え、登録のときと同じ画面（左にシート・右に項目）になり、次からは置かずに開ける -#}
-          <p class="hint">この種類は、シートを覚えるようになる前に登録したものです。同じ帳票の Excel を一度置くと、
-            そのシートの中身（セルの番地と文字）を覚えて、次からは置かずにこの画面が出ます。</p>
-          <form class="stack" data-book-form="{{ url_for('form_types.build_fragment', pattern_id=pattern.id) }}" enctype="multipart/form-data">
-            {{ ui_file_drop("book", fid="drop-book-edit", accept=".xlsx,.xlsm", label="この帳票のExcelをここにドラッグ＆ドロップ",
-                            hint="置くとすぐシートが出て、登録のときと同じようにセルをクリックして直せます。" ~ snapshot_note) }}
-          </form>
-        {% else %}
-        <p class="hint" data-click-hint aria-live="polite">見出しのセルをクリックしてください。</p>
-        <div class="btn-row" data-click-actions hidden>
-          <button type="button" class="btn small" data-click-empty>値が空のまま項目にする</button>
-          <button type="button" class="btn small ghost" data-click-cancel>選び直す</button>
-        </div>
-        {{ ui_sheet_grid(grids, click_cells=True) }}
-        {% endif %}
-      </div>
-    </section>
-
-    <section class="split-pane" aria-label="読み取る項目">
-      <div class="split-pane-head"><h3>読み取る項目（{{ rows | length }}）</h3></div>
-      <div class="split-pane-body">
-        {% if not rows %}
-          <p class="muted">まだ項目がありません。左のシートで、読み取りたい欄の見出しと値をクリックしてください。</p>
-        {% else %}
-        <p class="hint">見出しはクリックすると手で直せます。直るのはMarkdownに書く名前だけで、シートの読み取る場所は変わりません。</p>
-        <div class="table-wrap">
-        <table class="table compact">
-          <thead><tr><th>見出し</th><th>置いた帳票での値</th><th></th></tr></thead>
-          <tbody>
-          {% for r in rows %}
-            <tr data-field="{{ r.field.field_name }}" data-sheet="{{ r.sheet or '' }}"
-                data-label-cell="{{ r.label_cell or '' }}" data-value-cell="{{ r.value_cell or '' }}">
-              <th scope="row">
-                <input class="name-edit" value="{{ r.field.display_name }}" data-saved="{{ r.field.display_name }}"
-                       aria-label="見出し（Markdownに書く名前）"
-                       data-field-label="{{ url_for('form_types.rename_field', pattern_id=pattern.id, field_name=r.field.field_name) }}">
-                {% if r.label != r.field.display_name %}<small class="muted">探す見出し: {{ r.label }}</small>{% endif %}
-                {% if r.field.data_type == 'table' %}<small class="muted">表（1行＝1明細）</small>{% endif %}</th>
-              <td>
-                {% if not book %}<span class="muted">—（左にExcelを置くと、この設定で読んだ値が出ます。シートを覚える前に登録した種類です）</span>
-                {% elif r.value in (none, '') %}<span class="muted">—（見つかりません）</span>
-                {% else %}<span class="pre">{{ r.value | field_text | truncate(120) }}</span>{% if r.field.unit %} {{ r.field.unit }}{% endif %}{% endif %}
-                {% if r.warning %}<div class="warn">{{ r.warning }}</div>{% endif %}
-              </td>
-              <td class="center">
-                <button type="button" class="btn small ghost"
-                        data-delete-field="{{ url_for('form_types.delete_field', pattern_id=pattern.id, field_name=r.field.field_name) }}">削除</button>
-              </td>
-            </tr>
-          {% endfor %}
-          </tbody>
-        </table>
-        </div>
-        {% endif %}
-      </div>
-    </section>
-  </div>
-
-  {# ---- 読み取りテスト ---- #}
-  {% call ui_card("読み取りテスト", ("いまの設定で、" ~ ("登録したときに覚えたシート" if remembered else "置いた帳票") ~ "を実際に読み取った結果です。") if book else none, level=3) %}
-    {% if not rows %}
-      <p class="muted">項目を1つ以上作ると、ここに読み取り結果が出ます。</p>
-    {% elif not test %}
-      <p class="muted">この種類はシートを覚える前に登録したもので、いま Excel も置いていないので、読み取りテストはできません。
-        設定は残っています。確かめたいときは、左の欄に同じ帳票の Excel を置いてください（置くとシートを覚えます）。</p>
-    {% else %}
-      <p>{{ test.total }}項目中 <strong>{{ test.found }}</strong>項目が見つかりました（シート: {{ test.sheets | join('、') }}）。</p>
-      <details class="fold" {% if test.found < test.total %}open{% endif %}>
-        <summary>できる Markdown を見る（ファイル名: {{ test.file_name }}）</summary>
-        <pre class="code md-preview">{{ test.markdown }}</pre>
-      </details>
-      <p class="hint">思ったとおりに読めていれば、上の［使用開始］を押してください。帳票取り込みの候補に出ます。</p>
-    {% endif %}
-  {% endcall %}
-
-</div>
-{%- endmacro %}
-
-{#- ========================================================================================
-    元 guide.html — 段の断片のマクロ（views.render_part が1つずつ描く）
-    ======================================================================================== -#}
-{#- 解説: 帳票の Markdown がどう作られるか（裏側の決まり）。利用者の求め 2026-09-22
-    「帳票関係のマークダウン作成の裏側のロジックを書いた文書を解説ページを上部タブに追加して作成して」。
-    中身は app/extract.py の build_markdown・_guess_type・_basic_lines・table_markdown_lines と docs/design.md 6.1 のとおり。
-    コードを変えたらここも直す（数字はコードの定数と同じにしておく）。 -#}<!doctype html>
+<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=1280">
-  <title>{% block title %}{% if screen %}{{ SCREEN_TITLES[screen] }}{% elif code %}{{ TITLES.get(code, TITLES[500]) }}{% else %}帳票取り込み{% endif %}{% endblock %}｜RAG用Markdown作成</title>
+  <title>{% block title %}{% if screen %}{{ SCREEN_TITLES[screen] }}{% elif code %}{{ TITLES.get(code, TITLES[500]) }}{% else %}表の取り込み{% endif %}{% endblock %}｜RAG用Markdown作成</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
   <a class="skip-link" href="#main">本文へ移動</a>
-  {#- 画面は3つだけ。設定・履歴・作業中の一覧は無い（利用者の指示 2026-09-20）。
-      それぞれの画面は「1画面で全部できる」ので、ヘッダーの行き先は3つで足りる。
+  {#- 画面は「表の取り込み」と「解説」の2つだけ。設定・履歴・作業中の一覧は無い（利用者の指示 2026-09-20）。
+      表の取り込みは「1画面で全部できる」ので、ヘッダーの行き先は2つで足りる。
       右上の「AI接続」は画面ではなく、その場で開くパネル（下の <dialog id="aiDialog">）。
       利用者の指示（2026-09-21）:「AI接続の設定は、もともとの位置ヘッダーの画面右上『AI接続』に移動させる」
       「AI接続はヘッダー上で、接続中 か 未接続 一目で分かるように」。状態（ai_header）は views.ai_header_ctx が
       覚えている結果を出すだけで、画面を開くたびに確かめには行かない。 -#}
   {% set path = request.path %}
   <header class="topbar">
-    <a class="brand" href="{{ url_for('forms.new') }}">
+    <a class="brand" href="{{ url_for('tables.new') }}">
       <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3h9l5 5v13H5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M14 3v5h5M8 13h8M8 17h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       <span>RAG用Markdown作成</span>
     </a>
     <nav id="mainNav" class="mainnav" aria-label="メインメニュー">
-      <a href="{{ url_for('forms.new') }}" {% if path.startswith('/forms') %}class="active" aria-current="page"{% endif %}>帳票取り込み</a>
       <a href="{{ url_for('tables.new') }}" {% if path.startswith('/tables') %}class="active" aria-current="page"{% endif %}>表の取り込み</a>
-      <a href="{{ url_for('form_types.index') }}" {% if path.startswith('/form-types') %}class="active" aria-current="page"{% endif %}>帳票登録</a>
       <a href="{{ url_for('home.guide') }}" {% if path.startswith('/guide') %}class="active" aria-current="page"{% endif %}>解説</a>
     </nav>
     <div class="ai-status" data-ai-header data-state="{{ ai_header.state }}">
@@ -1121,7 +625,7 @@
   </header>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-  <main id="main" class="container {% block container_class %}{% if screen in ("forms", "tables", "form_types") %}wide{% endif %}{% endblock %}">
+  <main id="main" class="container {% block container_class %}{% if screen == "tables" %}wide{% endif %}{% endblock %}">
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
       <div class="flash-area">
@@ -1134,53 +638,7 @@
       </div>
       {% endif %}
     {% endwith %}
-    {% block content %}{% if screen == "forms" %}
-
-<div id="formsPage" data-steps-open
-     data-upload-url="{{ url_for('forms.upload') }}"
-     data-discard-url="/forms/discard"
-     data-type-url="{{ url_for('forms.type_all') }}"
-     data-review-url="{{ url_for('forms.review_all') }}"
-     data-finish-url="{{ url_for('forms.finish') }}">
-
-  {#- 「その場でダウンロードしない限り、その場ですぐ捨てる」（利用者の指示 2026-09-20）を先に伝える。
-      実際に捨てるのは static/app.js の ragDiscard → POST /forms/discard。 -#}
-  <p class="notice" role="note">ダウンロードしないまま画面を閉じると、取り込んだデータは捨てられます。できた Markdown はその場でダウンロードしてください。</p>
-
-  {% call ui_step("file", 1, "ファイルを置く", open=True) %}
-      {% if active_pattern_count == 0 %}
-      <div class="notice" role="note">
-        {% if pattern_count == 0 %}
-          帳票の種類がまだありません。先に<a href="{{ url_for('form_types.index') }}">帳票登録</a>で、
-          この帳票の Excel を置いて読み取る欄を決めてください（置いた Excel はサーバーに残りません）。
-        {% else %}
-          使用中の帳票の種類がありません。<a href="{{ url_for('form_types.index') }}">帳票登録</a>で［使用開始］を押してください。
-        {% endif %}
-      </div>
-      {% endif %}
-      <form id="uploadForm" class="stack" enctype="multipart/form-data">
-        {{ ui_file_drop("file", accept=".xlsx,.xlsm", label="帳票のExcelファイルをここにドラッグ＆ドロップ（複数可）",
-                        hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。まとめて置くと、この画面で1件ずつ読み取って最後に zip にまとめます（" ~ max_files ~ "ファイル・合計" ~ max_mb ~ "MBまで）", multiple=True) }}
-        <p class="hint">取り込んだデータはサーバーに残しません。Markdown をダウンロードすると、元のファイルと読み取り結果は消えます。</p>
-      </form>
-      {{ ui_work_line("upload") }}
-  {% endcall %}
-
-  {% call ui_step("type", 2, "帳票の種類とシート", open=True) %}
-      <div data-type-body><p class="muted">上で Excel を置くと、ここに帳票の種類と読み取るシートが出ます。まとめて置いた帳票には、同じ帳票の種類とシートを使います。</p></div>
-      {{ ui_work_line("read") }}
-  {% endcall %}
-
-  {% call ui_step("review", 3, "読み取り結果", open=True) %}
-      <div data-review-body><p class="muted">読み取ると、ここに元のシートと読み取った値が並びます（まとめて置いた帳票は縦に全部並びます）。値はその場で直せます。</p></div>
-  {% endcall %}
-
-  {% call ui_step("finish", 4, "確定してダウンロード", open=True) %}
-      <div data-finish-body><p class="muted">読み取り結果を確定すると、ここから Markdown をダウンロードできます。</p></div>
-      {{ ui_work_line("confirm") }}
-  {% endcall %}
-</div>
-{% elif screen == "tables" %}
+    {% block content %}{% if screen == "tables" %}
 {#- 表の取り込みは、この1枚で全部やる（利用者の指示 2026-09-20）。
     段の中身は /tables/imports/<id>/panel/<名前> が HTML の断片で返し、static/app.js（表の取り込み）が入れる。 -#}
 
@@ -1219,47 +677,6 @@
     <p class="muted">確定すると、ここから zip をダウンロードできます。ダウンロードするとサーバーからデータが消えます。</p>
   {% endcall %}
 </div>
-{% elif screen == "form_types" %}
-
-<div id="typesPage" data-steps-open data-create-url="{{ url_for('form_types.create') }}">
-
-  {#- 帳票登録は Excel のファイルを預からない（利用者の指示 2026-09-21）。読み取ってすぐ捨て、設定と
-      シートの中身（セルの番地と文字。色は無し）だけを覚える（利用者の指示 2026-09-22）。「何も残さない」とは言わない。 -#}
-  <p class="notice" role="note"><strong>Excel のファイルは保存しません。</strong>登録したときのシートの中身（セルの番地と文字）だけを覚えておき、あとから開いたときにその画面を出します。
-    セルの色は覚えません（塗りの有る無しだけを、見出しの判定のために覚えます）。残るのは登録した帳票の種類（読み取りの設定と覚えたシート）だけです。</p>
-
-  {% call ui_step("list", 1, "登録済みの帳票の種類", open=True) %}
-      <div data-list-body>{{ list_html | safe }}</div>
-  {% endcall %}
-
-  {% call ui_step("new", 2, "新しく登録する", open=True) %}
-      <form id="newTypeForm" class="stack" enctype="multipart/form-data">
-        {{ ui_file_drop("book", accept=".xlsx,.xlsm", label="この種類の帳票のExcelをここにドラッグ＆ドロップ",
-                        hint=".xlsx / .xlsm（.xls は Excel で .xlsx に保存し直してください）。1ファイル" ~ max_mb ~ "MBまで", multiple=False) }}
-        <label class="field"><span>帳票の種類の名前<span class="req">*</span></span>
-          <input name="name" class="input" placeholder="置いたファイルの名前が入ります" data-type-name required>
-          <span class="hint">置くとすぐにシートが開きます。名前は下の画面で直せます。</span></label>
-        <p class="hint" role="note">{{ snapshot_note }}</p>
-      </form>
-      {{ ui_work_line("create") }}
-  {% endcall %}
-
-  {% call ui_step("build", 3, "読み取る欄をクリックする", open=True) %}
-      <div data-build-body>
-        <div class="split">
-          <section class="split-pane" aria-label="置いた帳票のシート">
-            <div class="split-pane-head"><h3>置いた帳票のシート</h3></div>
-            <div class="split-pane-body"><p class="muted">上で Excel を置くと、ここにシートが出ます。
-              見出しのセル、次に値のセルをクリックすると項目になります。</p></div>
-          </section>
-          <section class="split-pane" aria-label="読み取る項目">
-            <div class="split-pane-head"><h3>読み取る項目(0)</h3></div>
-            <div class="split-pane-body"><p class="muted">まだ項目がありません。</p></div>
-          </section>
-        </div>
-      </div>
-  {% endcall %}
-</div>
 {% elif screen == "guide" %}
 <div class="stack guide">
 
@@ -1269,25 +686,6 @@
     <p class="hint" style="margin-bottom:.25rem"><strong>全体</strong></p>
     <ul class="list-plain">
       <li><a href="#g1">このアプリの仕組み</a></li>
-    </ul>
-    <p class="hint" style="margin-bottom:.25rem"><strong>帳票登録（読み取りの設定を作る）</strong></p>
-    <ul class="list-plain">
-      <li><a href="#g2">帳票登録 — 読み取りの設定をどう作るか</a></li>
-      <li><a href="#g3">帳票登録でのクリックのしかた（欄の形ごと）</a></li>
-    </ul>
-    <p class="hint" style="margin-bottom:.25rem"><strong>帳票取り込み（1ファイル＝1件）</strong></p>
-    <ul class="list-plain">
-      <li><a href="#g4">帳票取り込み ① どの種類か当てる</a></li>
-      <li><a href="#g5">帳票取り込み ② 値をどう読むか</a></li>
-      <li><a href="#g6">帳票取り込み ③ 明細表をどう読むか</a></li>
-      <li><a href="#g7">帳票取り込み ④ Markdown ができるまで</a></li>
-      <li><a href="#g8">「- 見出し: 値」と「## 見出し」はどう分けているか</a></li>
-      <li><a href="#g9">先頭の見出し（#）とファイル名</a></li>
-      <li><a href="#g10">基本情報の箇条書き（- ）</a></li>
-      <li><a href="#g11">文章の節（##）</a></li>
-      <li><a href="#g12">明細表の節（##）</a></li>
-      <li><a href="#g13">大きい帳票の工夫（LightRAG に切られても身元が分かるように）</a></li>
-      <li><a href="#g14">末尾と、書かないもの</a></li>
     </ul>
     <p class="hint" style="margin-bottom:.25rem"><strong>表の取り込み（1行＝1件）</strong></p>
     <ul class="list-plain">
@@ -1299,13 +697,13 @@
       <li><a href="#g20">⑤ Markdown（記録ファイル）</a></li>
       <li><a href="#g21">⑥ 経過の記録（1つのセルに書き足された文章）の切り分け</a></li>
     </ul>
-    <p class="hint" style="margin-bottom:.25rem"><strong>どの流れにも関わる土台</strong></p>
+    <p class="hint" style="margin-bottom:.25rem"><strong>取り込みの土台</strong></p>
     <ul class="list-plain">
       <li><a href="#g22">AI接続（ヘッダー右上）</a></li>
       <li><a href="#g23">ファイルを置いてから受け取るまで</a></li>
       <li><a href="#g24">画面の仕組みと、データを捨てる決まり</a></li>
-      <li><a href="#g25">文字・空欄・日付・ファイル名の扱い（両方の流れに共通）</a></li>
-      <li><a href="#g26">帳票と一覧表の共通の決まり</a></li>
+      <li><a href="#g25">文字・空欄・日付・ファイル名の扱い</a></li>
+      <li><a href="#g26">Markdown 全体で守っている決まり</a></li>
     </ul>
   </div>
 
@@ -1315,21 +713,14 @@
     <p>Excel/CSV を読んで、LightRAG に投入しやすい Markdown を作ります。このページは
       <strong>どの機能が、何を手がかりに、どう決めているか</strong>を全部書いたものです。
       画面の使い方ではなく、裏側の判断の中身です。</p>
-    <p>取り込みは2系統あり、必要な準備が違います。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>系統</th><th>単位</th><th>先に必要な準備</th><th>出来上がり</th></tr></thead>
-      <tbody>
-        <tr><th scope="row">帳票取り込み</th><td>1ファイル＝1件</td>
-          <td><strong>帳票登録</strong>で「どの欄を読むか」を決めておく</td><td>1帳票＝1つの .md</td></tr>
-        <tr><th scope="row">表の取り込み</th><td>1行＝1件</td>
-          <td>不要（置いたその場で見出し行と列を判定する）</td><td>対象×月ごとの .md を zip で</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">帳票は「様式が決まっていて、毎回同じ欄がある」もの。一覧表は「1行が1件で、列が並んでいる」ものです。
-      置いたブックに「見出し行の下に同じ形の行が10行以上続く」シートがあると、帳票取り込みの画面でも
-      「一覧表のようです。表の取り込みへ」と案内が出ます（判定は止めません）。</p>
+    <p>取り込みは<strong>一覧表（1行＝1件）の1本だけ</strong>です。</p>
+    <ul class="list-plain">
+      <li><strong>単位</strong>：表の1行が1件の記録になります</li>
+      <li><strong>先に必要な準備</strong>：ありません（置いたその場で見出し行と列を判定します）</li>
+      <li><strong>出来上がり</strong>：日付の列の月ごとに <code>.md</code> を作り、まとめて zip で渡します</li>
+    </ul>
+    <p class="hint">扱えるのは「1行が1件で、列が並んでいる」表です。1つのファイルに1件だけ書いた様式（報告書のような形）は扱いません。
+      月が横に並ぶクロス集計も断ります（②で判定します）。</p>
     <p>全体を通した決まりが2つあります。どちらも LightRAG 側の設定が分からない前提から来ています。</p>
     <ul class="list-plain">
       <li><strong>読み取った文字は1つも削らず、勝手に換算・補完しない。</strong>
@@ -1339,878 +730,6 @@
     </ul>
   </div>
 
-  <div class="card" id="g2">
-    <div class="card-head"><h2 class="card-title">帳票登録 — 読み取りの設定をどう作るか</h2></div>
-    <p>Excel を置いてセルをクリックすると「帳票の種類」（読み取りの設定）ができます。
-      <strong>置いた Excel はサーバーに残しません。</strong>要求の中で読んで中身は捨て、代わりに
-      「覚えたシート」（シート名・セルの番地と文字・結合・太字・塗りの<em>有無</em>）だけを DB に持ちます。
-      色そのものは覚えず、ブック内だけで通じる「同じ塗りの組の番号」に置き換えます。
-      覚えたシートが 4MB を超えるときは、半端な種類を残さないよう種類そのものを作りません。</p>
-
-    <h3 class="sub-title">クリック1回目と2回目で何が決まるか</h3>
-    <p>1回目は<strong>見出しのセル</strong>、2回目は<strong>値のセル</strong>です。1回目の時点ではサーバーに何も送らず、
-      文字の無いセルは無視します。2回目で項目が1つできます（どの欄の形でどうクリックするかは次のカード）。</p>
-    <p>このとき<strong>「値をどちらに探すか」（向き）</strong>も決まります。
-      値のセルが見出しの行にかぶって右なら<code>右</code>、列にかぶって下なら<code>下</code>、どちらでもなければ<code>自動</code>です。
-      同じセルを2回クリックしたとき、「：」が無ければ<strong>見出しの無い「値だけ」の項目</strong>になり、セル番地で読みます。</p>
-    <p>1回のクリックで表になるセルには、あらかじめ目印が付きます。目印が付くのは
-      <strong>(a) 列見出しの行のすぐ真上にある見出しセル</strong>（離れていれば付きません）と
-      <strong>(b) 行を足せる形の表の列見出しセル</strong>です。列見出しの行とみなすのは
-      「塗りのある短い文字列セルが2つ以上すき間なく並ぶ行」（見出しの文字は30字まで）です。</p>
-
-    <h3 class="sub-title">項目の名前・型・単位は、クリックした2セルだけから決める</h3>
-    <p>見出しを正規化（全角半角・空白・前後の記号・大文字小文字をそろえる）して辞書を引きます。
-      当たれば辞書の項目名と言い換えの見出しを使い、外れれば値のセルから型を決めます。</p>
-    <ul class="list-plain">
-      <li>セルが日付型 → <strong>日付</strong>。セルが数値型 → <strong>数値</strong></li>
-      <li>見出しが日付らしい（「〜日」「〜日時」「〜期限」）か、値そのものが日付表記 → <strong>日付</strong></li>
-      <li>値に改行がある、または40字を超える → <strong>文章</strong>（<code>##</code> の節になる）</li>
-      <li>どれでもない → <strong>文字列</strong></li>
-    </ul>
-    <p>単位は「見出しの括弧（<code>作業時間(h)</code>）」→「値に書かれた単位（<code>1.5時間</code>）」の順に決めます。
-      勝手な換算はしません。</p>
-
-    <h3 class="sub-title">見出しの括弧書きが単位になると、見出しからは消える</h3>
-    <p>見出しの末尾の括弧書きは、中身が<strong>数字を含まない6字まで</strong>で単位らしいときに単位として切り離されます。単位らしいのは<strong>英字・記号だけのもの</strong>（<code>h</code> <code>min</code> <code>mm</code> <code>℃</code>）、<strong>1字の和文</strong>（分・円・枚・個）、<strong>決まった和文</strong>（時間・千円・万円・百万円・人日・人時・日間・ヶ月・か月・カ月・箇所・ケ所）です。</p>
-    <p>切り離した括弧書きは<strong>Markdown の見出しには出ません</strong>。<code>停止時間（分）</code> → <code>- 停止時間: 95分</code>。数値以外の項目では単位を書かないので、<code>品番(旧)</code> のような1字の括弧書きは <code>- 品番: PW48-1591</code> になり、<strong>「(旧)」がどこにも残りません</strong>。残したいときは右の一覧で見出しを <code>品番(旧)</code> に直してください。</p>
-    <p class="hint"><code>発生原因（推定）</code> <code>担当（記入）</code> のような2字以上の和文は単位とみなさないので、括弧はそのまま見出しに残ります。</p>
-
-    <h3 class="sub-title">日付型になるのは、見出しも値も日付のとき</h3>
-    <p>「見出しが日付らしい」だけでは日付型になりません。<strong>見出しの末尾が「日」「日付」「日時」「期限」「予定日」「年月日」で、かつクリックした値のセルが警告なしに日付へ直せるとき</strong>だけ日付型です。見本の「作業日」が空欄や <code>未定</code> <code>7/29</code>（年なし）だと文字列型になり、ほかの帳票を取り込んでも <code>2026-07-29（2026年7月）</code> の形にはなりません。</p>
-    <p class="hint">見出しが日付らしくなくても、<strong>値の全体が日付だけ</strong>（<code>2025/12/19(金)</code> <code>令和5年12月5日</code>）なら日付型になります。「2026-09-14 に発生」のように文の中に日付があるだけの値は文字列型です。辞書に当たった見出し（「発生日」など）は辞書の型を使うので、値を見ません。</p>
-
-    <h3 class="sub-title">「8D No.」のような短い接頭辞付きの番号は報告番号として扱う</h3>
-    <p>辞書に無い見出しでも、<strong>英数字1〜3字＋「No」か「番号」</strong>の形（<code>8D No.</code> <code>QA番号</code> <code>MT No</code>）は辞書の<strong>報告番号</strong>とみなします。帳票ごとに接頭辞が違うので、辞書に並べきれないためです。</p>
-    <p>報告番号になった項目の値は、先頭の <code>#</code> の見出し・ファイル名・<code>- 出典:</code> に使われます。別の意味の番号をこの形の見出しで書いている帳票では、右の一覧で項目の見出しを直してください。</p>
-    <h3 class="sub-title">対象の番号と名前が1つのセルにあるとき</h3>
-    <p>見出しが「対象・対象物・対象機器・対象車両・対象物件・使用車両・使用機器・対象設備・使用設備・対象装置・
-      使用装置・設備・装置」のいずれかで、値が番号と名前に分けられるときだけ
-      2項目（対象の番号・対象の名前）に分かれます。番号らしい記号は<strong>英字と数字を両方含む、空白なしの3〜20字</strong>です。
-      名前側が番号だけ（<code>VH-204 / VH-205</code>）なら分けません。文字は1つも消しません。</p>
-
-    <h3 class="sub-title">同じ欄をもう一度クリックしたとき（3通り）</h3>
-    <ul class="list-plain">
-      <li><strong>同じシートの同じ見出しセル＋同じ値セル</strong> → 何も作らず「そのセルはもう項目になっています」</li>
-      <li><strong>辞書で同じ項目名、または列見出しの一致率が5割以上の明細表</strong>で、その見出しが今のシートに別に無い
-        → <strong>探す見出しに足す</strong>（別の Excel で書き方が違うだけの同じ欄とみなす）</li>
-      <li><strong>その項目の見出しが今のシートの別のセルにそのまま在る</strong>
-        → 別項目として分け、両方の名前を付け替えます（手で直した名前は守り、新しい方だけ変えます）</li>
-    </ul>
-
-    <h3 class="sub-title">保存・並び順・状態</h3>
-    <ul class="list-plain">
-      <li><strong>確定の操作はありません。</strong>追加・削除・名前の変更はその都度すぐ保存され、使用中の種類でもすぐ効きます</li>
-      <li>項目の<strong>並び順はクリックした順</strong>です。上下の移動ボタンは無く、変えるには消してクリックし直します。
-        Markdown の箇条書きもこの並びのままです</li>
-      <li>保存のたびに版の番号が1つ上がります。版が違うと、前に確定した読み取り結果は引き継ぎません</li>
-      <li>状態は3つ。<strong>作成中</strong>（作った直後）→ ［使用開始］で<strong>使用中</strong>（項目0件では断ります）。
-        <strong>停止中</strong>に戻るのは<strong>項目が全部消えたときだけ</strong>です（「使用を停止」のボタンはありません。
-        使わない種類は削除します）。帳票取り込みの候補に出るのは使用中だけです</li>
-    </ul>
-    <p class="hint">帳票の種類と覚えたシートは全員で共有します（ログインが無いため）。
-      一方、置いた Excel の読み取り結果は「作業場所のID＋ファイルの指紋」で分けて短い間だけ持つので、
-      ほかの人が置いたブックは見えません（30分・最大8冊・元 Excel 合計64MB を超えると古い順に落ちます）。</p>
-    <p>読み取りテストは<strong>取り込みと同じ関数を通ります</strong>。ここに出る Markdown が、そのまま取り込みの結果です。</p>
-  </div>
-
-  {# ================= 帳票の欄のクリック（既存） ================= #}
-  <div class="card" id="g3">
-    <div class="card-head"><h2 class="card-title">帳票登録でのクリックのしかた（欄の形ごと）</h2></div>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>帳票の欄の形</th><th>クリック</th><th>できる項目</th></tr></thead>
-      <tbody>
-        <tr><th scope="row">見出しのセルと、その右か下に値のセル<br><small class="muted">例：「報告番号」｜「R2026-00123」</small></th>
-            <td>見出しのセル → 値のセル の<strong>2回</strong></td><td>1つの値の項目（<code>- 報告番号: R2026-00123</code>）</td></tr>
-        <tr><th scope="row">1つのセルに見出しと値<br><small class="muted">例：「設備番号：EQ-001」</small></th>
-            <td>同じセルを<strong>2回</strong></td><td>1つの値の項目。「：」の右側が値</td></tr>
-        <tr><th scope="row">対象の番号と名前が1つのセル<br><small class="muted">例：「使用設備：FL-204　フォークリフト4号車」</small></th>
-            <td>同じセルを2回</td><td>設備番号・設備名の<strong>2項目</strong>に分かれる</td></tr>
-        <tr><th scope="row">明細表（列見出しの行＋1行1明細）<br><small class="muted">例：No.｜品番｜品名｜数量｜金額(円) の表</small></th>
-            <td>列見出しのセルを<strong>どれか1つ、1回</strong>（値のセルは押さない）</td><td>表ごと1つの<strong>明細表</strong>の項目（右の一覧に「表（1行＝1明細）」の印）</td></tr>
-        <tr><th scope="row">見出しはあるが、値の欄がまだ空</th>
-            <td>見出しのセル → ［値が空のまま項目にする］</td><td>1つの値の項目（取り込む帳票では値を読む）</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">明細表について：同じ塗りで横に並ぶ見出し（No.｜品番｜品名…）を1行の見出しとみなし、その下の行を空行か「合計」の行まで表として読みます。
-      項目名は表の上にある見出し（「使用部品」など）を使います。取り込む帳票ごとに行数が違っても全部読み、読み取り結果の画面で行の追加・削除ができます。
-      Markdown では <code>## 使用部品</code> の下に <code>- 品番: PI77-1713／品名: 空調ユニット／数量: 1／金額(円): 1,650,000</code> のように1行1明細で書きます（下の「明細表の節」）。</p>
-    <p class="hint">項目の見出し（Markdown に書く名前）は、右の一覧でクリックして手で直せます。直しても、シートのどこを読むかは変わりません。</p>
-    <h3 class="sub-title">塗りの無い表はクリックできない（取り込みでは読む）</h3>
-    <p><strong>列見出しの行に塗り（背景色）が無い表は、目印が付かず、クリックしても表になりません。</strong>画面が表を見つけるのは「塗りのある短い文字列セルが2つ以上すき間なく並ぶ行」だけで、並びの中に塗りの無いセルが1つあると、そこで列見出しが切れます。</p>
-    <p>表の上の見出し（「使用部品」）をクリックしても同じです。見出しに目印が付くのも、その下に列見出しの行が見つかったときだけだからです。</p>
-    <p>このとき列見出しのセルを1回クリックすると、表ではなく<strong>「値が空のままの項目」</strong>が1つできます。取り込むと、その列見出しの右か下にある最初の1セル（＝1行目の明細）だけを読んで <code>- 品番: PI77-1713</code> の1行になり、2行目以降は出ません。</p>
-    <p class="hint">取り込みのときは登録した見出しから表を探すので、列見出しに塗りは要りません。塗りが要るのは「画面で表を見つけるとき」だけです。列見出しの行に薄い塗りを付けるだけで表として登録できます。</p>
-
-    <h3 class="sub-title">見出しの無い表は3列以上・2行以上でないと表にならない</h3>
-    <p>表の上に見出し（「使用部品」「■ 交換部品」）がある表は、見本での記入が<strong>1行だけでも</strong>表とみなします（人が「この表」と指しているためです）。</p>
-    <p>見出しの無い表は <strong>3列以上かつ2行以上</strong>のときだけ表とみなします。2列しかない表を見出し無しで置くと、クリックしても表になりません（「見出しの行＋値の行」という項目の並びと区別できないためです）。</p>
-
-    <h3 class="sub-title">「行を足せる形の表」とは</h3>
-    <p>列見出しのセルに目印が付く（＝1回のクリックで表になる）のは、<strong>「行を足せる形の表」</strong>だけです。次のどれかに当たる表です。</p>
-    <ul class="list-plain">
-    <li>明細が<strong>2行以上</strong>ある</li>
-    <li>「No だけの空き行」がある（様式が10行分の No を印字している表）</li>
-    <li>表の上の見出しが <code>■</code> <code>【</code> <code>1.</code> <code>A.</code> <code>D1</code> などで始まる</li>
-    <li>表の上の見出しが縦に結合していて、読んだ範囲より下にまだ結合の行が余っている</li>
-    </ul>
-    <p>「影響｜停止時間｜影響ロット」のように<strong>見出しの行＋値の行1つだけ</strong>の並びは、明細表ではなく「項目の並び」とみなすので目印が付きません。押印欄（承認｜確認｜作成 の下に印と日付）を表にしないための決まりです。この場合は各セルを見出しとしてクリックし、1つずつの値の項目にします。</p>
-    <p class="hint">表の上の見出しのセルには、この条件に関わらず目印が付きます（列見出しの行のすぐ真上にあるときだけ）。</p>
-
-    <h3 class="sub-title">明細表の項目名は記号と項番を落とす</h3>
-    <p>明細表の項目名（<code>##</code> の見出し）は、表の上の見出しから次を落とした文字です。</p>
-    <ul class="list-plain">
-    <li>先頭の記号 <code>■ □ ◆ ◇ ● ▼ ▽ ▶ ・ ※</code></li>
-    <li>前後の <code>【 】</code> <code>[ ]</code> と、前後の <code>：</code></li>
-    <li>先頭の項番（<code>1.</code> <code>A.</code> <code>D1：</code>）</li>
-    </ul>
-    <p>「■ 交換部品」→「交換部品」、「D1：チームの結成」→「チームの結成」、「【時系列】」→「時系列」になります。</p>
-    <p><strong>表の上に見出しの無い表は、クリックした列見出しの文字がそのまま項目名</strong>です（「品番」をクリックすると <code>## 品番</code>）。どちらも右の一覧で手で直せます。</p>
-
-    <h3 class="sub-title">帳票登録のクリックが取り消される場面・名前の手直し</h3>
-    <ul class="list-plain"><li>1回目のクリックのあと、<strong>シートのタブを切り替えると選択が取り消されます</strong>。<strong>別のシートのセルを2回目に押したときも取り消し</strong>です（見出しと値は<strong>同じシートの中でしか組にできません</strong>）</li><li>1回目に押せるのは<strong>文字のあるセルだけ</strong>です。空のセルを押しても何も起きません（目印の付いた列見出しのセルだけは1回で項目になります）</li><li>案内には押した見出しが<strong>20字まで</strong>出ます。［やめる］で取り消せます</li><li>項目の行を押すと、左のシートの<strong>その見出しと値のセルが光ります</strong>（そのシートのタブにも自動で切り替わります）</li><li>項目名の手直しは<strong>Enter か、欄から離れたときに保存</strong>されます。<strong>Escape で元に戻ります</strong>。<strong>空にして離れたときも元の名前に戻ります</strong>（名前を消すことはできません）</li><li>帳票の種類の名前も、欄から離れたときに保存されます</li></ul><p class="hint">項目が増えるたびに欄は作り直されますが、<strong>左のシートのスクロール位置と、見ていたシートのタブはそのまま保たれます</strong>（毎回いちばん上に戻らないように）。</p>
-  </div>
-
-  {# ================= 帳票取り込みの仕組み ================= #}
-  <div class="card" id="g4">
-    <div class="card-head"><h2 class="card-title">帳票取り込み ① どの種類か当てる</h2></div>
-    <p>置かれたブックごとに、<strong>使用中</strong>の帳票の種類を全部採点して順位を付けます。作成中・停止中の種類は候補に出ません。</p>
-    <p>手がかりは<strong>「その種類の見出し語が、シートのどこかに在るか」だけ</strong>です。
-      値が空でも見出しさえあれば1つ分として数え、<strong>セルの番地も値の形も順位に影響しません</strong>。
-      見出しの照合は表記の揺れを吸収してから行います（全角半角・空白・前後の記号・大文字小文字をそろえるので
-      「受付№：」「 受付 No. 」「【受付NO】」は同じ）。先頭の項番を外した形（「３．暫定対策」→「暫定対策」）、
-      「ライン／工程」の各部分、1つのセルの「設備番号：EQ-001」の見出し側も照合に使います。</p>
-
-    <h3 class="sub-title">点の付け方</h3>
-    <pre class="code md-preview">点 =（見つかった項目数 ＋ 2 × シート名の一致度）÷（その種類の項目数 ＋ 10）</pre>
-    <p>分母の <strong>10 は「見つからなかったことにする架空の項目」</strong>です。これを足すのは、
-      <strong>項目の少ない種類が割合だけで勝ってしまうのを防ぐ</strong>ためです。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>種類</th><th>見つかった</th><th>割合</th><th>点</th></tr></thead>
-      <tbody>
-        <tr><td>クリックで作った小さな種類</td><td>4項目中4項目</td><td>100%</td><td>0.29</td></tr>
-        <tr><td>中くらいの種類</td><td>20項目中20項目</td><td>100%</td><td>0.67</td></tr>
-        <tr><td>本物の種類</td><td>33項目中32項目</td><td>97%</td><td><strong>0.74</strong></td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p>シート名の一致度は、正規化して同じなら 1.0、どちらかがもう一方を含めば 0.6、それ以外は 0.0。
-      これに 2 を掛けて足すので、<strong>シート名が合うのは項目が2個見つかったのと同じ重み</strong>です
-      （名前の違う版があるので、シート名だけで順位がひっくり返らない重みにしてあります）。</p>
-
-    <h3 class="sub-title">読むシートの選び方</h3>
-    <ul class="list-plain">
-      <li>種類にシート名が登録してあり、<strong>名前が完全一致するシートがあれば無条件にそれ</strong>
-        （項目数で競わせません。項目の少ない別紙が1枚目に負けて読まれなくなるのを防ぐため）</li>
-      <li>完全一致が無ければ「名前の一致度×0.5 ＋ 見つかった項目の割合」が最大のシート</li>
-      <li>シート名を登録していない種類は、見つかった項目が最も多いシート1枚</li>
-      <li><strong>続きのシート</strong>：選んだシートに無い項目を「2個」か「項目数の1割」の多い方だけ持つシートを足します。
-        非表示シート・一覧表らしいシート・見出しだけで値の無いシート（記入要領）は足しません</li>
-    </ul>
-
-    <h3 class="sub-title">決め打ちはしない</h3>
-    <p><strong>点がどれだけ低くても（0点でも）自動で確定しません。</strong>使用中の種類が全部ラジオボタンで並び、
-      1位に既定のチェックが付くだけです。切り替えるしきい値はありません。
-      その帳票を前に読んだ種類があれば、点が1位でなくてもそちらが既定になります。</p>
-    <p>1位の見つかった項目が<strong>半分未満</strong>のときだけ「どの種類とも見つかった項目が少なめです。別の帳票かもしれません」と出ます。</p>
-    <p class="hint">まとめて置いたときは、<strong>1件ずつ判定してから票で決めます</strong>。
-      種類ごとに「そのファイルで最高点だったファイル数」を票として数え、（票 → 点の平均）の順に並べます。
-      3件中2件でAが最も合えば、残り1件でBが圧勝していてもAが先です。1件だけ極端に点の高い種類に引きずられないためです。</p>
-    <h3 class="sub-title">項番として外せる形と、外せない形</h3>
-    <p>先頭の項番を外した形でも照合するのは、<strong>1行で24字までの文字のセル</strong>だけです。外せるのは次の形です。</p>
-    <ul class="list-plain">
-      <li><code>3.</code> <code>3)</code> <code>3、</code>（2桁まで。<code>1.5</code> のように後ろが数字のものは外しません）</li>
-      <li><code>(3)</code>、丸数字 <code>①</code>〜<code>⑳</code></li>
-      <li><code>D1</code>〜<code>D8</code>（8D 報告書）、<code>A.機構部</code> のような英字1字＋区切り（後ろが和文のときだけ）</li>
-    </ul>
-    <p class="hint"><code>2号機</code> <code>3件</code> のように区切りの記号が無いものは項番とみなしません。外したあとに文字（かな・漢字・英字）が残らないもの（<code>1.5</code>）も項番として扱いません。「ライン／工程」の分解も同じ「1行・24字まで」のセルだけなので、長い見出しでは効きません。</p>
-  </div>
-
-  <div class="card" id="g5">
-    <div class="card-head"><h2 class="card-title">帳票取り込み ② 値をどう読むか</h2></div>
-    <p>種類が決まったら、項目ごとに<strong>見出しを探してから値を探します</strong>。セル番地は使いません。
-      これが「様式の版が変わって欄が1行ずれても読める」理由です。</p>
-
-    <h3 class="sub-title">見出しを探す順</h3>
-    <ol class="list-plain">
-      <li>帳票登録で<strong>実際にクリックした見出し</strong></li>
-      <li>標準辞書が足した<strong>言い換え</strong>の見出し</li>
-      <li><strong>表記だけ違う見出し</strong>（「応急処置」⇔「応急処置内容」、「発生原因」⇔「発生原因（なぜ起きたか）」）。
-        これは塗りつぶし・太字・「見出し：値」の形のセルに限ります（値の「完了」を「完了日時」の見出しと見ないため）</li>
-      <li>設備番号・設備名だけ、番号と名前をまとめた欄</li>
-    </ol>
-    <p>最初に値が取れたところで確定します。どの組でもシートの上→下、左→右の順。
-      <strong>表の中にある見出しは、表の外の見出しを全部試した後</strong>に回します
-      （時系列表の列見出し「対応内容」より、表の外の「対応内容」欄を先に使う）。
-      その項目を登録したシートも先に見ます（1次報告／2次報告で同名の欄があるため）。</p>
-    <p class="hint">末尾の括弧書きの違い（「停止時間」⇔「停止時間(分)」）を許すのは、
-      <strong>候補どおりの見出しがシートに1つも無いときだけ</strong>です。
-      「原因(推定)」と「原因(確定)」のように括弧で区別している欄を取り違えないためです。</p>
-
-    <h3 class="sub-title">値を探す向きと距離</h3>
-    <ul class="list-plain">
-      <li>見出しの<strong>右を10ブロック分</strong>まで見て、最初に文字のあるセルを値にします。空セル・結合セルも1ブロック＝1歩</li>
-      <li>右に無ければ<strong>下</strong>。帳票登録で「下」をクリックした項目は下→右の順</li>
-      <li>真下が空なら<strong>1行だけ空けた下</strong>を見ます（2行以上空いていれば値なし）。
-        ただし先に全部の見出し候補を「空けずに」試し、どれも当たらなかったときだけ移ります</li>
-      <li><strong>型が「文章」の項目だけ、下に続くセルを最大30セルまとめて読み</strong>、改行でつなぎます。
-        文字列・日付・数値は最初の1セルで止めます</li>
-      <li>結合セルは<strong>左上が範囲全体を代表</strong>します。右は結合の右端の次の列から、下は下端の次の行から探します</li>
-    </ul>
-
-    <h3 class="sub-title">「1セルに見出しと値」の項目は、分かれた版を読めない</h3>
-    <p>同じセルを2回クリックして作った項目（<code>設備番号：EQ-001</code>）は、<strong>そのセルの中だけ</strong>を読みます。別の版で見出しと値が2つのセルに分かれていると、右も下も探さないので値なしになり、帳票登録でクリックしたセル番地の控えから読むしかありません。</p>
-    <p>逆向きは大丈夫です。右・下をクリックして作った項目は、その向きに値が無ければ<strong>同じセルの中の「見出し：値」も読みます</strong>（版によって書き方が変わる帳票のため）。</p>
-    <h3 class="sub-title">探索を打ち切る4種類のセル（「書いてあるのに出ない」の正体）</h3>
-    <p>次のどれかに当たると、その先を見ずに<strong>「値なし」</strong>にします。値の空の項目は Markdown に1行も出ません。</p>
-    <ul class="list-plain">
-      <li><strong>ほかの項目の見出し語</strong>（その種類に登録した見出し＋標準辞書の語）</li>
-      <li><strong>区切りの見出し</strong>（塗りつぶしがあり「■□◆◇●▼▽【［」か「1.」「a.」「D1」で始まる1行のセル）</li>
-      <li><strong>様式番号の注記</strong>（「様式」＋英数字を含む60字以内の1行。例「様式MT-031 Rev.1」）</li>
-      <li><strong>見出しと同じ塗り色で20字以内の文字列</strong>（押印欄の「承認｜確認｜作成」のような並び）</li>
-    </ul>
-    <p>下向きの探索では、見つけたセルが見出しより左の列から始まり、そのすぐ左に見出し欄があるときも読みません（左の欄の値だから）。</p>
-
-    <h3 class="sub-title">明細表の列見出しは値にも見出しにも使わない</h3>
-    <p>上の4種類とは別に、<strong>明細表の列見出しのセル</strong>は値にしません。<code>■ 暫定対策</code> のすぐ下が <code>No｜処置内容｜担当</code> の列見出し行になっている帳票では、その項目は空になります（列見出しを値にすると <code>- 暫定対策: No</code> になるため）。</p>
-    <ul class="list-plain">
-      <li><strong>行を足せる形の表の列見出し</strong>（その列の幅に収まる値が2行以上並ぶ列見出し。見出しの無い表では3行以上）は、1つの値の項目の見出しにもしません。明細表の項目として読むためです</li>
-      <li><strong>連番の列見出し</strong>（<code>No</code> <code>№</code> <code>#</code> <code>項番</code> <code>番号</code> <code>順</code> <code>順番</code>）は、報告書の「No.」欄と取り違えないよう見出しに使いません</li>
-      <li>表記だけ違う見出し（探す順の3番目）では、区切りの見出し（<code>■ 承認欄</code>）を見出しに使いません</li>
-    </ul>
-    <h3 class="sub-title">値を作るときの変換</h3>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>場面</th><th>決まり</th></tr></thead>
-      <tbody>
-        <tr><th scope="row">1セルに「見出し：値」</th>
-          <td>「：」か「:」があり、左が20字以内で改行を含まず、右が空でないときだけ分けます。区切りは<strong>最初の1つだけ</strong>
-            （「備考：作業は 9:00 から」→ 値は「作業は 9:00 から」）</td></tr>
-        <tr><th scope="row">チェックボックス</th>
-          <td>1つのセル（改行なし）に <code>■□☑☐☒✓✔</code> が<strong>2つ以上</strong>並ぶときだけ選択肢とみなし、
-            チェックの付いた語だけを値にします（複数なら「、」でつなぐ）。
-            印が1つだけの「■ 該当」は選択肢と見ず、書かれた文字がそのまま値です。
-            どれにもチェックが無ければ空にして「チェックの入った選択肢がありません」と知らせます</td></tr>
-        <tr><th scope="row">日付＋時刻</th>
-          <td>日付の項目で、すぐ右（すき間なし・同じ高さ）が時刻だけ、さらにその右が空か見出し欄のときだけ
-            <code>2026-09-14 12:07</code> とつなぎます。「9:00｜～｜17:00」のような時間帯はつなぎません</td></tr>
-        <tr><th scope="row">Excel のエラー値</th>
-          <td><code>#REF!</code> <code>#N/A</code> などは値にせず「Excelのエラー値です」と知らせます。
-            計算結果が保存されていない数式も同じく空のままです</td></tr>
-        <tr><th scope="row">判定記号の凡例</th>
-          <td>60字以内で <code>◎○△×</code> 系が3つ以上あるか「記号：説明」が2組以上ある文字列は凡例とみなし、
-            見出しにも値にもしません</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">発行側と回答側で同じ欄が並ぶ帳票は、項目に<strong>区画</strong>（「▼ 回答欄」など）が決めてあれば
-      その中の見出しだけを使います。回答欄が未記入でも、発行側の同じ名前の欄の値は読みません。</p>
-    <p>見出しをどうしても見つけられなかった項目<strong>だけ</strong>、帳票登録でクリックしたセル番地を控えとして読みます。
-      その番地に別の欄の見出しが来ている、またはその型として読めないときは読まず、空のまま
-      「ラベルが見つかりません」と知らせます。<strong>当て推量では埋めません。</strong></p>
-    <h3 class="sub-title">時:分で書かれた時間は分に換算する</h3>
-    <p><strong>数値の項目だけ</strong>、時:分の形で書かれた時間は<strong>数（分）に換算</strong>します。「勝手な換算はしない」の例外で、換算したことは必ず警告で知らせます（元の文字は Markdown に残りません）。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>セルの書き方</th><th>項目の単位が空か「分」</th><th>項目の単位が「時間」</th></tr></thead>
-      <tbody>
-        <tr><th scope="row"><code>3時間40分</code></th><td>220分</td><td>3.67時間</td></tr>
-        <tr><th scope="row"><code>2:45</code>（セル全体がこの形）</th><td>165分</td><td>2.75時間</td></tr>
-        <tr><th scope="row">時刻のセル <code>1:30</code></th><td>90分</td><td>1.5時間</td></tr>
-        <tr><th scope="row"><code>[h]:mm</code> のセル <code>25:30</code></th><td>1530分</td><td>25.5時間</td></tr>
-        <tr><th scope="row"><code>09:30-12:45</code></th><td>195分（終了−開始）</td><td>3.25時間</td></tr>
-        <tr><th scope="row"><code>09:30-12:45（3.2h）</code></th><td>192分（<strong>添えた時間数が優先</strong>）</td><td>3.2時間</td></tr>
-        <tr><th scope="row"><code>22:00-6:00</code></th><td>480分（日をまたぐとみなす）</td><td>8時間</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">項目の単位が「分」「時間」以外（円・mm など）のときは換算せず、「時:分の形です。数値として読み取れません」として原文のまま残します。
-    <code>12/24 21:53-12/25 11:09</code> のように月日の付いた範囲は、何日またぐか分からないので、時間数が書かれていないと数値にしません。</p>
-
-    <h3 class="sub-title">項目の単位と値の単位が食い違えば、書かれたほうを使う</h3>
-    <p>数値の単位は「帳票の種類の設定」→「値に書かれた単位」の順に決めますが、<strong>両方あって食い違うときは値に書かれたほうを使います</strong>（換算はしません）。「停止時間（分）」の欄に <code>14.9h</code> と書かれた帳票は <code>- 停止時間: 14.9時間</code> になり、「この項目の単位は「分」ですが、値には「時間」と書かれています。書かれたとおり「時間」として出します」と要確認にします。</p>
-    <p>どちらにも単位が無いときは、<strong>単位で意味が変わる項目だけ</strong>要確認にします（全部を要確認にすると確認画面が警告で埋まるため）。</p>
-    <ul class="list-plain">
-      <li><strong>要確認にする</strong>見出しの語 — 時間・工数・所要・ダウンタイム・期間・リードタイム・タクト（分か時間か）／金額・費用・コスト・価格・単価・原価・経費・予算・損失額・修理費・部品費（円か千円か）／長さ・寸法・距離・厚み・厚さ・板厚・幅・直径・外径・内径・隙間・クリアランス・変位・摩耗量（mm か m か）／重量・質量・重さ（g か kg か）／温度・温度差（℃ か K か）／圧力・真空度（MPa か kPa か）／流量・風量／電流・電圧・電力・消費電力</li>
-      <li><strong>要確認にしない</strong> — 件数・回数・人数・枚数・個数・台数・本数・点数・数量・員数・率・割合 で終わる項目（単位が無いのが普通）</li>
-    </ul>
-
-    <h3 class="sub-title">チェックの付いた語は最初の空白までしか取らない</h3>
-    <p>選択肢の語は<strong>印の直後から次の空白まで</strong>です。<code>☑ ライン停止 あり　□ 停止なし</code> の値は <code>ライン停止</code> だけになり、<strong>「あり」は消えます</strong>（半角も全角の空白も同じ扱い）。選択肢の語の途中に空白を入れず <code>☑ ライン停止あり</code> と書いてください。</p>
-    <p class="hint">印だけで語の無いセル（<code>■　□　□</code>）は選択肢とみなさず、書かれた文字がそのまま値になります。</p>
-
-    <h3 class="sub-title">日付にならない書き方（原文のまま残る）</h3>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>セルの値</th><th>どうなるか</th></tr></thead>
-      <tbody>
-        <tr><th scope="row"><code>令和6年7月29日</code> <code>R6.7.29</code> <code>平成30年4月1日</code> <code>H30.4.1</code></th><td><code>2024-07-29</code> の形に直す（「元」年も可）</td></tr>
-        <tr><th scope="row"><code>昭和58年4月1日</code> <code>S58.4.1</code></th><td><strong>日付にしない</strong>（帳票の側は令和・平成だけ。一覧表の側は昭和も直します）。古い記録の日付（設置日など）は原文のまま残り「日付として解釈できません」と知らせます</td></tr>
-        <tr><th scope="row"><code>24/8/25</code>（2桁の年）</th><td><strong>日付にしない</strong>。年を2桁で書いたのか、月日だけなのか決められないため</td></tr>
-        <tr><th scope="row"><code>2/12</code>（年なし）</th><td>原文のまま。「2026-02-12 のように年から書いてください」と知らせる</td></tr>
-        <tr><th scope="row"><code>2026/2/30</code></th><td>暦に無い日なので日付にしない</td></tr>
-        <tr><th scope="row"><code>2026/7/11〜7/12</code></th><td><code>2026-07-11</code> にしたうえで「日付のあとに「〜7/12」が続いています」と要確認にする（範囲の終わりを黙って落とさないため）</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">日付のあとの <code>)</code> <code>」</code> <code>.</code> <code>。</code> <code>、</code> と空白だけは、残っていても警告にしません。<code>2026/9/14（金）</code> のような曜日と <code>T</code> は飛ばして読みます。</p>
-
-    <h3 class="sub-title">「ライン／工程」は値も「／」で分かれるときだけ</h3>
-    <p>1つのセルに <code>ライン／工程</code> のように2〜3個の見出しをまとめた欄は、<strong>値も同じ数に「／」で分かれるときだけ</strong>、その順番の部分を値にします。<code>ライン／工程</code>｜<code>L6／検査</code> なら「ライン」は <code>L6</code>、「工程」は <code>検査</code>。</p>
-    <ul class="list-plain">
-      <li>見出しを分けるのは、区切った各部分が<strong>2字以上で文字を含む</strong>ときだけ（<code>L/min</code> は分けません）。改行のあるセルは分けません</li>
-      <li>値が同じ数に分かれないとき（<code>L6</code> だけ、<code>L6／検査／2</code>）は、<strong>その見出しは使わず</strong>ほかの見出し候補を探します</li>
-      <li>分けた値は1セル分だけです。文章の項目でも、下に続くセルはまとめて読みません</li>
-    </ul>
-
-    <h3 class="sub-title">セルの表示形式に書かれた単位も「値の単位」として使う</h3>
-    <p>画面では <code>3,095分</code> と見えていても、セルの値は <code>3095</code> だけで「分」は表示形式（<code>#,##0"分"</code>）にしか無いことがあります。<strong>数値のセルで、値そのものに単位が書かれていないときだけ</strong>、表示形式の中の文字を「値に書かれた単位」として使います（<code>"¥"#,##0</code> → 円）。</p>
-    <p class="hint">単位とみなすのは、数字を含まない4字までで単位らしいもの（英字・記号、1字の和文、時間・千円などの決まった語）。1つのセルに「見出し：値」が入っている欄では、表示形式の単位は使いません。</p>
-
-    <h3 class="sub-title">前後に言葉のある数値・範囲は先頭の数値だけ</h3>
-    <p>数値の項目は、値の中の<strong>最初の数値</strong>を読みます。数字だけではなかったときは、読み落としが分かるように要確認にします。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>セルの値</th><th>読む数</th><th>知らせ</th></tr></thead>
-      <tbody>
-        <tr><th scope="row"><code>約90分</code></th><td>90（単位「分」）</td><td>要確認（「から数値の部分だけを読み取りました」）</td></tr>
-        <tr><th scope="row"><code>390分</code></th><td>390（単位「分」）</td><td>なし（「分」は単位として取り込んだので読み落としではない）</td></tr>
-        <tr><th scope="row"><code>10〜20分</code>（項目の単位が空か「分」）</th><td>10</td><td>要確認</td></tr>
-        <tr><th scope="row"><code>10〜20分</code>（項目の単位が「時間」）</th><td>読まない（原文のまま）</td><td>「範囲で、単位も項目の単位（時間）と違います」</td></tr>
-        <tr><th scope="row"><code>.5</code></th><td>0.5（「5」と読みません）</td><td>なし</td></tr>
-      </tbody>
-    </table>
-    </div>
-
-    <h3 class="sub-title">チェックボックスとして読むのは文字列・文章の項目だけ</h3>
-    <p>同じ <code>■□</code> のセルでも、項目の型が<strong>日付・数値・明細表</strong>のときは選択肢として読みません。日付なら「日付として解釈できません」、数値なら文字の中の数字だけを拾うことがあります。チェック欄の項目は<strong>文字列</strong>（または文章）にしてください。</p>
-    <p class="hint">文章の項目で下に続く複数のセルをまとめて読んだときも選択肢として読まず、印を含んだ文字がそのまま本文になります。</p>
-
-    <h3 class="sub-title">判定記号の凡例が値にならないのは、候補づくりのときだけ</h3>
-    <p>凡例（<code>◎：主要因　○：影響あり　×：要因でない</code>）・<code>※</code> で始まる注記・値が <code>-</code> <code>／</code> だけの欄は、<strong>見本から自動で候補を作るときに既定のチェックが外れる</strong>だけです（候補としては残るので、必要なら画面で入れられます）。どれか1つの見本で凡例が見つかれば、その欄は「値を書く欄ではない」とみなします。</p>
-    <p>いったん項目にしたあとは、凡例は探索を打ち切るセルではないので、<strong>見出しの右に凡例があればそれが値になります</strong>。凡例を飛ばすのは、明細表の列見出しを探すときだけです。</p>
-    <h3 class="sub-title">区画はクリックしたときに自動で付く</h3>
-    <p>区画（「▼ 回答欄」など）は画面で選ぶものではありません。<strong>帳票登録でクリックした見出しが区切りの見出しの下にあれば、その区画が自動でその項目に付きます</strong>。だから「同じ名前の欄が2つある帳票で、クリックしたのと反対側の欄の値が読まれない」ことがあります。</p>
-    <ul class="list-plain">
-      <li>区切りの見出しとみなすのは、<strong>塗りつぶしか太字</strong>で <code>■□◆◇●▼▽▶►</code> <code>【</code> <code>［</code> か <code>1.</code> <code>a.</code> <code>D1</code> で始まる、<strong>1行60字以内</strong>のセル（「見出し：値」の形とチェックボックスの行は区画にしません）</li>
-      <li>区画の広さは、<strong>右は同じ高さにある次の見出しの手前まで</strong>（無ければシートの右端まで）、<strong>下は次の見出しまで</strong>。階層は「印」→「1.」「D1」→「a.」で、内側の小見出しの中も外側の区画の中とみなします</li>
-      <li>区画の名前は、印・項番・括弧書き・末尾の「欄」「内容」「日時」を落としてそろえます（<code>▼ 回答欄（宛先部署にて記入…）</code>・<code>【回答欄】</code>・<code>回答欄</code> はどれも「回答」）</li>
-      <li>その帳票に区画が無い版・区画の中に探す見出しが無い版では、<strong>今までどおりシート全体</strong>から探します</li>
-    </ul>
-
-    <h3 class="sub-title">「値だけ」の項目は番地だけで読む（安全網なし）</h3>
-    <p>見出しを付けずに作った「値だけ」の項目（同じセルを2回クリックして「：」が無かったもの）は、<strong>はじめから帳票登録でクリックしたセル番地を読みます</strong>。見出しで探さないので、ほかの項目に効く安全網が効きません。</p>
-    <ul class="list-plain">
-      <li>その番地に<strong>別の欄の見出しが来ていても</strong>、その文字を値にします</li>
-      <li><strong>その型として読めなくても</strong>（日付の項目に <code>未定</code> など）、警告を付けたうえで値にします</li>
-      <li>読むシートは、登録したシートがブックに在ればそのシートだけ。名前が変わっていて見つからないときだけ、ほかのシートの同じ番地を見ます</li>
-      <li>その番地が空なら「値のセルが空です」</li>
-      <li>項目の名前は <code>値（C5）</code> になり、そのまま <code>- 値（C5）: 2026-09-14</code> と出ます（右の一覧で直せます）</li>
-    </ul>
-
-    <h3 class="sub-title">番地の控えは、見出しがあって値が空のときも使う</h3>
-    <p>控えのセル番地を読むのは「見出しが1つも見つからなかったとき」だけではありません。<strong>見出しは見つかったのに、どのシートでも値が取れなかったとき</strong>も番地を読みます（結合のずれで隣が空に見える様式のため）。番地からも読めなかったときの知らせは3通りです。</p>
-    <ul class="list-plain">
-      <li><code>ラベルが見つかりません</code> — 見出しがどのシートにも無い</li>
-      <li><code>ラベルはありますが値が空です</code> — 見出しはあるが、右にも下にも値が無い</li>
-      <li><code>数式の計算結果が保存されていません</code> — 見出しのすぐ右かすぐ下が、計算結果の入っていない数式のセル（空に見えるが空欄ではない）。Excel で開いて保存し直すと読めます</li>
-    </ul>
-
-    <h3 class="sub-title">表の No 列は「値の項目」の見出しにしない</h3>
-    <p>明細表の中にある連番の列見出し（<code>No</code> <code>№</code> <code>#</code> <code>項番</code> <code>番号</code> <code>順</code> <code>順番</code>）は、<strong>1つの値の項目の見出しとしては使いません</strong>。報告書の「No.」欄（報告番号）と取り違えて、明細表の1行目の番号を <code>- No.: 1</code> と書いてしまうのを防ぐためです。</p>
-
-    <h3 class="sub-title">何行も並ぶ表の列見出しは「値の項目」の見出しにしない</h3>
-    <p>「設備No｜設備名」のように<strong>下に何行も値が並ぶ表の列見出し</strong>は、1つの値の項目の見出しとしては使いません。使うと1行目の値だけを読んで <code>- 設備No: EQ-001</code> と書き、2行目以降が消えてしまうためです。</p>
-    <p>対象になるのは「行を足せる形の表」の列見出しのうち、<strong>その列の幅に収まる値が2行以上</strong>並ぶものです（表の上に見出しが無く、日付や数字だけの行がある表は3行以上）。</p>
-    <p class="hint">押印欄（承認｜確認｜作成 の下に印と日付、その下に横長の注記）はこの条件に当たらないので、「承認」を見出しにした値の項目はふつうに読めます。</p>
-  </div>
-
-  <div class="card" id="g6">
-    <div class="card-head"><h2 class="card-title">帳票取り込み ③ 明細表をどう読むか</h2></div>
-    <h3 class="sub-title">表の見つけ方と範囲</h3>
-    <ul class="list-plain">
-      <li>見出しが<strong>縦に結合</strong>されていれば（「使用部品」が4行分など）、まず<strong>その右隣</strong>の列見出しの行を見て、
-        読む行もその結合の範囲内までにします</li>
-      <li>そうでなければ見出しの<strong>すぐ下2行以内</strong>で、見出しの列の幅の中から始まる行を列見出しとみなします</li>
-      <li>列見出しは左から<strong>すき間なく2列以上</strong>。各セルは30字以内の文字列で、
-        数字だけのセル・チェック欄・判定記号の凡例は列見出しにしません</li>
-    </ul>
-    <p>列見出しの次の行から下へ読み、次のどれかで終わります。</p>
-    <ul class="list-plain">
-      <li>その行に新しく始まるセルが1つも無い（空行）</li>
-      <li>列見出しと<strong>同じ塗り色</strong>の文字列セルが出た</li>
-      <li>表の左端かそれより左に、塗りつぶし付きで30字以内の文字列セルが出た（次の項目欄）</li>
-      <li>塗りつぶしか太字で、見出し語と同じセルが出た</li>
-    </ul>
-    <p>合計行だけは別で、<strong>その行を表に入れてから</strong>終わります（塗りつぶしがあるときだけ。
-      塗りの無い合計行はその先も読み続けます）。<strong>1つの表は最大200行</strong>で、201行目から先は黙って読みません。</p>
-
-    <h3 class="sub-title">読んだあとの3つの後処理</h3>
-    <p>利用者が驚くのはほぼここです。</p>
-
-    <p><strong>(1) いちばん左の連番 No 列を落とす</strong> — 次の3つが<strong>全部そろったときだけ</strong>です。</p>
-    <ol class="list-plain">
-      <li>その列が表の<strong>いちばん左</strong>（真ん中や右端の No 列は対象外）</li>
-      <li>列見出しが <code>No</code> <code>№</code> <code>#</code> <code>項番</code> <code>番号</code> <code>順</code> <code>順番</code>
-        のどれか（前後の空白と「.」「:」「：」は無視。全角半角・大文字小文字は同じ扱い。
-        <strong>「管理No」「作業No.」のように前後に文字が付くと当たりません</strong>）</li>
-      <li>値が、空欄と合計行を除いて<strong>全部数字</strong>で、上から <code>1, 2, 3, …</code> と
-        <strong>1 から始まるちょうどの連番</strong></li>
-    </ol>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>No 列の値</th><th>どうなるか</th></tr></thead>
-      <tbody>
-        <tr><td><code>1, 2, 3</code> ／ <code>01, 02, 03</code> ／ <code>１, ２, ３</code>（全角）</td><td>落とす</td></tr>
-        <tr><td><code>1</code>（1行だけの表）</td><td>落とす</td></tr>
-        <tr><td><code>2, 3, 4</code> ／ <code>0, 1, 2</code> ／ <code>1, 2, 4</code>（抜けがある）</td><td><strong>残す</strong></td></tr>
-        <tr><td><code>1.</code> ／ <code>1-1</code>（数字以外が混じる）／ 品番が入っている</td><td><strong>残す</strong></td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p>行番号でしかない列を残すと、1行＝1明細の Markdown で全行に <code>No: 1</code> <code>No: 2</code> … が付き、
-      検索の手がかりにならないうえノイズになるためです。行の順序自体は Markdown に残ります。</p>
-    <p class="hint">No 列に「合計」と書かれている行は、<strong>右隣の列が空のときだけ</strong>「合計」を右隣へ移します。
-      右隣に値が入っていると「合計」の文字は消えます。</p>
-
-    <p><strong>(2) 空の行と「なし」だけの行を落とす</strong> — 値のあるセルが全部
-      <code>なし・無し・該当なし・特になし・-・ー・―・‐・/・〃</code> のどれかの行は落とします。
-      <strong>「N/A」「NA」「該当無し」はこの一覧に入っていないので落ちません</strong>（一覧表の取り込みとは語の一覧が違います）。
-      落とした結果1行も残らない表は、その項目ごと Markdown に出しません。</p>
-
-    <p><strong>(3) 「〃」「同上」を上の行の値にする</strong> — セル全体が
-      <code>〃・″・同上・仝</code> のとき、上の行の同じ列の値に置き換えます（1行だけ切り出しても意味が通るように）。
-      いちばん上の行・上が空・上も未解決の 〃 のときは書かれたまま残します。<strong>「々」は対象外</strong>です。</p>
-
-    <h3 class="sub-title">そのほかの決まり</h3>
-    <ul class="list-plain">
-      <li><strong>合計とみなす言葉</strong>：ちょうど「合計・小計・総計・総合計・合計数・計」のときと、
-        塗りつぶしがあって8字以内で「〜合計」「〜小計」「〜費計」「〜工数計」「〜金額計」などのとき。
-        <strong>「温度計」「圧力計」「設計」は合計にしません</strong>（合計とみなすと表の読み取りがそこで止まり、
-        Markdown からも消えてしまうため）。「累計」「平均」「○月計」も合計にしません</li>
-      <li><strong>連番だけの空き行を飛ばす</strong>：様式が10行分の No を印字していて3行目までしか書かれていないとき、
-        左の列しか値が無く、その値が数字と記号だけの行を飛ばします。飛ばした行は連番を途切れさせないので、
-        No 列は 1,2,3 の連番とみなされて落ちます</li>
-      <li><strong>結合セル</strong>：縦結合のデータセルは各行に同じ値を入れます。横に結合したセルは
-        いちばん左の列にだけ値が入り、残りは空です</li>
-      <li><strong>縦に積み重なる表</strong>：すぐ下2行以内に、列の位置がまったく同じで塗りのある列見出しが続き、
-        その色が最初の表と1つでも同じなら、同じ表としてまとめます（特性要因図の「人｜機械」「材料｜方法」など）。
-        <strong>最初を含めて11組まで</strong>で、12組目から先は読みません</li>
-      <li><strong>手で入力した表も同じ決まり</strong>：読めなかった表を確認画面で手入力したときも、
-        Markdown を作るときに同じ後処理が効きます。つまり<strong>画面には No 列が見えているのに Markdown には出ません</strong></li>
-    </ul>
-    <h3 class="sub-title">「〃」だけの行は消える／「〃」は残った直前の行を指す</h3>
-    <p>後処理は <strong>(1) No 列を落とす → (2) 空・「なし」の行を落とす → (3) 「〃」を上の値にする</strong> の順に行います。この順番から2つのことが起きます。</p>
-    <ul class="list-plain">
-    <li><strong>全部の列が「〃」だけの行は、1明細まるごと消えます。</strong>「〃」は「なし」と同じ「空を表す書き方」の一覧に入っているため、(3) に進む前に (2) で落ちます。<code>同上</code> はこの一覧に入っていないので残り、上の値になります。</li>
-    <li><strong>「〃」が指す「上の行」は、落ちた行を飛ばした「残った直前の行」です。</strong>間の行が「なし」や空で落ちていると、さらにその上の行の値になります。</li>
-    </ul>
-    <div class="table-wrap"><table class="table compact">
-    <tr><th>表に書かれた行（No｜品番｜数量）</th><th>Markdown</th></tr>
-    <tr><td>1｜A-1｜2</td><td><code>- 品番: A-1／数量: 2</code></td></tr>
-    <tr><td>2｜〃｜〃</td><td>出ません（行ごと消える）</td></tr>
-    <tr><td>3｜なし｜（空）</td><td>出ません</td></tr>
-    <tr><td>4｜B-2｜〃</td><td><code>- 品番: B-2／数量: 2</code>（数量は1行目の 2）</td></tr>
-    </table></div>
-
-    <h3 class="sub-title">見出しが無くても列見出しで表を探す</h3>
-    <p>明細表の項目は、見出し（「使用部品」）が見つからなくても諦めません。次の2つの場合、<strong>シートの中から「登録したときの列見出しと一致率が5割以上で、いちばん一致率の高い表」</strong>を探して読みます。</p>
-    <ul class="list-plain">
-    <li>登録した見出しの語がシートに1つも無いとき（様式が変わって見出しの文字だけが違う帳票）</li>
-    <li>見出しは見つかったが、その下で読んだ表の列見出しが、登録したときの列見出しと<strong>半分未満しか重ならない</strong>とき（見出しの語が表の列見出しと同じだと、1行下のデータ行を列見出しとして読んでしまいます。この取り違えは列のずれで分かります）</li>
-    </ul>
-    <p>一致率は「両方にある列見出しの数 ÷ どちらかにある列見出しの数」です。<code>品番｜品名｜数量｜金額</code> と <code>品番｜品名｜数量</code> なら 3÷4 で 0.75 です。</p>
-    <p class="hint">この助けがあるので見出しの文字が違う帳票でも表は読めますが、逆に、列の似た別の表（同じ様式に部品表が2つあるなど）を読むこともあります。読み取り結果の画面で行を確かめてください。</p>
-
-    <h3 class="sub-title">200行はシートの行数（明細の件数ではない）</h3>
-    <p><strong>200行は「シートの行数」で、明細の件数ではありません。</strong>列見出しの次の行から数えて200行分のシートの行までを見ます。</p>
-    <ul class="list-plain">
-    <li>1明細が3行分に結合されている表（点検部位が3行ずつなど）は、<strong>明細66件</strong>で打ち切られます</li>
-    <li>飛ばした「No だけの空き行」も200行に数えます</li>
-    <li>縦に積み重なる表は<strong>組ごとに200行</strong>です（11組なら合わせて最大2,200行）</li>
-    </ul>
-    <p class="hint">縦に結合した見出し（「使用部品」が4行分）の下では、そもそも読む行が結合の範囲内までなので、4行分しか読みません。</p>
-
-    <h3 class="sub-title">列見出しは高さがそろっていないと途中で切れる</h3>
-    <p>列見出しの行は、左端のセルから右へ「すき間なく・<strong>先頭のセルと同じ高さ</strong>」で続くところまでです。</p>
-    <ul class="list-plain">
-    <li>1列だけ2行分に結合されていると、<strong>そのセルから右の列は表に入りません</strong>（列見出しも値も落ちます）</li>
-    <li>1つのセルに「：」で見出しと値が入っているセル（<code>区分：同型機</code>）は列見出しにしません</li>
-    <li>チェック印が2つ以上あるセル、数字と記号だけのセル（<code>2026</code> <code>1/2</code>）、30字を超えるセル、判定記号の凡例（<code>◎：主要因　○：影響あり　×：否定</code>）も列見出しにしません</li>
-    </ul>
-    <p class="hint">列見出しが2列に届かなければ、その行は列見出しの行とみなしません。ふつうは見出しの真下2行以内に列見出しの行が無ければ、表として読みません。</p>
-
-    <h3 class="sub-title">表の上の見出しとみなす条件</h3>
-    <p>項目名に使う「表の上の見出し」とみなすのは、次を全部満たすセルです。</p>
-    <ul class="list-plain">
-    <li>列見出しの行の <strong>1行上か2行上</strong>（間にセルの無い行があれば飛ばします）。それより上にあれば見出しとみなしません（帳票のタイトルを表の見出しにしないため）</li>
-    <li>表の左端の列か、その<strong>1つ右</strong>までから始まる</li>
-    <li>その行に<strong>ほかのセルが並んでいない</strong>（「区分｜☑同型機」のように右に値が並ぶ行は見出しにしません）。ただし <code>■</code> <code>【</code> <code>1.</code> <code>A.</code> で始まる見出しは、右に判定記号の凡例があってもかまいません（凡例は数に入れません）</li>
-    <li>見出しらしい（塗りがある・太字・記号や項番で始まる、のどれか）</li>
-    </ul>
-    <p>左隣のセルが見出しになるのは、<strong>縦に結合している</strong>とき（「使用部品」が4行分）だけです。高さが1行の左隣のセルは見出しになりません。</p>
-    <p class="hint">上の見出しが見つからない表は「見出しの無い表」として扱います（列数と行数の条件が付きます）。</p>
-
-    <h3 class="sub-title">表が読めなかったときの3つの知らせ</h3>
-    <p>明細表が読めなかったときは、確認画面に理由が出ます。3通りあります。</p>
-    <div class="table-wrap"><table class="table compact">
-    <tr><th>知らせ</th><th>意味</th></tr>
-    <tr><td>ラベルが見つかりません</td><td>登録した見出しの語も、列見出しの一致する表も、シートに1つも無い</td></tr>
-    <tr><td>見出しはありますが、その下（または右）に表の列見出しが見つかりません</td><td>見出しはあるが、その真下2行以内に「2列以上の列見出しの行」が無い</td></tr>
-    <tr><td>表に行がありません</td><td>列見出しは見つかったが、読めた行が0（空行と「なし」の行だけ、など）</td></tr>
-    </table></div>
-    <p>どれも値は空のままで、Markdown には <code>##</code> の節が出ません。確認画面で表を手入力すれば出ます。</p>
-
-    <h3 class="sub-title">打ち切りの判定は文字列のセルだけ</h3>
-    <p>表を打ち切る4種類のセルは、<strong>文字列のセルだけ</strong>を見ます。</p>
-    <ul class="list-plain">
-    <li>数値のセル・日付のセルは、塗りがあっても太字でも表を止めません（金額の列を目立たせても大丈夫です）</li>
-    <li>逆に、NG を目立たせるために <strong>列見出しと同じ塗り色</strong>を文字のセルに使うと、その行で表が終わります。色は「同じ塗りの組かどうか」だけで見ているためです</li>
-    <li>表の左端かそれより左に出た塗り付きの文字列は、30字以内のときだけ打ち切りです（長い注記では止まりません）</li>
-    </ul>
-
-    <h3 class="sub-title">「合計」の判定は3か所で条件が違う</h3>
-    <p>合計行の判定は3か所にあり、条件が少しずつ違います。</p>
-    <div class="table-wrap"><table class="table compact">
-    <tr><th>どこで</th><th>見るセル</th><th>合計とみなす言い方</th></tr>
-    <tr><td>表を打ち切るとき</td><td>その行の<strong>どのセルでも</strong></td><td>塗りのあるセル: 「〜合計」「〜小計」（前に6字まで）、「〜費計」「〜工数計」「〜個数計」「〜件数計」「〜台数計」「〜本数計」「〜枚数計」「〜金額計」「〜額計」。塗りの無いセル: 「合計・小計・総計・総合計・合計数・計」そのままのときだけ</td></tr>
-    <tr><td>No 列の連番を数えるとき（除く行）</td><td>No 列のセル</td><td>「合計・小計・総計・総合計・合計数・計」そのままのときだけ</td></tr>
-    <tr><td>Markdown を書くとき</td><td>行の<strong>最初の値だけ</strong></td><td>塗りに関係なく、上の言い方すべて</td></tr>
-    </table></div>
-    <p>だから、備考の列に「計」と書いた行も合計行とみなし、塗りがあればそこで表が終わります。また No 列に「部品費計」と書いた行があると、その行が連番の数から除かれないので<strong>連番とみなされず、No 列が残ります</strong>。</p>
-
-    <h3 class="sub-title">空き行を飛ばすのは先頭が No 系の見出しのときだけ</h3>
-    <p>「連番だけの空き行を飛ばす」のは、<strong>先頭の列の見出しが <code>No</code> <code>№</code> <code>#</code> <code>項番</code> <code>番号</code> <code>順</code> <code>順番</code> のときだけ</strong>です。</p>
-    <p>先頭の列の見出しが「項目」「作業」などだと飛ばさないので、番号だけが印字された余りの行が1明細として残り、Markdown に <code>- 項目: 4</code> が出ます。飛ばす対象の値は、数字と記号（<code>,</code> <code>.</code> <code>-</code> <code>/</code> <code>:</code> など）だけの文字です。</p>
-
-    <h3 class="sub-title">見出しと列見出しの間に1行挟まる様式</h3>
-    <p>見出しの真下2行以内に列見出しが無くても、<strong>見出しが <code>■</code> <code>【</code> <code>1.</code> などで始まり</strong>、間の行が「見出し欄1つ＋その値だけ」の1行（<code>展開区分｜☑同型機　□類似設備</code>）のときは、<strong>もう1行下まで</strong>列見出しを探します。「■ 水平展開」の下に区分の1行があり、その下に表が来る様式のためです。</p>
-    <p>表の上の見出しを探すときも同じ1行を飛ばすので、この様式では見出しの3行下の列見出しと結び付きます。</p>
-  </div>
-
-  {# ================= 帳票の Markdown ================= #}
-  <div class="card" id="g7">
-    <div class="card-head"><h2 class="card-title">帳票取り込み ④ Markdown ができるまで</h2></div>
-    <p>帳票取り込みで作る Markdown は、<strong>1帳票＝1ファイル</strong>で、登録した「帳票の種類」の項目を上から順に書きます。
-      形は次の3つだけです。</p>
-    <ul class="list-plain">
-      <li><code># </code> … ファイルの先頭に1つ。帳票の種類の名前と、その帳票を見分ける値（報告番号・対象・日付）</li>
-      <li><code>- 見出し: 値</code> … 短い値の項目（文字列・日付・数値）</li>
-      <li><code>## 見出し</code> … 文章の項目と明細表。その下に本文を書く</li>
-    </ul>
-<pre class="code md-preview"># 車両点検報告書 R2026-00123｜配送車4号車（VH-204）｜2026-09-14
-
-- 帳票の種類: 車両点検報告書
-- 報告番号: R2026-00123
-- 車両: 配送車4号車（VH-204）
-- 発生日: 2026-09-14（2026年9月）
-- 作業時間: 2.5時間
-
-## 故障内容
-荷台のリフトが途中で止まった。
-操作パネルに「Hydraulic Pressure Low」が表示された。
-
-## 使用部品
-- 品番: PW48-1591／品名: ベアリング／数量: 2
-
-- 添付画像: 2枚
-- 出典: 車両点検報告書_標準.xlsx（報告番号 R2026-00123）</pre>
-    <h3 class="sub-title">合計行は列見出しが消える／数字の無い合計行は出ない</h3>
-    <p>行の最初の値が合計の言い方（「合計」「小計」「部品費計」など）のとき、その行だけ書き方が変わります。</p>
-    <div class="table-wrap"><table class="table compact">
-    <tr><th>表の行（項目｜金額）</th><th>Markdown</th></tr>
-    <tr><td>ベアリング｜1,000</td><td><code>- 項目: ベアリング／金額: 1,000</code></td></tr>
-    <tr><td>部品費計｜1,000</td><td><code>- 部品費計: 金額: 1,000</code></td></tr>
-    <tr><td>合計｜（空）</td><td>出ません</td></tr>
-    </table></div>
-    <ul class="list-plain">
-    <li><strong>合計の言葉が入っていた列の見出しは書きません</strong>（上の例では「項目: 」が消えています）</li>
-    <li><strong>ほかの列が全部空の「合計」だけの行は、1行も出しません</strong>（数字が無く記録として意味がないため）</li>
-    <li>Markdown を書くときの判定には<strong>塗りの条件も8字の条件もありません</strong>。表の途中にある塗りの無い「部品費計」の行もこの形になります（表の読み取りはそこで止まりません）</li>
-    </ul>
-
-    <h3 class="sub-title">短い値の箇条書きが全部先、## の節はそのあと</h3>
-    <p>項目は登録順に並びますが、<strong>短い値の箇条書きを全部先に、<code>##</code> の節はそのあと</strong>に書きます。帳票登録で「故障内容（文章）→ 報告番号 → 使用部品（表）→ 報告者」の順にクリックしても、Markdown はこの並びです。</p>
-    <ul class="list-plain">
-      <li><code># タイトル</code></li>
-      <li><code>- 帳票の種類:</code> → <code>- 報告番号:</code> → <code>- 報告者:</code>（短い値だけを登録順に）</li>
-      <li><code>## 故障内容</code> → <code>## 使用部品</code>（文章と明細表を登録順に）</li>
-      <li><code>- 添付画像:</code> と <code>- 出典:</code></li>
-    </ul>
-    <p class="hint">基本情報が文章や明細表に挟まれて帳票の真ん中に散らないようにするためです。先頭のかたまりだけで「どの帳票の、いつの、どの対象の話か」が分かります。</p>
-
-    <h3 class="sub-title">明細表のセルの改行は半角空白になる</h3>
-    <p>明細表は1行1明細なので、<strong>セルの中の改行は半角空白1つになります</strong>（列見出しも同じです）。</p>
-    <div class="table-wrap"><table class="table compact">
-    <tr><th>セルの中身</th><th>Markdown</th></tr>
-    <tr><td>「交換」＋改行＋「OH品」</td><td><code>- 品名: ベアリング／備考: 交換 OH品</code></td></tr>
-    </table></div>
-    <p>改行がそのまま残るのは文章の項目（<code>##</code> の節）だけです。2段に組んだ列見出し（「金額」の下に「(円)」）も <code>金額 (円)</code> の1行になります。</p>
-
-    <h3 class="sub-title">空の列見出しは「列2」になる</h3>
-    <p>列見出しが空のセルは、<strong>列の位置で「列2」「列3」と呼びます</strong>。<code>- 品番: A-1／列2: メモ／数量: 2</code> のようになります。手で入力した表で、列見出しより多い列に値を入れたときも同じです。</p>
-  </div>
-
-  <div class="card" id="g8">
-    <div class="card-head"><h2 class="card-title">「- 見出し: 値」と「## 見出し」はどう分けているか</h2></div>
-    <p>項目ごとの<strong>型</strong>で決めています。型は帳票登録でセルをクリックしたときに、置いた帳票の値を見て自動で決めます（画面には出しません）。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>型</th><th>こう決める（クリックした値のセルを見る）</th><th>Markdown での形</th></tr></thead>
-      <tbody>
-        <tr><th scope="row">日付</th><td>セルが日付型。または見出しが日付らしい（発生日・報告日 など）か、値が日付だけで書かれている（「令和5年12月5日」「2025/12/19(金)」）</td><td><code>- 発生日: 2026-09-14（2026年9月）</code></td></tr>
-        <tr><th scope="row">数値</th><td>セルが数値型</td><td><code>- 停止時間: 95分</code>（単位付き）</td></tr>
-        <tr><th scope="row">文章</th><td>値に<strong>改行がある</strong>、または<strong>40文字を超える</strong></td><td><code>## 故障内容</code> の節。本文は改行ごとに1行</td></tr>
-        <tr><th scope="row">文字列</th><td>上のどれでもない</td><td><code>- 報告者: 藤原</code></td></tr>
-        <tr><th scope="row">明細表</th><td>表の列見出しを1回クリックして登録した項目（1行＝1明細）</td><td><code>## 使用部品</code> の節。1行1明細</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">つまり「文章」と「明細表」だけが <code>##</code> の節になり、それ以外はすべて <code>- 見出し: 値</code> です。
-      短い値の項目でも値が複数行のときは <code>- 見出し:</code> の下に2文字下げで続けます。値が空の項目は書きません。</p>
-  </div>
-
-  <div class="card" id="g9">
-    <div class="card-head"><h2 class="card-title">先頭の見出し（#）とファイル名</h2></div>
-    <ul class="list-plain">
-      <li><code># 種類名 値1｜値2｜値3</code>。値は<strong>報告番号 → 対象（番号と名前）→ 発生日</strong>の順で、その帳票に値があるものだけ</li>
-      <li>対象しか無い帳票は、同じ対象の帳票が何十件もあって見分けられないので、番号らしい項目（作業No. など）と日付を<strong>両方</strong>足します。片方しか無ければある方だけ。日付まで足すのは、番号と対象だけでは同じ対象の何年ぶんもの記録が見分けのつかない見出しで並んでしまうからです</li>
-      <li>報告番号も対象も無いときは、元の Excel のファイル名（拡張子なし）を末尾に足します</li>
-      <li>ファイル名は <code>{種類名}_{タイトルの値…}.md</code>。報告番号が入らないときは、同じ名前が重ならないよう末尾にファイルの指紋（8文字）を足します</li>
-    </ul>
-    <h3 class="sub-title">タイトルに使える項目は4つだけ／値が1つも無いときのファイル名</h3>
-    <ul class="list-plain">
-      <li>タイトルに使えるのは<strong>報告番号・設備番号・設備名・発生日</strong>の4つだけです。帳票登録でこの4つをクリックしていれば自動で入り、あとから選び直す画面はありません。文章と明細表はタイトルに使いません</li>
-      <li>タイトルの値が1つも無い（またはファイル名に使える文字が残らない）ときのファイル名は <code>種類名_指紋8文字.md</code>。指紋も無ければ <code>種類名_元ファイル名.md</code> です</li>
-      <li>「出さない」にした項目と、値が見出し語だった項目は、タイトルにもファイル名にも出典にも使いません</li>
-    </ul>
-  </div>
-
-  <div class="card" id="g10">
-    <div class="card-head"><h2 class="card-title">基本情報の箇条書き（- ）</h2></div>
-    <ul class="list-plain">
-      <li>先頭は必ず <code>- 帳票の種類: …</code></li>
-      <li>設備番号と設備名の2項目は <code>- 設備: 名前（番号）</code> の1行にまとめます</li>
-      <li>日付は <code>2026-09-14（2026年9月）</code> と ISO 形式に年月の注記を付けます（「令和6年7月29日」「R6.7.29」も同じ形にそろえます。時刻があれば残します）</li>
-      <li>数値は単位付きで書きます。単位は「帳票の種類の設定」→「値に書かれた単位（390分・2.5h）」の順に決め、勝手に換算はしません</li>
-      <li>年の無い日付（「2/12」）は年を補わず、書かれたまま残して要確認にします</li>
-    </ul>
-    <h3 class="sub-title">数値の桁区切りは落ちる（明細表の中は残る）</h3>
-    <p>数値の項目は読んだ時点で桁区切りのカンマを外して数として持つので、Markdown には<strong>区切りの無い数字</strong>が出ます。<code>1,650,000</code> → <code>- 修理費: 1650000円</code>。<code>2.0</code> は <code>2</code>、<code>2.50</code> は <code>2.5</code> になります。<code>▲50</code> <code>△0.8</code> は負の数（<code>-50</code> <code>-0.8</code>）として読みます。</p>
-    <p class="hint">同じ数でも<strong>明細表の中は文字のまま</strong>なので <code>- 品番: PI77-1713／金額(円): 1,650,000</code> と桁区切りが残ります。1つの Markdown の中で数字の書き方が混ざるのはこのためです（明細表は列ごとの型を決めていないので、セルの文字をそのまま出します）。</p>
-
-    <h3 class="sub-title">Excel の表示形式は読まない（桁区切り・パーセント・小数の0は落ちる）</h3>
-    <p>Excel の<strong>表示形式（セルの書式）は読みません</strong>。セルに入っている値そのものを書くので、画面の見た目と Markdown の文字が違うことがあります。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>Excel の画面</th><th>セルの中身</th><th>Markdown</th></tr></thead>
-      <tbody>
-        <tr><td>1,650,000</td><td>数値 1650000</td><td><code>- 金額: 1650000円</code>（桁区切りは落ちます）</td></tr>
-        <tr><td>2.50</td><td>数値 2.5</td><td><code>2.5</code>（末尾の 0 は落ちます）</td></tr>
-        <tr><td>3.0</td><td>数値 3.0</td><td><code>3</code>（整数になります）</td></tr>
-        <tr><td>5.0 のパーセント表示</td><td>数値 0.05</td><td><code>0.05</code>（100倍に戻しません）</td></tr>
-        <tr><td>25:30（経過時間の書式）</td><td>25時間30分</td><td><code>25:30</code></td></tr>
-        <tr><td>2026年9月14日</td><td>日付</td><td><code>2026-09-14</code></td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">桁区切りのある「1,650,000」がそのまま出るのは、セルに<strong>文字列として</strong>「1,650,000」と入力されているときだけです。数値のセルなら、明細表の中の数字も同じように桁区切りが落ちます。</p>
-
-    <h3 class="sub-title">単位は書き方をそろえる（h→時間）。表示形式の単位も取り込む</h3>
-    <p>単位は<strong>書き方をそろえてから</strong>値のうしろに付けます。値と単位の間に空白は入れません。</p>
-    <ul class="list-plain">
-      <li><code>h</code> <code>hr</code> <code>hrs</code> <code>hour</code> <code>hours</code> → <strong>時間</strong>、<code>min</code> <code>mins</code> → <strong>分</strong>、<code>sec</code> → <strong>秒</strong>、<code>yen</code> <code>¥</code> → <strong>円</strong>。大文字小文字は問いません（<code>2.5H</code> も <code>2.5時間</code>）</li>
-      <li>この一覧に無い単位（枚・本・件・MPa・℃ など）は書かれたまま使います</li>
-      <li>セルの値が数値だけで<strong>表示形式に単位が書いてある</strong>とき（画面には「3,095分」、セルの中身は 3095）は、その単位を「値に書かれた単位」として扱います。取り込むのは4字以内で数字を含まない単位だけです</li>
-      <li><strong>数値として読めなかった値</strong>（「約半日」のように原文のまま残した値）には単位を付けません</li>
-    </ul>
-
-    <h3 class="sub-title">対象を1行にまとめるのは両方そろったときだけ</h3>
-    <ul class="list-plain">
-      <li><code>- 設備: 名前（番号）</code> の1行にまとめるのは、<strong>設備番号と設備名の2項目が両方あって、両方に値があるとき</strong>だけです。片方だけの帳票は <code>- 設備番号: VH-204</code> のようにその項目の見出しのまま出ます</li>
-      <li>まとめた行の見出しは、<strong>番号の項目名から「番号・No・コード・ID」を落とした言い方</strong>です（「設備番号」→ <code>- 設備:</code>、「車両番号」→ <code>- 車両:</code>、落とすものが無ければその項目名のまま）</li>
-      <li>出る位置は、2つのうち<strong>先に登録した方の位置</strong>です</li>
-      <li><code>#</code> のタイトルも同じで <code>名前（番号）</code> の形にまとめます</li>
-    </ul>
-  </div>
-
-  <div class="card" id="g11">
-    <div class="card-head"><h2 class="card-title">文章の節（##）</h2></div>
-    <ul class="list-plain">
-      <li>本文はセルの改行ごとに1行。空行は入れません（文字は1つも削りません）</li>
-      <li>行頭が「1.」「-」「#」「&gt;」「---」「```」で始まる行は、<code>\</code> を付けて <code>1\.</code> のように無効化します。
-        付けないと Markdown として番号を振り直されたり見出しに化けたりして、書かれた内容が変わってしまうためです（表示上の印で、文字そのものは残ります）</li>
-    </ul>
-    <h3 class="sub-title">行頭の無効化は「記号のあとに空白」のときだけ／効く場所</h3>
-    <p>無効化する記号は、解説に挙げたものに加えて次も対象です。</p>
-    <ul class="list-plain">
-      <li>箇条書きの <code>*</code> <code>+</code>（<code>-</code> と同じ）、番号付きの <code>1)</code>（<code>1.</code> と同じ。数字は9桁まで）</li>
-      <li>見出しの <code>#</code> は6個まで、引用の <code>></code></li>
-      <li>区切り線は <code>---</code> のほか <code>===</code> <code>***</code> <code>___</code>（3つ以上。間に空白が入っていても同じ）</li>
-      <li>コードの囲みは <code>```</code> のほか <code>~~~</code></li>
-      <li>記号のあとに<strong>空白か行末が続くときだけ</strong>無効化します。<code>#3ライン</code> <code>-5℃</code> <code>1.5mm</code> はそのままです（Markdown としても箇条書きや見出しにならないため）</li>
-      <li>ただし<strong>引用の <code>&gt;</code> だけは、あとに空白が無くても無効化します</strong>（<code>&gt;5mm 以下</code> → <code>\&gt;5mm 以下</code>）。Markdown は空白が無くても引用になるためです</li>
-    </ul>
-    <p class="hint">効くのは <code>#</code> と <code>##</code> の見出しの文字・文章の節の本文・<strong>複数行の値の2行目以降（2文字下げの行）</strong>です。<code>- 見出し: 値</code> の1行に収まる値は行頭ではないので無効化しません。明細表の <code>- 品番: …</code> の行も、アプリが組み立てた行なので無効化しません。</p>
-
-    <h3 class="sub-title">行頭を無効化する記号の一覧（4つより広い）</h3>
-    <p>行頭を <code>\\</code> で無効化する記号は、次のとおりです。</p><ul class="list-plain"><li>見出し: <code>#</code> から <code>######</code>（後ろに空白か行末があるとき）</li><li>箇条書き: <code>-</code> <code>*</code> <code>+</code></li><li>引用: <code>></code></li><li>番号付き: <code>1.</code> と <code>1)</code>（数字は9桁まで）。この2つだけは<strong>数字の後ろに</strong> <code>\\</code> を入れます（<code>1\\.</code>）</li><li>区切り線: <code>-</code> <code>=</code> <code>*</code> <code>_</code> のどれかが<strong>3つ以上だけ</strong>並ぶ行（<code>***</code> <code>___</code> <code>===</code> も）</li><li>コード囲み: <code>```</code> と <code>~~~</code>（頭の3文字に1つずつ <code>\\</code> を入れます）</li></ul><p class="hint">行頭の空白（字下げ）はそのまま残し、<code>\\</code> はその後ろに入れます。<strong>1行で収まる「- 見出し: 値」には付けません</strong>（行頭ではないので化けないため）。値が複数行になって2文字下げで続けるときの各行と、文章の節（##）の本文だけが対象です。</p>
-  </div>
-
-  <div class="card" id="g12">
-    <div class="card-head"><h2 class="card-title">明細表の節（##）</h2></div>
-    <ul class="list-plain">
-      <li><code>## 見出し</code> の下に <strong>1行1明細</strong>：<code>- 品番: PW48-1591／品名: ベアリング／数量: 2</code></li>
-      <li>空のセルは書かず、連番だけの「No」列も書きません。合計の行は <code>- 合計: …</code></li>
-      <li>パイプ表（<code>| 品番 | 品名 |</code>）は使いません。1行が「どの見出しの、どの値か」を自分の中に持つので、途中で切られても意味が通ります</li>
-      <li>見出しの組が縦に積み重なる表（特性要因図など）は1つの表にまとめ、各行にはその行の空でない列だけを書きます</li>
-    </ul>
-    <h3 class="sub-title">合計の行は、その列の見出しが消える／数字の無い合計行は出ない</h3>
-    <p>明細表の中で、<strong>いちばん左の空でないセルの文字がちょうど合計の語</strong>（合計・小計・総計・総合計・合計数・計、6字以内＋「合計」「小計」、6字以内＋「費計」「工数計」「個数計」「件数計」「台数計」「本数計」「枚数計」「金額計」「額計」）の行は、合計の行として書きます。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>表の行</th><th>Markdown</th></tr></thead>
-      <tbody>
-        <tr><td>品番（空）／品名「合計」／数量 3／金額 1650000</td><td><code>- 合計: 数量: 3／金額: 1650000</code></td></tr>
-        <tr><td>品名「合計」だけで、ほかの列は全部空</td><td><strong>1行も出ません</strong>（数字の無い合計行は記録として意味がないため）</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <ul class="list-plain">
-      <li>合計の語が入っていた<strong>列の見出しは消えます</strong>（上の例の <code>品名:</code> は出ません）</li>
-      <li>読み取りのときと違って<strong>塗りの色は見ません</strong>。手で入れた行でも同じ扱いです</li>
-      <li>「温度計」「設計」「累計」「平均」は合計の語ではないので、普通の明細として出ます</li>
-    </ul>
-
-    <h3 class="sub-title">手で入れた行に効くのは「No 列を落とす」だけ</h3>
-    <p>確認画面で手入力した明細の行に効く後処理は、<strong>連番の No 列を落とすことだけ</strong>です。読み取った表に効く残り2つは効きません。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>後処理</th><th>読み取った表</th><th>手で入れた行</th></tr></thead>
-      <tbody>
-        <tr><th scope="row">連番の No 列を落とす</th><td>効く</td><td>効く</td></tr>
-        <tr><th scope="row">「なし」だけの行を落とす</th><td>効く</td><td><strong>効かない</strong>（<code>- 品名: なし</code> と出ます）</td></tr>
-        <tr><th scope="row">「〃」「同上」を上の行の値にする</th><td>効く</td><td><strong>効かない</strong>（<code>〃</code> のまま出ます）</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">全部のセルが空の行は、どちらでも出ません。No 列を落とすのは列が2つ以上ある表だけです。</p>
-
-    <h3 class="sub-title">列見出しが空の列は「列3」と出る／セル内の改行は1行に畳む</h3>
-    <ul class="list-plain">
-      <li>列見出しが空の列は <strong>「列3」</strong>のように<strong>左から数えた位置</strong>で出します（<code>- 品番: PW48-1591／列3: 2</code>）。手で入れた行のセルが表の列数より多いときも、余った分は「列4」…になります</li>
-      <li>明細表は<strong>1行1明細</strong>なので、セルの中に改行があっても半角空白1つに畳んで1行にします（前後の空白も落とします）</li>
-      <li>列見出しの側も同じで、改行を含む見出しは1行に畳んで書きます</li>
-    </ul>
-  </div>
-
-  <div class="card" id="g13">
-    <div class="card-head"><h2 class="card-title">大きい帳票の工夫（LightRAG に切られても身元が分かるように）</h2></div>
-    <p>LightRAG は文書を一定の長さの断片に切って扱います。切り方の設定はこのアプリからは分からないので、どの断片にも「どの帳票の話か」が残る形にしています。</p>
-    <ul class="list-plain">
-      <li>帳票全体が推定 <strong>1,200トークン</strong>を超えるときは、すべての <code>##</code> に識別子を付けます：<code>## 原因（R2026-00123／VH-204 配送車4号車／2026-09-14）</code></li>
-      <li>節（明細表・文章・基本情報のどれでも）が推定 <strong>800トークン</strong>を超えるときは <code>## 使用部品（続き）（識別子）</code> に分けます（分けないと、明細の行だけで埋まった断片に報告番号も設備名も残らないため）</li>
-      <li>小さい帳票（大半）は、上の例のとおり <code>## 故障内容</code> のままです</li>
-    </ul>
-    <h3 class="sub-title">識別子が付かない帳票がある（識別子はタイトルの値から作る）</h3>
-    <p>見出しに付ける識別子は、<strong>タイトルに使う値（報告番号・対象・発生日）をそのまま並べたもの</strong>です。この3つのどれも読めていない帳票でも、<strong>番号らしい項目と日付を拾って識別子にします</strong>（「作業No.」「点検日」だけの作業日報・日常点検表など）。</p>
-    <ul class="list-plain">
-      <li>帳票の種類に 報告番号・設備番号・設備名・発生日 のどれも登録していなくても、読めた項目の中から<strong>番号らしい項目 → 日付</strong>の順に拾って <code># 日常点検表 W-2026-0412｜2026-09-14</code>／<code>## 点検結果（W-2026-0412／2026-09-14）</code> にします</li>
-      <li>番号らしい項目も日付も無い（全部空だった）ときだけ、<strong>元の Excel のファイル名</strong>を使います</li>
-      <li>文章も明細表も無い帳票（<code>##</code> の節が1つも無い）は、そもそも識別子の出る場所がありません</li>
-      <li><strong>タイトルに報告番号が入らない帳票では、番号らしい項目（作業No. など）を必ず足します</strong>。タイトルにまだ日付が無ければ日付も足します：<code>## 所見（KJ-0031 第2倉庫空調更新工事／MW-2025-1421／2025-12-19）</code>。対象と日付だけだと、作業No. が基本情報の1行にしか出ず、<strong>番号で探したときに先頭の断片しか当たりません</strong></li>
-    </ul>
-    <p class="hint">タイトルに使う項目（報告番号・設備番号・設備名・発生日）は、帳票登録でその見出しが<strong>辞書に当たったときだけ</strong>自動で入ります。「点検日」「作業No.」「受付番号」のような見出しは辞書に当たりませんが、その場合も上のとおり番号らしい項目と日付を拾うので、識別子は付きます。</p>
-
-    <h3 class="sub-title">タイトル・識別子の1つの値は40字まで</h3>
-    <p>タイトルと識別子に出す値は、1つにつき<strong>40字</strong>で切って末尾に「…」を付けます。設備名のセルの隣の注記までまとめて1つの値として読んだ帳票では、識別子1つが推定254トークンになり、見出しの繰り返しだけで md の3割を占めていました（2026-09-23 の実測）。本文の <code>- 設備: …</code> は切りません。</p>
-
-    <h3 class="sub-title">節を「（続き）」に分けるのは識別子を付ける帳票だけ</h3>
-    <p>節を <code>（続き）</code> に分けるのは、<strong>その帳票が識別子を付ける帳票（推定1,200トークン超）のときだけ</strong>です。分ける対象は<strong>明細表・文章・基本情報の3つとも</strong>で、どれか1つだけが大きくても分けます。</p>
-    <ul class="list-plain">
-      <li>帳票全体が1,200トークン以下なら、節が800トークンを超えていても<strong>分けません</strong>（識別子の付かない <code>## 使用部品（続き）</code> を作っても、断片から身元が分からないため）</li>
-      <li>分ける位置は<strong>行の切れ目</strong>です。ただし<strong>1行だけで800トークンを超えるとき</strong>（改行の無い長い文章の項目など）は、その行の中でも「。」→「！？」→読点→「.,;:」→空白 の順に区切りを探して切ります</li>
-      <li>基本情報（<code>- 項目: 値</code> の並び）が大きいときは <code>## 基本情報（続き）（識別子）</code> を付けて分けます。短い項目が何十件もある点検表で、途中の断片に帳票番号も設備名も入らなくなるのを防ぐためです</li>
-      <li><code>（続き）</code> に番号は付きません。<code>## 使用部品（続き）（識別子）</code> が2つ以上並ぶことがあります（一覧表の <code>（続き2/3）</code> とは書き方が違います）</li>
-    </ul>
-
-    <h3 class="sub-title">1,200・800 の「推定トークン」の数え方</h3>
-    <p>1,200・800 の「推定」は、次の数え方で出した値です。LightRAG が実際に数えるトークンを<strong>下回らない</strong>ように、全体で2割ほど多めに見積もります。</p>
-    <ul class="list-plain">
-      <li>日本語などの非ASCII文字 … 1文字で <strong>1.1</strong></li>
-      <li>記号（<code>- : / . =</code> など）… 1文字で <strong>1</strong></li>
-      <li>数字 … <strong>ひとまとまりで1、さらに3桁ごとに1</strong>（<code>2026-09-14</code> は数字だけで5）</li>
-      <li>英字・空白・改行 … <strong>2文字で1</strong></li>
-    </ul>
-    <p class="hint">目安は、日本語の文字だけなら<strong>1,100字あたりで1,200トークン</strong>です。日時・品番・計測値が多い帳票はもっと早く超えるので、字数が同じでも識別子が付く帳票と付かない帳票があります。記号や数字を英字と同じに数えると実トークンより3割ほど少なく見積もり、断片の途中で身元が切れてしまうため、この数え方にしています。</p>
-
-    <h3 class="sub-title">「推定トークン」の数え方</h3>
-    <p><strong>1,200／800／400 のもとになる「推定トークン」は、実際のトークン数を数えたものではありません。</strong>文字の種類から見積もります。</p><ul class="list-plain"><li>漢字・かな（ASCII 以外）は<strong>1文字＝1.1</strong></li><li>記号（<code>- : / . =</code> など）は<strong>1文字＝1</strong></li><li>数字は<strong>続いているまとまり1つで1、さらに3桁ごとに1</strong></li><li>英字・空白・改行は<strong>2文字＝1</strong></li></ul><p>同じ10文字でも次のように差が出ます。</p><div class="table-wrap"><table class="table compact"><thead><tr><th>10文字の例</th><th>推定トークン</th></tr></thead><tbody><tr><td><code>2026-09-14</code>（日付）</td><td>8</td></tr><tr><td>漢字10字（「搬送アームが停止した」）</td><td>11</td></tr><tr><td><code>production</code>（英字）</td><td>5</td></tr></tbody></table></div><p>この式は実際より<strong>全体で2割ほど多め</strong>に見積もります（14万ブロックの実測で、実際が推定を超えたことはありません）。多めに倒しているのは、<strong>足りなくて LightRAG に途中で切られるほうが困る</strong>からです。そのため<strong>日付・型番・計測値が多い記録は、字数が同じでも早めに分かれます</strong>。</p><p class="hint">例外は「髙」「﨑」のようなまれな漢字で、1文字が2〜3トークンになることがあります。記録全体では、ほかの文字の余裕に吸収されます。</p>
-
-    <h3 class="sub-title">タイトルと識別子で対象の書き方・区切りが違う</h3>
-    <p>同じ値を使いますが、<code>#</code> のタイトルと <code>##</code> の識別子では書き方が違います。</p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>書く場所</th><th>値の区切り</th><th>対象の書き方</th></tr></thead>
-      <tbody>
-        <tr><th scope="row"><code>#</code> のタイトル</th><td><code>｜</code></td><td><code>配送車4号車（VH-204）</code>（名前（番号））</td></tr>
-        <tr><th scope="row"><code>##</code> の識別子</th><td><code>／</code></td><td><code>VH-204 配送車4号車</code>（番号 名前）</td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p class="hint">識別子は <code>## 原因（…）</code> の括弧の中に入るので、括弧を二重にしない書き方にしています。</p>
-  </div>
-
-  <div class="card" id="g14">
-    <div class="card-head"><h2 class="card-title">末尾と、書かないもの</h2></div>
-    <ul class="list-plain">
-      <li>末尾に <code>- 添付画像: n枚</code>（画像があるとき）と <code>- 出典: 元ファイル名（報告番号 …）</code></li>
-      <li>値が別の欄の見出し語そのもの（「- 品名: 品番」のような読み取り誤り）は書きません</li>
-      <li>画像のセル番地・帳票の種類の版・DB の番号は書きません（読み取り結果の JSON には残ります）</li>
-      <li>人名の項目も書きます（読み取った内容は削らない、が決まりです）。帳票の種類で「出さない」にした項目だけ外れます</li>
-      <li>ブロックの間は空行1つ、ファイルの末尾は改行1つ、改行コードは LF。同じ帳票からは何度作っても同じ Markdown になります</li>
-    </ul>
-    <h3 class="sub-title">値が見出し語の項目を消す条件（20字以内・文字列・手直しは対象外）</h3>
-    <p>「<code>- 品名: 品番</code>」のような読み取り誤りを消すのは、次の条件が全部そろったときだけです。</p>
-    <ul class="list-plain">
-      <li>値が<strong>20字以内・1行</strong>（長い本文にたまたま同じ語が入っていても消しません）</li>
-      <li>型が<strong>文字列</strong>（日付・数値・明細表は対象外）</li>
-      <li>確認画面で<strong>手で直した値は対象外</strong>（直した値は消しません）</li>
-      <li>照合する相手は、その帳票の種類の<strong>探す見出し・項目の見出し・明細表の列見出し</strong>の全部。全角半角・空白・前後の記号・大文字小文字をそろえて比べます</li>
-    </ul>
-    <p class="hint">消えた項目はタイトル・ファイル名・出典にも使いません。読み取り結果の画面と JSON には残るので、本当は正しい値だったときは画面で直してください（直すと消えなくなります）。</p>
-
-    <h3 class="sub-title">「要確認」の印と警告文は Markdown に出ない</h3>
-    <p>読み取り結果の画面に出る<strong>「要確認」の印や警告の文は、Markdown には1文字も出ません</strong>（「単位が書かれていません」「日付として解釈できません」「ラベルが見つかりません」など）。</p>
-    <ul class="list-plain">
-      <li>警告が付いていても、値が読めていればその値をそのまま書きます</li>
-      <li>値が空なら、その項目の行そのものが出ません。<strong>「もともと空欄だった」のか「読めなかった」のかは Markdown には残りません</strong></li>
-      <li>警告は読み取り結果の画面と JSON にだけ残ります</li>
-    </ul>
-    <p class="hint">要確認が残っていても確定・ダウンロードはできます。あとから Markdown だけを見ても区別が付かないので、気になる項目は確定する前に画面で直してください。</p>
-
-    <h3 class="sub-title">出典の括弧に入るもの（無ければファイル名だけ）</h3>
-    <p><code>- 出典: 元ファイル名（見出し 値）</code> の括弧に入るのは、次の順で最初に見つかったものです。</p>
-    <ul class="list-plain">
-      <li>報告番号</li>
-      <li>タイトルに使う項目のうち<strong>最初の文字列の項目</strong>（設備番号・設備名は除く）</li>
-      <li>タイトルに報告番号が入らない帳票では、タイトルに足した項目（番号らしい項目 → 日付）</li>
-      <li>どれも無ければ <code>- 出典: 修理報告書_標準.xlsx</code> と<strong>ファイル名だけ</strong>になります</li>
-    </ul>
-    <p class="hint">ここのファイル名は置いた Excel の名前（拡張子付き）で、ダウンロードする .md の名前とは別物です。見出しと値の間は空白1つで、区切り記号は入れません。</p>
-
-    <h3 class="sub-title">添付画像の枚数に入るもの・入らないもの</h3>
-    <ul class="list-plain">
-      <li>数えるのは<strong>貼り付けた画像</strong>だけです。図形・矢印・テキストボックス・グラフは数えません</li>
-      <li>数えるのは<strong>読み取ったシートに貼ってある画像</strong>だけです。読まなかったシート（別紙・記入要領）の画像は枚数に入りません</li>
-      <li>画像の中身は読みません。<strong>Markdown に画像は入らず、枚数の1行だけ</strong>です。ダウンロードする .md や zip にも画像ファイルは入りません</li>
-    </ul>
-    <p class="hint">「どのシートのどこに何枚あるか」は読み取り結果の JSON に残りますが、セル番地は Markdown に書きません。</p>
-  </div>
-
-  {# ================= 表の取り込み ================= #}
   <div class="card" id="g15">
     <div class="card-head"><h2 class="card-title">表の取り込み（一覧表）の Markdown ができるまで</h2></div>
     <p>一覧表は<strong>1行＝1件</strong>です。ファイルを置いてから zip ができるまでに、次の6つの判断を順に行います。どれも「見出しと値を見て決め、決められないところだけ人に聞く」作りです。</p>
@@ -2239,10 +758,10 @@
     <p>試すのは <code>,</code>（カンマ）・タブ・<code>;</code>（セミコロン）・<code>|</code>（縦棒）の<strong>4つだけ</strong>です。見るのは<strong>先頭1MBの中の200レコード</strong>まで。</p><ul class="list-plain"><li>「最も多い列数にぴったり一致する行の割合」が高いものを選びます（割合は小数2桁で丸めて比べるので、ほぼ同じなら次の手がかりへ）</li><li>同じなら<strong>見出しらしさ</strong>（その列数で並ぶ最初の行のうち、文字列・コードのセルの割合）</li><li>それも同じなら <code>.tsv</code> はタブを優先し、最後は列数の多い方</li><li>列が1つしかできないときは「区切り文字を判定できませんでした（列が1つだけです）。固定長テキストは対象外です」と知らせます</li></ul><p class="hint">全角カンマ・空白区切りは候補にありません。空白で区切ったテキストは、カンマかタブに直してから置いてください。</p>
 
     <h3 class="sub-title">読めない文字は「〓」に置き換えられる</h3>
-    <ul class="list-plain"><li>画面で選び直せる文字コードは<strong>7つ</strong>（UTF-8・UTF-8(BOM付き)・CP932・Shift_JIS 2004・UTF-16・UTF-16LE・UTF-16BE）だけで、ほかは受け付けません</li><li>［読めない文字を「〓」に置き換えて読み込む］を入れると、読めないバイトを <code>〓</code> にして先へ進みます。置き換えた行は「読めない文字を〓に置き換えた行が N 行あります」と<strong>行番号つきで</strong>知らせます</li><li><strong>髙・﨑 のような CP932 だけの字</strong>があるファイルは、ほかに読めないバイトがあっても Shift_JIS 2004 に切り替えません（切り替えると 髙→郄 のように別の字に化けるため）。CP932 のまま、読めない行の位置を知らせます</li></ul>
+    <ul class="list-plain"><li>画面で選び直せる文字コードは<strong>9つ</strong>（UTF-8(BOM付き)・UTF-8・CP932・EUC-JP・ISO-2022-JP・Shift_JIS 2004・UTF-16・UTF-16LE・UTF-16BE）だけで、ほかは受け付けません</li><li>［読めない文字を「〓」に置き換えて読み込む］を入れると、読めないバイトを <code>〓</code> にして先へ進みます。置き換えた行は「読めない文字を〓に置き換えた行が N 行あります」と<strong>行番号つきで</strong>知らせます</li><li><strong>髙・﨑 のような CP932 だけの字</strong>があるファイルは、ほかに読めないバイトがあっても Shift_JIS 2004 に切り替えません（切り替えると 髙→郄 のように別の字に化けるため）。CP932 のまま、読めない行の位置を知らせます</li></ul>
 
     <h3 class="sub-title">読むシートは1枚だけ</h3>
-    <p>一覧表は<strong>1シートだけ</strong>を読みます（帳票のように「続きのシート」を足しません）。</p><ul class="list-plain"><li>既定は<strong>最初の表示されているシート</strong>。非表示のシートも一覧に出て（「・非表示のシート」と付きます）、選べば取り込めます</li><li>シートごとに行数×列数を出し、<strong>表示されているシートが8枚以下のときだけ</strong>「一覧表らしい」「クロス集計らしい（対応していません）」の見立ても出します（9枚以上あると全部を下見すると重いので出しません）</li><li>置いた直後に最初のシートを全行読んで、値が読めないブック（<code>NaN</code> など）はその場で断ります</li></ul>
+    <p>一覧表は<strong>1シートだけ</strong>を読みます（複数のシートをつないで1つの表にはしません）。</p><ul class="list-plain"><li>既定は<strong>最初の表示されているシート</strong>。非表示のシートも一覧に出て（「・非表示のシート」と付きます）、選べば取り込めます</li><li>シートごとに行数×列数を出し、<strong>表示されているシートが8枚以下のときだけ</strong>「一覧表らしい」「クロス集計らしい（対応していません）」の見立ても出します（9枚以上あると全部を下見すると重いので出しません）</li><li>置いた直後に最初のシートを全行読んで、値が読めないブック（<code>NaN</code> など）はその場で断ります</li></ul>
 
     <h3 class="sub-title">読み取り方を変えると列の対応づけも消える</h3>
     <p>シート・文字コード・区切り・〓の扱いのどれかを<strong>変えて</strong>保存すると、見出しが変わる前提で、それより下の段の決めごとを捨てます。</p><ul class="list-plain"><li>手で指定した<strong>見出し行</strong>と<strong>データの終わり</strong>の行番号</li><li><strong>列の対応づけ</strong>（出す・出さないと四つの役割）</li><li>読み込んだ記録（状態がファイルを置いた直後まで戻ります）</li></ul><p class="hint">同じ値を選び直しただけのときは何も捨てません。</p>
@@ -2260,7 +779,7 @@
           <li>除外：非表示の行・取り消し線の行 → 記録にせず、件数を警告に出します</li>
         </ul></li>
       <li><strong>データの終わり</strong>：空行が3行続く・合計行が出る（その行まで）・注記や表題の行、見出しの再出現が出る（その手前まで）、で決めます（画面で終了行を直せます）</li>
-      <li><strong>表の形</strong>：月として読める見出し（「4月」「2026/04」「R8.4」「2025-04-01」）が<strong>3つ以上</strong>あり、かつ<strong>名前のある見出しの3割以上</strong>を占めるときだけクロス集計として断ります（40列のうち月が3列なら一覧表として取り込み、12列なら断ります）。見出しの下に同じ形の行が3行未満なら「一覧表の形に見えません」と知らせます（帳票ならそちらの画面へ）</li>
+      <li><strong>表の形</strong>：月として読める見出し（「4月」「2026/04」「R8.4」「2025-04-01」）が<strong>3つ以上</strong>あり、かつ<strong>名前のある見出しの3割以上</strong>を占めるときだけクロス集計として断ります（40列のうち月が3列なら一覧表として取り込み、12列なら断ります）。見出しの下に同じ形の行が3行未満なら「一覧表の形に見えません（見出しの下に同じ形の行が続いていません）」と知らせます</li>
     </ul>
     <h3 class="sub-title">見出し行の点には減点もある</h3>
     <p>先頭40行の候補を、次の重みで採点します（満点1.0）。</p><div class="table-wrap"><table class="table compact"><thead><tr><th>手がかり</th><th>重み</th></tr></thead><tbody><tr><td>セルが見出しらしい（40字以内・改行なしの文字列）割合</td><td>0.30</td></tr><tr><td>下の行に同じ形の行が続く／下の行が見出しらしくない</td><td>各 0.15</td></tr><tr><td>行の幅をすき間なく埋めている</td><td>0.15</td></tr><tr><td>同じ文字が重なっていない</td><td>0.10</td></tr><tr><td>辞書の語が入っている（3つ当たれば満点）</td><td>0.10</td></tr><tr><td>太字</td><td>0.05</td></tr></tbody></table></div><p>減点もあります。先頭のセルが<strong>「■□◆●」や「※（注」で始まる行は −0.3</strong>、<strong>「出力日時, 2026/09/14」のような2セルだけの前置き行は −0.2</strong>、<strong>上にも同じ形の行が並んでいれば最大 −0.3</strong>（見出しではなくデータの途中だから）。</p><p>点が <strong>0.4 未満</strong>だと、データの行が何行あっても「一覧表の形に見えません」と知らせます（見出しの下に同じ形の行が3行未満のときと同じ案内です）。</p>
@@ -2359,7 +878,7 @@
     <p>時刻を残すのは<strong>型が「日時」の列だけ</strong>です。型が「日付」の列は、セルに <code>2026-08-03 14:20</code> と入っていても <strong>2026-08-03</strong> だけになります。</p><ul class="list-plain"><li>型は<strong>先頭200件のデータ行</strong>で決まります。時刻付きの値が2割未満だと「日付」になるので、<strong>まれにしか時刻が入っていない列では時刻が落ちます</strong></li><li>「日時」の列でも <code>0:00</code> は書きません（日付だけ）</li><li>秒の小数（<code>.000</code>）と時差（<code>Z</code> <code>+09:00</code>）は読み捨てます。曜日の括弧（<code>(月)</code>）も外します</li></ul>
 
     <h3 class="sub-title">「〃」「同上」を補う列は決まっている</h3>
-    <p>直前の行の値で補うのは、役割が<strong>識別番号・日付・対象・対象の名前・区分・その他・人名</strong>の列だけです。<strong>長文・経過の記録・数値の列の「〃」はそのまま残ります</strong>（数値の列なら「値を変換できません」の型エラーになります）。</p><ul class="list-plain"><li>補うのは<strong>セル全体</strong>が 〃・″・′′・同上・々・仝 のときだけ。一覧表では「々」も補います（帳票の明細表では補いません）</li><li>「空欄は上と同じ」の設定とは別で、その設定が付いていない列でも補います</li><li>上に値が無ければ原文のまま残し、「〜の「〃」を補えませんでした」と行番号つきで知らせます</li><li>補った件数は列ごとに「「〃」「同上」を直前の行の値で補いました（顧客コード 12件）」と出ます</li></ul>
+    <p>直前の行の値で補うのは、役割が<strong>識別番号・日付・対象・対象の名前・区分・その他・人名</strong>の列だけです。<strong>長文・経過の記録・数値の列の「〃」はそのまま残ります</strong>（数値の列なら「値を変換できません」の型エラーになります）。</p><ul class="list-plain"><li>補うのは<strong>セル全体</strong>が 〃・″・′′・同上・同左・々・仝・ヽ・ゝ・引用符（<code>"</code> <code>”</code> <code>“</code>）のときだけです（前後に文字があれば補いません）</li><li>「空欄は上と同じ」の設定とは別で、その設定が付いていない列でも補います</li><li>上に値が無ければ原文のまま残し、「〜の「〃」を補えませんでした」と行番号つきで知らせます</li><li>補った件数は列ごとに「「〃」「同上」を直前の行の値で補いました（顧客コード 12件）」と出ます</li></ul>
 
     <h3 class="sub-title">数値は桁区切り付き・小数2桁まで</h3>
     <p>Markdown に書くときの数値の形です。</p><ul class="list-plain"><li>3桁ごとに <code>,</code> を入れます（<code>1650000</code> → <strong>1,650,000</strong>）</li><li><strong>小数は2桁までに四捨五入</strong>します（<code>1234.567</code> → <strong>1,234.57</strong>、<code>0.125</code> → <strong>0.13</strong>）。末尾の 0 は書きません（<code>2.50</code> → <strong>2.5</strong>）</li><li>単位は <code>h</code>・<code>hr</code> を<strong>「時間」</strong>、<code>min</code> を<strong>「分」</strong>と書き換えます（<code>- 作業工数: 2.5時間</code>）。ほかの単位はそのまま付けます</li></ul><p class="hint">小数3桁以上の測定値（<code>0.0325</code>）は <strong>0.03</strong> になります。元の値は読み取り結果の JSON に残ります。</p>
@@ -2476,7 +995,7 @@
     <li>「（続きn/m）」に分けるときの細かいところ。<ul class="list-plain"><li>2つ目以降に書き直すのは、<strong>その部分にまだ無い</strong>識別番号・対象・日付の行だけです（同じ行が二重に出ません）</li><li>見出しと書き直す行の分を引いた残りが中身の割り当てですが、<strong>引きすぎても最低80トークンは中身に使います</strong></li><li><code>- 対応の時系列:</code> のような複数行の値は<strong>行の切れ目</strong>で分け、<code>- 対応の時系列（続き）:</code> を繰り返します</li><li>1行が長すぎるときは<strong>「。」→「．！？!?」→読点→「.,;:」→空白</strong>の順に区切りを探して切り、区切りが無ければ文字数で切ります。<code>- 項目: 値</code> の形になっていない行は項目名を繰り返せないので、<strong>「（続き）」を付けずに</strong>同じ順で切ります</li><li>先頭の <code>- このファイルの記録: 342件</code> は<strong>分ける前の件数</strong>です（<code>（続き2/3）</code> の見出しは数えません）</li></ul></li>
 
     <h3 class="sub-title">複数行の値は行頭の記号を無効化する（時系列の番号は残す）</h3>
-    <li>複数行の値は <code>- 項目:</code> の下に2文字下げで続けますが、<strong>行頭が <code>1.</code> <code>-</code> <code>#</code> <code>></code> <code>---</code> <code>```</code> で始まる行には <code>\</code> を付けて無効化</strong>します（<code>1\.</code>。帳票と同じ理由で、Markdown が番号を振り直したり見出しに化けたりしないため。文字そのものは残ります）。<strong>値の中の空行は落とします</strong>（1件の記録の中に空行を作らないため）。<code>- 対応の時系列:</code> の <code>1.</code> <code>2.</code> は番号として意味があるので無効化しません。</li>
+    <li>複数行の値は <code>- 項目:</code> の下に2文字下げで続けますが、<strong>行頭が <code>1.</code> <code>-</code> <code>#</code> <code>></code> <code>---</code> <code>```</code> で始まる行には <code>\</code> を付けて無効化</strong>します（<code>1\.</code>。Markdown が番号を振り直したり見出しに化けたりしないためで、文字そのものは残ります）。<strong>値の中の空行は落とします</strong>（1件の記録の中に空行を作らないため）。<code>- 対応の時系列:</code> の <code>1.</code> <code>2.</code> は番号として意味があるので無効化しません。</li>
 
     <h3 class="sub-title">記録の種別（18種）</h3>
     <p>AI整形をすると、時系列の各行に種別が <code>［連絡・初動］</code> の形で入ります。1行に複数付くこともあります。既定の選択肢は18種です。</p>
@@ -2787,13 +1306,15 @@
     <h3 class="sub-title">断る条件（上限）</h3>
     <div class="table-wrap">
     <table class="table compact">
-      <thead><tr><th>何を</th><th>帳票取り込み</th><th>表の取り込み</th></tr></thead>
+      <thead><tr><th>何を</th><th>上限</th></tr></thead>
       <tbody>
-        <tr><th scope="row">1回の送信の合計</th><td colspan="2">200MB（超えると中身を読む前に断る）</td></tr>
-        <tr><th scope="row">一度に置ける数</th><td><strong>50ファイル</strong>（51件以上は1件も取り込まない）</td><td>1ファイル</td></tr>
-        <tr><th scope="row">拡張子</th><td>.xlsx / .xlsm</td><td>.xlsx / .xlsm / .csv / .tsv / .txt</td></tr>
-        <tr><th scope="row">セル数</th><td><strong>50万</strong></td><td>事前チェック <strong>100万</strong>、読み込みで <strong>50万</strong>（推定がその4倍＝200万を超えた時点でも断る）</td></tr>
-        <tr><th scope="row">結合セルの面積</th><td>20万</td><td>200万</td></tr>
+        <tr><th scope="row">1回の送信の合計</th><td>200MB（超えると中身を読む前に断る）</td></tr>
+        <tr><th scope="row">一度に置ける数</th><td>1ファイル（まとめてドロップしても先頭の1つだけ）</td></tr>
+        <tr><th scope="row">拡張子</th><td>.xlsx / .xlsm / .csv / .tsv / .txt</td></tr>
+        <tr><th scope="row">セル数</th><td>事前チェックで <strong>100万</strong>、読み込むときに <strong>50万</strong>（推定がその4倍＝200万を超えた時点でも断る）</td></tr>
+        <tr><th scope="row">結合セルの面積</th><td>200万</td></tr>
+        <tr><th scope="row">行数（Excel の行の記述）</th><td>200万</td></tr>
+        <tr><th scope="row">列数</th><td>2,000</td></tr>
       </tbody>
     </table>
     </div>
@@ -2803,14 +1324,14 @@
       XML を1MBずつ読みながら結合セル・セル・行・リンク・図形の数を数えます。</p>
     <p class="hint">壊れたファイルは Python の例外名を出さず「Excelファイルとして読み込めません（ファイルが壊れている可能性があります）」にまとめます。
       事前チェックや読み込みに落ちたら、<strong>置いたファイルはその場で消します</strong>。
-      まとめて置いたときは1件ずつ処理するので、10件のうち2件がパスワード付きでも残り8件は先へ進みます
-      （落ちた分は「3件目のファイル: …」と位置つきで出ます）。</p>
+      取り込みの行を作るところで落ちたときもファイルを消すので、<strong>行の無いファイルだけがサーバーに残ることはありません</strong>。</p>
 
     <h3 class="sub-title">列は2000列まで</h3>
     <p>一覧表は<strong>2,000列</strong>を超えると断ります（見出しごとに辞書を引くので、桁違いに列が多いと画面が何十秒も止まるためです）。</p><ul class="list-plain"><li>CSV は先読みで分かればその場で、分からなければ読み込み中に「N行目の列数が上限（2,000列）を超えています」で止めます</li><li>Excel は<strong>値のある列</strong>の数で見ます</li><li>Excel の上限（1,048,576行・16,384列）より外の位置にセルがあるブックも、壊れているものとして断ります</li></ul>
     <h3 class="sub-title">時間のかかる処理（ジョブ）</h3>
-    <p><strong>帳票の読み取りにジョブも進捗バーもありません。</strong>要求の中で読み取って結果をそのまま返します。
-      ジョブを使うのは一覧表の4つ（読み込み・下書き・Markdown作成・AI整形）だけです。</p>
+    <p>時間のかかる処理は<strong>4つ（読み込み・下書き・Markdown作成・AI整形）</strong>で、この4つだけが
+      ジョブになって進み具合を出します。ほかの操作（読み取り方・表の範囲・列の対応づけの保存）は
+      要求の中で済ませて結果をそのまま返します。</p>
     <ul class="list-plain">
       <li>ジョブは<strong>2つの列</strong>に分かれます。AI整形だけ別の列なので、
         何時間もかかるAI整形を止めている間に、ほかの人の読み込みまで止まりません</li>
@@ -2829,19 +1350,20 @@
       2分の猶予は、誤って2つ目を起動したときに動いている1つ目を中断にしないためです。</p>
 
     <h3 class="sub-title">ダウンロードと片付け</h3>
-    <p>帳票1件は <code>.md</code>、まとまりと一覧表は zip です。どれも<strong>範囲指定の要求にも全体を返します</strong>
-      （一部だけ渡して消さないため）。<strong>本文を最後まで送り終えたときだけ</strong>、その分のデータを消します。
+    <p>渡すのは <code>.md</code> をまとめた zip 1つだけです。<strong>範囲指定の要求にも全体を返します</strong>
+      （一部だけ渡して消さないため）。<strong>本文を最後まで送り終えたときだけ</strong>、その取り込みのデータを消します。
       200 以外の応答（途中経過・キャッシュ有効）では消しません。</p>
     <p>消えたあとに古い画面がさわると、日本語で知らせて画面を読み直します
       （「このデータはサーバーに残っていません…」）。進み具合の取得が空振りしたときは黙って止めて読み直します。</p>
-    <h3 class="sub-title">行数にも上限がある（帳票のほうが厳しい理由）</h3>
-    <p>上の表のとおり、セル数は<strong>帳票が 50万</strong>、<strong>表の取り込みは2段構え</strong>（事前チェックで 100万、読み込むときに 50万。推定がその4倍＝200万を超えた時点でも断る）です。</p><p><strong>行数にも上限があります。帳票は 20万行、表の取り込みは 200万行。</strong>Excel の行の記述を数えるので、<strong>高さや書式を変えただけの、値が1つも無い行も1行として数えます</strong>。断るときは「行数が上限（200,000 行）を超えています（高さなどの書式だけの行も数えます）。不要な行を削除して保存し直してください」と出ます。</p><p class="hint">帳票のほうが厳しいのは、帳票は<strong>画面を開くたびにブックを開き直す</strong>からです（結合セルと行の書式は1つずつ作られるので、面積・行数に比例して遅くなる）。表の取り込みは読み取り専用で開くので、同じものを10倍まで通します。</p>
 
-    <h3 class="sub-title">ダウンロードを押すと、未確定の帳票も全部確定される</h3>
-    <p><strong>［ダウンロード］を押した時点で、まだ確定していない帳票をその場で全部確定します。</strong>1件ずつ確定のボタンを押す必要はありません。確定したあとに値を直した帳票（修正中）も確定し直すので、<strong>直した値がそのままファイルに入ります</strong>。入力中の値も先に保存してから確定します。</p><p>渡したあとの片付けも自動です。</p><ul class="list-plain"><li>帳票取り込みは、渡してから<strong>1.5秒後</strong>に「ダウンロードしました。渡し終えた分はサーバーから消えます」と出して画面を片付けます。<strong>読み取れなかった帳票だけは残る</strong>ので、②のシートの選び直しから続けられます</li><li>表の取り込みは、押してから<strong>4秒後</strong>に段の中身が「ダウンロードしました。この取り込みのデータ…はサーバーから消えています」に変わり、［別の表を取り込む］だけが残ります</li></ul><p class="hint">③に並んでいない帳票（読み取れなかった・選んだシートが無かった）に飛ぶボタンを押すと、黙って何も起きるのではなく「◯◯.xlsx は読み取れていません。②で読み取るシートを選び直してください」と出ます。</p>
+    <h3 class="sub-title">行数の上限は「書式だけの行」も数える</h3>
+    <p>行の上限は<strong>200万行</strong>です。Excel の行の記述を数えるので、<strong>高さや書式を変えただけの、値が1つも無い行も1行として数えます</strong>。断るときは「行数が上限（2,000,000 行）を超えています（高さなどの書式だけの行も数えます）。不要な行を削除して保存し直してください」と出ます。</p><p class="hint">セル数だけ2段構えなのは、事前チェック（100万）が<strong>展開せずに数える最後の砦</strong>で、読み込みのほう（50万）が「CSVで保存してから取り込んでください（書式による判定は使えなくなります）」と案内できる側だからです。一覧表は読み取り専用で開くので、結合セルを展開しません。</p>
 
-    <h3 class="sub-title">リンク・コメント・図形の上限、空ファイル、帳票登録の50MB</h3>
-    <ul class="list-plain"><li><strong>ハイパーリンクとコメントの範囲の面積は 5万</strong>まで（帳票・表の取り込みとも同じ）。1セルずつのリンクなら問題になりませんが、<strong>シート全体や列全体を指すリンク1つ</strong>で断ります（「不要なリンク・コメントを削除して保存し直してください」）</li><li><strong>図形（画像・オートシェイプ）は 1万個、展開後 20MB</strong>まで。数えるときは<strong>その図形を参照しているシートの数を掛けます</strong>（1つの大きな図形を30シートから参照させると30倍で数える）。断ると「図形や画像の数が多すぎるため読み込めません。不要な図形・画像を削除して保存し直してください」</li><li><strong>0バイトのファイル</strong>は拡張子が合っていても「ファイルが空です」で断ります</li><li><strong>帳票登録に置く Excel は 50MB</strong>まで（取り込みの200MBとは別の、これだけの上限）。ここはサーバーに保存せずメモリに読むためです</li></ul><p class="hint">リンク・コメント・図形を数えるのは、openpyxl がその範囲のセルや図形を1つずつ作るためです（シート全体を指すリンク1つで、開くのが30秒近くかかることがあります）。</p>
+    <h3 class="sub-title">ダウンロードを押したあと</h3>
+    <p>ダウンロードは<strong>確定してからしか押せません</strong>（確定していないと「先に [確定してMarkdownを作成] を押してください」と出ます）。押したあとの片付けは自動です。</p><ul class="list-plain"><li>押すと<strong>その場でボタンが押せなくなります</strong>（2回目は消えたあとの取得になって、画面ごと「残っていません」に飛ぶため）</li><li>押してから<strong>4秒後</strong>に段の中身が「ダウンロードしました。この取り込みのデータ…はサーバーから消えています」に変わり、［別の表を取り込む］だけが残ります</li><li>AI整形の実行中とAIの試し実行中は押せません（「終わるか中止してからダウンロードしてください」）</li><li>確定はしたが記録が0件だったときは「作成された Markdown がありません（取り込める行がありませんでした）」と出ます</li></ul>
+
+    <h3 class="sub-title">リンク・コメント・図形の上限と、空ファイル</h3>
+    <ul class="list-plain"><li><strong>ハイパーリンクとコメントの範囲の面積は 5万</strong>まで。1セルずつのリンクなら問題になりませんが、<strong>シート全体や列全体を指すリンク1つ</strong>で断ります（「不要なリンク・コメントを削除して保存し直してください」）</li><li><strong>図形（画像・オートシェイプ）は 1万個、展開後 20MB</strong>まで。数えるときは<strong>その図形を参照しているシートの数を掛けます</strong>（1つの大きな図形を30シートから参照させると30倍で数える）。断ると「図形や画像の数が多すぎるため読み込めません。不要な図形・画像を削除して保存し直してください」</li><li><strong>0バイトのファイル</strong>は拡張子が合っていても「ファイルが空です」で断ります</li></ul><p class="hint">リンク・コメント・図形を数えるのは、openpyxl がその範囲のセルや図形を1つずつ作るためです（シート全体を指すリンク1つで、開くのが30秒近くかかることがあります）。</p>
 
     <h3 class="sub-title">処理中は変えられない・開けない</h3>
     <p>ジョブが動いている間、その取り込みの設定は変えられません。押すと<strong>「処理中は変更できません。終わるか中止してから変更してください」</strong>と出ます（読み取り方・表の範囲・列の対応づけのどれも同じ）。</p><ul class="list-plain"><li><strong>AI整形が動いている間は「内容の確認」の段が開けません（一時停止中も含みます）。</strong>「再開して終わらせるか、中止してから確認してください」と出ます。<strong>一時停止したまま放っておくと、確認にも進めません</strong></li><li><strong>AIの試し実行中は、削除・ダウンロード・保存ができません。</strong>「試し実行が終わってからもう一度押してください」と出ます</li><li>止めるべき警告（確定をふさぐもの）が残っていると、［確定してMarkdownを作成］は押せません</li><li>Markdown がまだ無いのにダウンロードを開くと、「上の『内容の確認』で［確定してMarkdownを作成］を押してください」と段の中に出ます</li></ul>
@@ -2849,27 +1371,27 @@
 
   <div class="card" id="g24">
     <div class="card-head"><h2 class="card-title">画面の仕組みと、データを捨てる決まり</h2></div>
-    <p>画面は3枚だけで移動しません。1枚の中に<strong>「段」</strong>が並び、各段の中身だけを HTML の断片として取り寄せて入れ替えます。
+    <p>画面は<strong>2枚だけ</strong>（表の取り込みと、このページ）で移動しません。<code>/</code> を開くと表の取り込みへ転送します。
+      取り込みの画面は1枚の中に<strong>「段」</strong>が並び、各段の中身だけを HTML の断片として取り寄せて入れ替えます。
       <strong>どこまで進んだかはブラウザのメモリにしかありません。</strong>
       サーバーに「続きを開く入口」が無いので、画面を閉じると続けられません。作業中の一覧も履歴もありません。</p>
 
     <h3 class="sub-title">捨てる4つの機会</h3>
     <ol class="list-plain">
       <li><strong>画面を閉じた・隠した</strong> — 閉じたら即、隠れただけなら5分後</li>
-      <li><strong>新しいファイルを置いた・［別のファイルにする］を押した</strong> — 前の分を先に捨てる</li>
+      <li><strong>新しいファイルを置いた</strong> — 前の取り込みを先に捨てる</li>
       <li><strong>2時間さわられていない</strong> — 見回りは最長10分ごと</li>
       <li><strong>アプリの起動時</strong> — ダウンロードしていない分を<strong>全員分まとめて</strong></li>
     </ol>
     <p>放置の2時間は、見回りの間隔が「放置時間の半分・ただし60秒〜10分」なので、最大でも10分遅れで消えます
       （「2時間で捨てます」と言いながら3時間残ることが無いように）。</p>
     <p class="hint">「最後にさわった時刻」は<strong>取り込んだ時刻ではありません</strong>。
-      読み取り結果を直すたびに自動保存で更新されるので、ずっと直している帳票は消えません。
-      まとめ取り込みは1件でも新しければ<strong>まとまりごと残します</strong>（上から順に消えて zip が欠けるのを防ぐため）。
+      読み取り方・表の範囲・列の対応づけを保存するたびに更新されるので、ずっと直している取り込みは消えません。
       <strong>動いている処理が付いているものは、4つの機会のどれでも捨てません。</strong>
       AI整形を回したまま昼休みに席を外しても結果は残ります。</p>
     <p>ただし<strong>起動し直すと、作業中だった全員の分が消えます</strong>（続きを開く入口が無いので残す意味がないため）。
       再起動は誰も使っていない時間に行ってください。
-      帳票取り込みのタブを閉じても、隣のタブの表の取り込みは巻き込みません。</p>
+      取り込みの画面を2つのタブで開いているときは、閉じたタブの取り込みだけを捨てます（もう一方は巻き込みません）。</p>
 
     <h3 class="sub-title">残るもの／残らないもの</h3>
     <div class="table-wrap">
@@ -2877,13 +1399,13 @@
       <thead><tr><th>残る（設定）</th><th>残らない</th></tr></thead>
       <tbody>
         <tr>
-          <td>帳票の種類（項目・シート・覚えたシートの中身）<br>ブラウザごとのAI接続</td>
-          <td>元のファイル／読み取った内容／作った Markdown<br>一覧表の取り込み設定（取り込みと一緒に消える）<br>取り込み履歴／帳票登録に置いた Excel</td>
+          <td>ブラウザごとのAI接続（これだけ）</td>
+          <td>元のファイル／読み込んだ内容／作った Markdown<br>その取り込みの取り込み設定（取り込みと一緒に消える）<br>取り込み履歴</td>
         </tr>
       </tbody>
     </table>
     </div>
-    <p>帳票の種類は一度作れば全員でずっと使えますが、<strong>同じ表を明日また取り込むときは列の対応づけをもう一度決めます</strong>
+    <p>設定として残るのは<strong>AI接続だけ</strong>です。<strong>同じ表を明日また取り込むときは、列の対応づけをもう一度決めます</strong>
       （取り込み設定を名前で保存する仕組みはありません）。</p>
 
     <h3 class="sub-title">ブラウザに残さない・ほかのサイトから触らせない</h3>
@@ -2893,7 +1415,7 @@
       <li>全応答を <strong>iframe に入れさせません</strong>。iframe の中でのクリックは「同じサイトからの操作」になり、
         他サイト判定では止められないためです</li>
       <li><strong>ほかのサイトからの書き込みを断ります。</strong>
-        安全でないメソッドと、GET でもデータを消す3つの宛先（ダウンロード）が対象です。
+        安全でないメソッドと、GET でもデータを消す宛先（zip のダウンロード）が対象です。
         別のサイトに仕込まれた <code>&lt;img src="…/download.zip"&gt;</code> で、気づかないうちに取り込みを消されることがありません</li>
       <li><strong>受け付ける宛先の名前</strong>を限ります。必ず受け付けるのは <code>127.0.0.1</code>・<code>localhost</code>・<code>::1</code>。
         LAN に出しているとき（起動の <code>--host</code> が <code>0.0.0.0</code> などループバック以外のとき）だけ、
@@ -2902,29 +1424,26 @@
         理由は DNSリバインディング対策です（攻撃者のドメインがこのサーバーを指すと、
         そのページとアプリが同一オリジンになり画面の中身を読み取られるため）</li>
     </ul>
-    <h3 class="sub-title">読み取り結果の自動保存は0.7秒</h3>
-    <h3 class="sub-title">読み取り結果の自動保存（0.7秒）</h3><ul class="list-plain"><li>値を打ち替えると<strong>手が止まってから 0.7秒</strong>で保存します。［保存］ボタンはありません。段の見出しに「未保存の変更があります」→「保存中…」→「保存しました」と出ます</li><li>保存のたびに<strong>Markdown のプレビューと「要確認 n件」を作り直します</strong>。直した直後に Markdown の見え方・印の色・件数が変わるのはこのためです</li><li>保存できなかったときは「保存できませんでした」と出したまま<strong>未保存の状態に戻します</strong>。次に何か打った0.7秒後にもう一度試すので、通信が戻れば自然に保存されます</li><li><strong>画面を閉じるときも、未保存の分を送ります</strong>（閉じる最中でも届く送り方を使うため、結果は画面に出ません）</li><li>この自動保存が「最後にさわった時刻」を更新します。<strong>ずっと直している帳票は2時間の片付けでは消えません</strong></li></ul>
-
     <h3 class="sub-title">ファイルを置いたら、その時点で始まる</h3>
-    <h3 class="sub-title">ファイルを置いたら、その時点で始まります</h3><ul class="list-plain"><li>3つの画面とも、<strong>ファイルを落とした（またはクリックで選んだ）時点で送信が始まります</strong>。［読み込む］を押す手順はありません</li><li>置けるかどうかの判定は<strong>拡張子だけ</strong>です。ちがう拡張子が混ざると欄が赤くなり「◯◯.pdf は選べません（.xlsx,.xlsm）」と出て、送信しません</li><li><strong>1ファイルしか置けない欄（表の取り込み・帳票登録）に複数ドロップすると、先頭の1つだけを採ります。</strong>残りは黙って捨てられ、エラーも出ません</li><li>帳票登録では、置いた Excel の<strong>ファイル名（拡張子なし）が「帳票の種類」の名前に自動で入ります</strong>（<code>工事完了報告書_標準.xlsx</code> → <code>工事完了報告書_標準</code>）。<strong>手で書き換えた名前は、別のファイルを置き直しても上書きしません</strong></li></ul>
+    <ul class="list-plain"><li><strong>ファイルを落とした（またはクリックで選んだ）時点で送信が始まります</strong>。［読み込む］を押す手順はありません</li><li>置けるかどうかの判定は<strong>拡張子だけ</strong>です。ちがう拡張子だと欄が赤くなり「◯◯.pdf は選べません（.xlsx,.xlsm,.csv,.tsv,.txt）」と出て、送信しません</li><li><strong>置ける欄は1ファイルだけなので、複数ドロップすると先頭の1つだけを採ります。</strong>残りは黙って捨てられ、エラーも出ません</li><li>「表の名前」の初期値は<strong>置いたファイルの名前（拡張子なし）</strong>です</li></ul>
 
     <h3 class="sub-title">段は畳まれない・開閉できるのは済みの段だけ</h3>
-    <h3 class="sub-title">段の開け閉て</h3><ul class="list-plain"><li>段は<strong>自動で畳まれません</strong>。次の段が開いても前の段は開いたままで、下に増えていきます（3画面とも同じ設定です）</li><li><strong>［開く／閉じる］が出るのは「済み」になった段だけ</strong>です。まだ終わっていない段・これからの段は手で畳めません。済みの段は見出しのどこを押しても開閉します</li><li>段が開くと<strong>その段の先頭までなめらかにスクロールします</strong>。済みの段を自分で押し直して開くときだけ、スクロールしません</li><li>段を「まだ」に戻すと（やり直したとき）、<strong>見出しに出ていた要約も消えます</strong></li><li>まだ開けない段は灰色のままで、理由を見出しに1行だけ出します（例: 「読み取りが終わると確定できます」）</li><li>処理の間は段の中に「処理中」の行が出ます。<strong>画面は移らず、待っている場所もそのまま</strong>です</li></ul>
+    <ul class="list-plain"><li>段は<strong>自動で畳まれません</strong>。次の段が開いても前の段は開いたままで、下に増えていきます</li><li><strong>［開く／閉じる］が出るのは「済み」になった段だけ</strong>です。まだ終わっていない段・これからの段は手で畳めません。済みの段は見出しのどこを押しても開閉します</li><li>段が開くと<strong>その段の先頭までなめらかにスクロールします</strong>。済みの段を自分で押し直して開くときだけ、スクロールしません</li><li>段を「まだ」に戻すと（やり直したとき）、<strong>見出しに出ていた要約も消えます</strong></li><li>まだ開けない段は灰色のままで、理由を見出しに1行だけ出します（例: 「読み取りが終わると確定できます」）</li><li>処理の間は段の中に「処理中」の行が出ます。<strong>画面は移らず、待っている場所もそのまま</strong>です</li></ul>
 
     <h3 class="sub-title">知らせ（トースト）の出方と消える時間</h3>
-    <h3 class="sub-title">知らせ（トースト）の出方</h3><ul class="list-plain"><li>画面の<strong>右上に1つだけ</strong>出ます。<strong>エラーは6秒、それ以外は3.5秒</strong>で消えます。次の知らせは同じ場所を上書きするので、<strong>続けて出た知らせは前のものを押し流します</strong>（まとめて置いたファイルのエラーが何件も出ると、最後の1件しか読めません）</li><li>問題が複数あるとき（列の対応づけの保存など）は、<strong>トーストには先頭3件だけを「 / 」でつないで出し</strong>、全部は欄の中に並べます。「3件の問題があります」と出たら欄の中を見てください</li><li>サーバーにつながらないときは「アプリのサーバーにつながりませんでした。ネットワークとアプリが動いているか確かめてください」</li><li>データが消えたあと（ダウンロード済み・片付け済み）に古い画面がさわると「このデータはサーバーに残っていません…」と出ます</li><li>消えると読めなくなるので、<strong>帳票登録の保存だけは欄の上に「保存しました 12:34（…）」を残します</strong></li></ul>
+    <ul class="list-plain"><li>画面の<strong>右上に1つだけ</strong>出ます。<strong>エラーは6秒、それ以外は3.5秒</strong>で消えます。次の知らせは同じ場所を上書きするので、<strong>続けて出た知らせは前のものを押し流します</strong></li><li>問題が複数あるとき（列の対応づけの保存など）は、<strong>トーストには先頭3件だけを「 / 」でつないで出し</strong>、全部は欄の中に並べます。「3件の問題があります」と出たら欄の中を見てください</li><li>サーバーにつながらないときは「アプリのサーバーにつながりませんでした。ネットワークとアプリが動いているか確かめてください」</li><li>データが消えたあと（ダウンロード済み・片付け済み）に古い画面がさわると「このデータはサーバーに残っていません…」と出ます</li></ul>
 
     <h3 class="sub-title">確認を聞かれる操作の一覧</h3>
-    <h3 class="sub-title">確認を聞かれる操作</h3><p>元に戻せない操作だけ、実行の前に確認の窓が出ます。ほかの操作（読み取り・保存・確定・シートの選び直し）は、聞かずにそのまま実行します。</p><div class="table-wrap"><table class="table compact"><thead><tr><th>操作</th><th>確認で言うこと</th></tr></thead><tbody><tr><td>この帳票（このファイル）の取り込みをやめる</td><td>元のファイルと読み取り結果をサーバーから消します。元に戻せません</td></tr><tr><td>Markdown のダウンロード（.md・zip）</td><td>このデータはサーバーから消えます。もう一度ダウンロードすることはできません</td></tr><tr><td>ダウンロードせずに削除</td><td>読み込んだ内容と作成した Markdown も消えます。元に戻せません</td></tr><tr><td>AI整形の中止</td><td>保存済みの行の結果は残ります</td></tr><tr><td>確定済みの取り込みで Markdown を作り直す</td><td>作成済みのファイルは置き換わります</td></tr><tr><td>帳票の種類を削除</td><td>元に戻せません。確定済みの帳票 n件は削除されずに残ります</td></tr><tr><td>AI接続の［キーを消す］</td><td>接続先とモデルは残ります</td></tr></tbody></table></div><p class="hint">窓が開いた時点で<strong>［キャンセル］に印が当たっています</strong>ので、そのまま Enter を押しても実行しません。Escape で閉じたときもキャンセル扱いです。窓を出せない古いブラウザでは、ブラウザの標準の確認に落とします。</p>
+    <p>元に戻せない操作だけ、実行の前に確認の窓が出ます。ほかの操作（読み取り・保存・確定・シートの選び直し）は、聞かずにそのまま実行します。</p><div class="table-wrap"><table class="table compact"><thead><tr><th>操作</th><th>確認で言うこと</th></tr></thead><tbody><tr><td>この取り込みを削除／ダウンロードせずに削除</td><td>読み込んだ内容と作成した Markdown も消えます。元に戻せません</td></tr><tr><td>Markdown をまとめてダウンロード（zip）</td><td>この取り込みのデータはサーバーから消えます。もう一度ダウンロードすることはできません</td></tr><tr><td>AI整形の中止</td><td>保存済みの行の結果は残ります</td></tr><tr><td>確定済みの取り込みで Markdown を作り直す</td><td>作成済みのファイルは置き換わります</td></tr><tr><td>AI接続の［キーを消す］</td><td>接続先とモデルは残ります</td></tr></tbody></table></div><p class="hint">窓が開いた時点で<strong>［キャンセル］に印が当たっています</strong>ので、そのまま Enter を押しても実行しません。Escape で閉じたときもキャンセル扱いです。窓を出せない古いブラウザでは、ブラウザの標準の確認に落とします。</p>
 
-    <h3 class="sub-title">画面に出るのは一部だけ（読み取りは全体）</h3><div class="table-wrap"><table class="table compact"><thead><tr><th>どこ</th><th>画面に出る範囲</th></tr></thead><tbody><tr><th scope="row">帳票の左のシート（取り込み・登録）</th><td><strong>300行 × 60列</strong>まで。超えると「大きいシートのため、先頭の一部だけ表示しています。」と出ます</td></tr><tr><th scope="row">表の取り込みの「表の範囲」</th><td><strong>先頭60行 × 30列</strong>まで。1つのセルは<strong>40字</strong>で切って出します</td></tr><tr><th scope="row">表の取り込みの「内容の確認」</th><td>行は<strong>100件ずつ</strong>ページ送り。警告は<strong>先頭200件</strong>まで（全件は CSV で確認できます）</td></tr></tbody></table></div><p class="hint"><strong>これは表示だけの上限で、読み取りは全体を見ます。</strong>画面のセルが40字で切れていても、Markdown には全部入ります。画面に出ていない行も読み取りの対象です（ただし、見出し行を自動で探すのは先頭40行の中だけです）。</p><p class="hint">帳票登録でクリックできるのも、画面に出ている 300行 × 60列 の中だけです。それより下・右にある欄は、シートを並べ替えるか範囲を詰めてから置き直してください。</p>
+    <h3 class="sub-title">画面に出るのは一部だけ（読み取りは全体）</h3><div class="table-wrap"><table class="table compact"><thead><tr><th>どこ</th><th>画面に出る範囲</th></tr></thead><tbody><tr><th scope="row">「表の範囲」</th><td><strong>先頭60行 × 30列</strong>まで。1つのセルは<strong>40字</strong>で切って出します</td></tr><tr><th scope="row">「内容の確認」</th><td>行は<strong>100件ずつ</strong>ページ送り。警告は<strong>先頭200件</strong>まで（全件は CSV で確認できます）</td></tr></tbody></table></div><p class="hint"><strong>これは表示だけの上限で、読み取りは全体を見ます。</strong>画面のセルが40字で切れていても、Markdown には全部入ります。画面に出ていない行も読み取りの対象です（ただし、見出し行を自動で探すのは先頭40行の中だけです）。</p>
 
     <h3 class="sub-title">エラーのときに出るもの</h3><ul class="list-plain"><li>403・404・413・400・405・500 は<strong>すべて日本語の画面</strong>にします（英語の標準画面は出しません）。画面の中からの送信には同じ内容を JSON で返すので、<strong>画面は消えずにトーストで理由が出ます</strong></li><li>宛先の名前が許していないものだと「このアドレスでは開けません。このアプリは <code>http://…:5000/</code> で開いてください」と、<strong>開けるアドレスを名指しで出します</strong>（［ホームへ］では同じ名前に戻ってしまうため）</li><li>送りすぎ（合計200MB超え）は「送った内容が大きすぎます（1回に合計 200MB まで）。分けて送ってください」</li><li>ほかのサイトから送られた操作は「ほかのサイトのページから送られてきた操作に見えたため受け付けませんでした。取り込みの画面からやり直してください」</li><li>ジョブの失敗は<strong>Python の例外名を出しません</strong>。想定していない失敗は「処理中にエラーが発生しました。もう一度実行してください（詳しい内容はアプリのログに記録しました）」にまとめ、中身はサーバーのログにだけ残します</li></ul><p class="hint">ヘッダーの無い要求（<code>curl</code> などアプリを直接たたく操作）は、他サイト判定では断りません。ブラウザからの操作だけを見ています。</p>
   </div>
 
-  {# ================= 共通の決まり ================= #}
+  {# ================= 文字・空欄・日付・ファイル名 ================= #}
   <div class="card" id="g25">
-    <div class="card-head"><h2 class="card-title">文字・空欄・日付・ファイル名の扱い（両方の流れに共通）</h2></div>
+    <div class="card-head"><h2 class="card-title">文字・空欄・日付・ファイル名の扱い</h2></div>
 
     <h3 class="sub-title">文字をそろえる（NFKC）。ただし囲み文字は原文のまま</h3>
     <p>Markdown に出す値は NFKC で文字をそろえます。全角の英数字は半角に、半角カナは全角に、
@@ -2936,8 +1455,8 @@
     <pre class="code md-preview">①分解②清掃③組立   →  ①分解②清掃③組立
 （そのまま NFKC をかけると）→  1分解2清掃3組立</pre>
     <p>①→1 にすると番号と本文の区切りが消え、「①伝票を回収」が「1伝票を回収」になって読めなくなるためです。
-      丸数字は帳票の手順・項目番号でごく普通に使われます。</p>
-    <p class="hint">例外が2つあります。<strong>一覧表の「コード」型の列</strong>（識別番号・製品コードなど）は
+      丸数字は手順・項目番号でごく普通に使われます。</p>
+    <p class="hint">例外が2つあります。<strong>「コード」型の列</strong>（識別番号・製品コードなど）は
       ほかの記録と突き合わせに使うので、囲み文字もそろえます（<code>Ⓐ-12</code>→<code>A-12</code>）。
       <strong>ファイル名</strong>も、OS や LightRAG 側で扱いが揺れるのでそろえます。</p>
 
@@ -2953,28 +1472,14 @@
       Markdown はブロックの間が空行1つ、末尾は改行1つ、改行コードは LF です。</p>
 
     <h3 class="sub-title">空を表す書き方</h3>
-    <p><strong>2つの流れで語の一覧が違います。</strong></p>
-    <div class="table-wrap">
-    <table class="table compact">
-      <thead><tr><th>場面</th><th>空として扱う書き方</th></tr></thead>
-      <tbody>
-        <tr><th scope="row">帳票の明細表の行</th>
-          <td><code>なし・無し・該当なし・特になし・-・ー・―・‐・/・〃</code>
-            （<strong>「N/A」「NA」「該当無し」は入っていません</strong>）</td></tr>
-        <tr><th scope="row">一覧表の値</th>
-          <td><code>-・－・―・N/A・NA・#N/A・該当なし</code></td></tr>
-      </tbody>
-    </table>
-    </div>
-    <p>帳票で「なし」だけの行が落ちるのは<strong>明細表の行だけ</strong>です。
-      1つの値の項目（<code>- 備考: なし</code>）はそのまま出ます。</p>
+    <p>次の書き方は空欄として扱います（セル全体がその書き方のときだけ）。</p>
+    <pre class="code md-preview">-　－　―　‐　N/A　n/a　NA　#N/A　該当なし</pre>
+    <p><strong>「なし」「無し」「特になし」は空欄にしません</strong>（書かれたとおり <code>- 備考: なし</code> と出ます）。
+      「〃」「同上」は空欄ではなく、直前の行の値で補います。</p>
 
     <h3 class="sub-title">Excel の日付シリアル値</h3>
-    <p>日付の欄に数字が入っているとき、日付に直すのは決まった範囲だけです。</p>
-    <ul class="list-plain">
-      <li>帳票：<strong>20000 より大きく 80000 未満</strong>（1954年10月〜2119年1月）</li>
-      <li>一覧表：<strong>3000 より大きく 80000 未満</strong>（1908年3月〜）。先に8桁の数（20240729）を日付として読みます</li>
-    </ul>
+    <p>日付の欄に数字が入っているとき、日付に直すのは<strong>3000 より大きく 80000 未満</strong>（1908年3月〜2119年1月）のときだけです。
+      先に8桁の数（20240729）を日付として読みます。</p>
     <p>範囲の外は日付にせず「日付として解釈できません」と知らせて原文のまま残します
       （<code>45900</code>→<code>2025-08-31</code>、<code>1200</code>→そのまま）。
       日付の表示形式のセルに <code>0</code> や負の数が入っていても、1899年の日付にはせず警告します。</p>
@@ -2991,8 +1496,7 @@
     </ul>
     <p>同じ名前になったときは <code>_2</code> <code>_3</code> を足します。
       <strong>Windows は大文字・小文字を区別しない</strong>ので、比べるときはそろえます
-      （「ETC-302号機」と「Etc-302号機」が同じファイルに上書きされて記録が消えるのを防ぐため）。
-      帳票では、報告番号がファイル名に入らないときに元ファイルの指紋8文字を足します。</p>
+      （「ETC-302号機」と「Etc-302号機」が同じファイルに上書きされて記録が消えるのを防ぐため）。</p>
     <p class="hint"><strong>LightRAG の取り込みヒント</strong>（<code>.[legacy-R(...)]</code> のような書き方）は付けません。
       ヒントはサーバー側の取り込み設定より優先されてしまううえ、そのサーバーが知らない書き方だと
       取り込みが断られるためです。値の中に <code>.[</code> があれば誤解されないよう消します。</p>
@@ -3001,23 +1505,26 @@
     <p>ダウンロードは本文を最後まで渡しきったときだけデータを消し、途中で切れたときは残します。
       ただし「渡しきった」は<strong>サーバーの送信の溜めに入れ終えたこと</strong>で、相手が受け取ったことではありません。
       OS の溜めと合わせて<strong>最後の約48KB</strong>は、受け取られる前に消したことになります。
-      そのため<strong>それより小さい .md や zip は、途中で切れると手元に無いのにサーバーからも消えます</strong>。
+      そのため<strong>それより小さい zip は、途中で切れると手元に無いのにサーバーからも消えます</strong>。
       送信の溜めを 16KB まで小さくして被害を抑えていますが、原理的にゼロにはできません。</p>
-    <h3 class="sub-title">置き場所のパスの長さと、ダウンロードのときの名前</h3>
-    <h3 class="sub-title">置き場所のパスの長さ（Windows）</h3><p>Windows で「長いパス」が有効になっていないと、<strong>パス全体が 259文字</strong>を超えるファイルは書けません。表の取り込みは Markdown を書く前に確かめ、超えるときは<strong>1件も書かずに止めます</strong>: 「Markdownのファイル名が長すぎて、サーバーのデータの置き場所に書けません（最長 72文字）。『表の名前』を短くするか、アプリを浅いフォルダに置いてください」。長いパスが有効な環境では、この確認をしません。</p><h3 class="sub-title">ダウンロードのときのファイル名</h3><p>ダウンロードの応答には<strong>日本語の名前と、ASCII だけの控えの名前を両方</strong>付けます。ふつうのブラウザは日本語の名前で保存しますが、古い環境やサーバーのログでは控えの名前になります。控えは英数字と <code>.</code> <code>_</code> <code>-</code> 以外を <code>_</code> に置き換えたもので、<strong>英字が1つも残らないときは英語の既定名を頭に付けます</strong>（帳票1件は <code>form</code>、まとまりの zip は <code>forms_markdown</code>、一覧表は <code>records</code>）。</p><p class="hint"><code>報告書_2026-00123.md</code> → 控えは <code>form_2026-00123.md</code>。<code>車両点検報告書_R2026-00123.md</code> は「R」が残るので控えも <code>R2026-00123.md</code> になります。</p>
+    <h3 class="sub-title">置き場所のパスの長さ（Windows）</h3>
+    <p>Windows で「長いパス」が有効になっていないと、<strong>パス全体が 259文字</strong>を超えるファイルは書けません。Markdown を書く前に確かめ、超えるときは<strong>1件も書かずに止めます</strong>: 「Markdownのファイル名が長すぎて、サーバーのデータの置き場所に書けません（最長 72文字）。『表の名前』を短くするか、アプリを浅いフォルダに置いてください」。長いパスが有効な環境では、この確認をしません。</p>
+
+    <h3 class="sub-title">ダウンロードのときのファイル名</h3>
+    <p>ダウンロードの応答には<strong>日本語の名前と、ASCII だけの控えの名前を両方</strong>付けます。ふつうのブラウザは日本語の名前で保存しますが、古い環境やサーバーのログでは控えの名前になります。控えは英数字と <code>.</code> <code>_</code> <code>-</code> 以外を <code>_</code> に置き換えたもので、<strong>英字が1つも残らないときは <code>records</code> を頭に付けます</strong>。</p><p class="hint"><code>受注一覧_2026-09-26.zip</code> → 控えは <code>records_2026-09-26.zip</code>。<code>R8受注一覧_2026-09-26.zip</code> は「R」が残るので控えも <code>R8_2026-09-26.zip</code> になります。</p>
 
     <h3 class="sub-title">文字コードは UTF-8（BOM なし）</h3>
     <li><code>.md</code> は <strong>UTF-8（BOM なし）・LF・末尾に改行1つ</strong>で書きます。Excel で直接開くと日本語が化けることがありますが、メモ帳・VS Code・LightRAG はそのまま読めます（中身を見るだけならエディタで開いてください）。</li>
   </div>
 
   <div class="card" id="g26">
-    <div class="card-head"><h2 class="card-title">帳票と一覧表の共通の決まり</h2></div>
+    <div class="card-head"><h2 class="card-title">Markdown 全体で守っている決まり</h2></div>
     <ul class="list-plain">
       <li>同じ入力から何度作っても同じ Markdown（作成日時・取込IDは書きません）</li>
       <li>読み取った文字は1つも削らず、勝手に換算・補完しません（補うのは年の手がかりからの年・「〃」「同上」・対象の列の空欄だけで、年を補ったときは知らせます。決められないものは空欄にして知らせます）</li>
       <li>パイプ表を使わず、1行が「どの見出しの、どの値か」を自分の中に持ちます</li>
       <li>大きい記録は分け、どの断片にも識別番号・対象・日付を書きます（LightRAG 側の設定が分からない前提）</li>
-      <li>ダウンロードした時点で、元のファイルも読み取り結果もサーバーから消えます</li>
+      <li>ダウンロードした時点で、元のファイルも読み込んだ内容もサーバーから消えます</li>
     </ul>
   </div>
 
@@ -3039,7 +1546,7 @@
     {% if host_refused %}
     <a class="btn primary" href="{{ home_url }}">{{ home_url }} を開く</a>
     {% else %}
-    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+    <a class="btn primary" href="{{ url_for('tables.new') }}">表の取り込みへ</a>
     {% endif %}
   </div>
 
@@ -3048,34 +1555,20 @@
   <p class="hint">このアプリはログインが無く、社内LANの中だけで使うようにしてあります。そのため、ほかのサイトのページが利用者のブラウザを使って勝手に書き込むことを防いでいます。</p>
   <p>心当たりがないときは、取り込みの画面からもう一度やり直してください。ブックマークや履歴から古い画面を開いたときにも出ることがあります。</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+    <a class="btn primary" href="{{ url_for('tables.new') }}">表の取り込みへ</a>
   </div>
 
   {% elif code == 404 %}
-  {#- 帳票の種類・取り込み設定はダウンロードでは消えない（design.md §3.3）ので、設定の URL には別の文を出す -#}
-  {%- set p = request.path -%}
-  {%- if p.startswith("/form-types") -%}
-    {%- set back = (url_for('form_types.index'), "帳票登録へ") -%}
-  {%- elif p.startswith("/tables/templates") -%}
-    {%- set back = (url_for('tables.new'), "表の取り込みへ") -%}
-  {%- else -%}
-    {%- set back = None -%}
-  {%- endif %}
-  {% if back %}
-  <p>この設定は見つかりませんでした（削除された可能性があります）。URL が違うこともあります。</p>
-  {% else %}
-  <p>お探しの帳票／取り込みは見つかりませんでした。ダウンロード済み（渡したデータはサーバーに残しません）か、しばらく置いたままで捨てられたか、URL が違います。もう一度ファイルを取り込んでください。</p>
-  {% endif %}
+  <p>お探しの取り込みは見つかりませんでした。ダウンロード済み（渡したデータはサーバーに残しません）か、しばらく置いたままで捨てられたか、URL が違います。もう一度ファイルを取り込んでください。</p>
   <div class="btn-row">
-    {% if back %}<a class="btn" href="{{ back[0] }}">{{ back[1] }}</a>{% endif %}
-    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+    <a class="btn primary" href="{{ url_for('tables.new') }}">表の取り込みへ</a>
   </div>
 
   {% elif code == 413 %}
   <p>1回に送れるのは合計 {{ limit }} までです。いま選んだファイルは合計でこれを超えたため、受け付けませんでした（何も保存していません）。</p>
-  <p>帳票をまとめて取り込むときは、ファイルを何回かに分けて選んでください。画像の多いブックは、不要な画像を消して保存し直すと小さくなります。</p>
+  <p>大きい表は、行を分けて何回かに分けて取り込んでください。画像の多いブックは、不要な画像を消して保存し直すと小さくなります。</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+    <a class="btn primary" href="{{ url_for('tables.new') }}">表の取り込みへ</a>
   </div>
 
   {% elif code == 409 %}
@@ -3090,7 +1583,7 @@
   {% else %}
   <p>処理の途中で問題が起きました。もう一度やり直してください。何度も同じところで止まるときは、起動した画面（コマンドプロンプト）に出ているメッセージを確認してください。</p>
   <div class="btn-row">
-    <a class="btn primary" href="{{ url_for('forms.new') }}">帳票取り込みへ</a>
+    <a class="btn primary" href="{{ url_for('tables.new') }}">表の取り込みへ</a>
   </div>
   {% endif %}
 </div>

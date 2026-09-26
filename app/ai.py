@@ -1389,7 +1389,7 @@ _REFERENCE_RE = re.compile(r"同上|と同じ|別紙|参照")
 _CORRECTION_RE = re.compile(r"訂正|撤回|ではなく")
 _HEADER_LABEL_MAX = 10
 # 先頭の日時を囲む括弧（影テキストは1文字ずつ NFKC をかけた写しなので、（）は () になっている）。
-# 本番の帳票では「(2026/09/25 10:30:00) 田中：…」のように丸括弧で囲む書き方が多い
+# 本番のデータでは「(2026/09/25 10:30:00) 田中：…」のように丸括弧で囲む書き方が多い
 _HEAD_BRACKETS = {"【": "】", "[": "]", "(": ")", "<": ">"}
 _LABEL_BRACKETS = "【["
 _MIN_SENTENCE = 15
@@ -1944,16 +1944,6 @@ def is_configured() -> bool:
 
 def default_model() -> str:
     return _pick("model", "default", _cfg("OPENAI_MODEL"))[0]
-
-
-def available() -> list[str]:
-    browser = [str(m).strip() for m in (_browser().get("models") or []) if str(m).strip()]
-    admin = [str(m).strip() for m in (_read_admin().get("models") or []) if str(m).strip()]
-    names = browser or admin or list(_cfg("OPENAI_MODELS"))
-    d = default_model()
-    if d and d not in names:
-        names.insert(0, d)
-    return names
 
 
 def current_model() -> str:
@@ -2653,9 +2643,6 @@ DEFAULT_FINAL_STATES = ["完了", "経過観察中", "部品待ち", "メーカ�
 DEFAULT_LIMITS = {"max_segments": 40, "max_input_tokens": 6000}
 DEFAULT_RUN_IF = {"any": [{"min_segments": 2}, {"min_chars": 60}, {"contains": ["Original Message", "訂正"]}]}
 DEFAULT_OUTPUT_TOKENS = {"base": 400, "per_segment": 40, "max": 2000, "summary": 300}
-# 要約を頼む記録の大きさ（設定 summary_if.record_tokens_over を書いたときの目安）。
-# 要約は md にも画面にも出ないので、既定では頼まない（2026-09-23 のレビュー）
-DEFAULT_SUMMARY_TOKENS = 1500
 
 
 def sget(obj, name: str, default=None):
@@ -2818,8 +2805,6 @@ def segments_hash(parse: LogParse | None) -> str:
                                                    s.when.estimated] if s.when else None,
              "marks": sorted(s.marks or [])} for s in parse.segments]
     return sha256_json({"kind": parse.kind, "segments": data})
-
-
 
 
 def _decode(row) -> dict | None:
