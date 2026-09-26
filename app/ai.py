@@ -227,9 +227,15 @@ _MMDD_RE = re.compile(r"(0[1-9]|1[0-2])([0-3]\d)(?=[ \t]|$)")
 _MDOT_RE = re.compile(r"(\d{1,2})\.(\d{1,2})(?=[ \t]|$)")
 _WEEKDAY_RE = re.compile(r"\s*\(\s*[月火水木金土日](?:曜日?)?\s*\)")
 _RANGE_RE = re.compile(r"\s*[〜~]\s*(?:(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})|(\d{1,2})/(\d{1,2})|(\d{1,2})\s*月\s*(\d{1,2})\s*日)(?![\d/.])")
+# 秒・ミリ秒・時差（システム出力の「10:30:00」「10:30:00.123」「10:30:00+09:00」「…Z」）を読み飛ばす。
+# 残すと本文の先頭が「00 …」になり、記入者も拾えなかった（2026-09-26 の本番の指摘）。
+# 出す時刻は「時:分」でそろえる（md のほかの日時表示と同じ形）。
+# 時差は秒があるときだけ受ける（「10:30-11:00」の範囲を時差と取り違えないため）
+_SECONDS = r"(?::\d{2}(?:\.\d{1,6})?(?:Z|[+\-]\d{2}:?\d{2}(?![:\d]))?)?"
 _TIME_RE = re.compile(
-    r"(?:(AM|PM|午前|午後)\s*)?(?:(\d{1,2}):(\d{2})(?!\d)|(\d{1,2})時(?!間)(?:(半)|(\d{1,2})分)?)"
-    r"(?:\s*[〜~\-]\s*(?:\d{1,2}:\d{2}(?!\d)|\d{1,2}時(?!間)(?:半|\d{1,2}分)?))?"
+    r"(?:(AM|PM|午前|午後)\s*)?"
+    r"(?:(\d{1,2}):(\d{2})" + _SECONDS + r"(?!\d)|(\d{1,2})時(?!間)(?:(半)|(\d{1,2})分)?(?:\d{1,2}秒)?)"
+    r"(?:\s*[〜~\-]\s*(?:\d{1,2}:\d{2}" + _SECONDS + r"(?!\d)|\d{1,2}時(?!間)(?:半|\d{1,2}分)?(?:\d{1,2}秒)?))?"
 )
 _SHIFT_RE = re.compile(
     r"(夜勤|日勤|[123一二三]直|午前中|午前|午後|朝一|昼過ぎ|夕方|深夜|定時後|朝|昼|夜)(?=[\s:)\]】、。,]|$)"
@@ -353,6 +359,9 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
                     w.to = None
     for _ in range(4):
         q = _skip_ws(view, p) if found else p
+        if found and w.time is None and q < end and view[q] in "Tt" \
+                and q + 1 < end and view[q + 1].isdigit():
+            q += 1   # ISO 形式の区切り（2026-09-25T10:30:00）。数字が続くときだけ飛ばす
         m = _TIME_RE.match(view, q) if w.time is None else None
         if m:
             t = _format_time(m)
@@ -1346,6 +1355,10 @@ _SENTENCE_RE = re.compile(r"[^。]*。|[^。]+$")
 _REFERENCE_RE = re.compile(r"同上|と同じ|別紙|参照")
 _CORRECTION_RE = re.compile(r"訂正|撤回|ではなく")
 _HEADER_LABEL_MAX = 10
+# 先頭の日時を囲む括弧（影テキストは1文字ずつ NFKC をかけた写しなので、（）は () になっている）。
+# 本番の帳票では「(2026/09/25 10:30:00) 田中：…」のように丸括弧で囲む書き方が多い
+_HEAD_BRACKETS = {"【": "】", "[": "]", "(": ")", "<": ">"}
+_LABEL_BRACKETS = "【["
 _MIN_SENTENCE = 15
 
 
@@ -1412,8 +1425,8 @@ def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_
     if m:
         head.marks.append("checklist")
         p = _skip_ws_until(sh, m.end(), end)
-    if p < end and sh[p] in "【[":
-        close = sh.find("】" if sh[p] == "【" else "]", p + 1, min(end, p + 32))
+    if p < end and sh[p] in _HEAD_BRACKETS:
+        close = sh.find(_HEAD_BRACKETS[sh[p]], p + 1, min(end, p + 32))
         if close > 0:
             inner_s = _skip_ws_until(sh, p + 1, close)
             w = parse_when_at(sh, inner_s, line_start=True, not_date_res=not_date_res, end=close)
@@ -1422,7 +1435,10 @@ def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_
                 head.pos = _skip_ws_until(sh, close + 1, end)
                 return head
             inner = sh[inner_s:close].strip()
-            if inner and len(inner) <= _HEADER_LABEL_MAX and not re.search(r"\d", inner):
+            # 見出し（ラベル）として扱うのは 【】 [] だけ。丸括弧は「(月)」「(休日)」「(推定)」のような
+            # 但し書きにも使うので、中が日時のときだけ目印にする
+            if sh[p] in _LABEL_BRACKETS and inner and len(inner) <= _HEADER_LABEL_MAX \
+                    and not re.search(r"\d", inner):
                 head.label = clean[inner_s:close].strip()
                 head.pos = _skip_ws_until(sh, close + 1, end)
                 return head
