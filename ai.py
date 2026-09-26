@@ -1297,18 +1297,57 @@ def _one_line(text: str) -> str:
     return re.sub(r"\s*\n\s*", " ", text or "").strip()
 
 
-def timeline_order(parse: LogParse) -> list[Segment]:
-    """描画順。新しい順の記入は、日付を持つ記録ごとの塊で古い順に並べ替える（塊の中の順は保つ）。"""
-    if parse.order != "desc":
-        return list(parse.segments)
+def _own_date(seg: Segment) -> bool:
+    """この記録が自分で日付を書いているか（継いだ・発生日で仮に置いた・無いものは除く）。"""
+    return seg.when is not None and seg.when.how not in ("inherited", "base", "none")
+
+
+def _blocks(parse: LogParse) -> list[list[Segment]]:
+    """日付を自分で持つ記録と、それに続く日付の無い記録を1つの塊にする。"""
     blocks: list[list[Segment]] = []
     for seg in parse.segments:
-        own = seg.when is not None and seg.when.how not in ("inherited", "base", "none")
-        if own or not blocks:
+        if _own_date(seg) or not blocks:
             blocks.append([seg])
         else:
             blocks[-1].append(seg)
-    return [s for block in reversed(blocks) for s in block]
+    return blocks
+
+
+def _block_keys(blocks: list[list[Segment]]) -> list[tuple[str, str]]:
+    keys: list[tuple[str, str]] = []
+    prev = ("", "")
+    for block in blocks:
+        w = block[0].when
+        if w is not None and w.date:
+            prev = (w.date, w.time or "")
+        # 日付にできなかった塊（「昨日」など）は直前と同じ位置に留める（勝手に動かさない）
+        keys.append(prev)
+    return keys
+
+
+def order_blocks(parse: LogParse) -> tuple[list[Segment], bool]:
+    """描画順と、日付の順に並べ替えたかどうか。
+
+    新しい順の記入は塊ごとに逆にして古い順にする（塊の中の順は保つ）。それでも日付が前後している
+    記入（あとから上や途中に書き足したセル）は、日付・時刻の順に並べ替える。同じ日付の塊は
+    書かれた順のまま（安定な並べ替え）。
+    """
+    blocks = _blocks(parse)
+    if parse.order == "desc":
+        blocks.reverse()
+    # 先頭の塊に日付が書かれていないとき（前置きの文）は動かさない
+    fixed = 1 if blocks and not _own_date(blocks[0][0]) else 0
+    rest = blocks[fixed:]
+    keys = _block_keys(rest)
+    reordered = any(keys[i] < keys[i - 1] for i in range(1, len(keys)))
+    if reordered:
+        rest = [rest[i] for i in sorted(range(len(rest)), key=lambda i: keys[i])]
+    return [s for block in blocks[:fixed] + rest for s in block], reordered
+
+
+def timeline_order(parse: LogParse) -> list[Segment]:
+    """描画順（order_blocks の並びだけ）。"""
+    return order_blocks(parse)[0]
 
 
 def render_timeline(parse: LogParse, entity_label: str, types: dict[str, list[str]] | None = None,
@@ -1350,7 +1389,10 @@ def review_notes(parse: LogParse) -> list[str]:
     notes: list[str] = []
     if parse.kind in ("empty", "header_cell"):
         return list(parse.warnings)
-    for n, seg in enumerate(timeline_order(parse), start=1):
+    ordered, reordered = order_blocks(parse)
+    if reordered:
+        notes.append("日付が前後して書かれていたので、日付の順に並べ替えた（番号は並べ替えたあとの順）")
+    for n, seg in enumerate(ordered, start=1):
         w = seg.when
         if w is not None and w.note and (w.estimated or w.how in ("unresolved", "base")):
             if w.how != "inherited":
@@ -1591,14 +1633,56 @@ def _split_pieces(clean: str, sh: str, options: SplitOptions, not_date_res, head
     return _split_sentences(clean, sh, out, options, not_date_res)
 
 
+# 文章の中の「(2026/03/05 09:00)」を出来事の日時とみなすかどうかの決まり。
+# 範囲の書き方（「(…9:00)から(…12:00)まで」）では切らない（1件の出来事を2件にしないため）
+_STAMP_BEFORE_NG = ("から", "より", "〜", "~", "-", "―")
+_STAMP_AFTER_NG = ("まで", "迄")
+
+
+def _inline_stamp(sh: str, p: int, end: int, floor: int, not_date_res):
+    """本文の中の、括弧で囲んだ日時の印。中が日時だけで、年か時刻まで書いてあるものに限る。
+
+    「(4/8)」「(月)」「(推定)」のような但し書きを出来事の日時にしないための条件。
+    """
+    close = sh.find(_HEAD_BRACKETS[sh[p]], p + 1, min(end, p + 32))
+    if close < 0:
+        return None
+    inner_s = _skip_ws_until(sh, p + 1, close)
+    w = parse_when_at(sh, inner_s, line_start=True, not_date_res=not_date_res, end=close)
+    if w is None or not w.has_date or not (w.full or w.time):
+        return None
+    if _skip_ws_until(sh, w.end, close) != close:
+        return None
+    before = sh[max(floor, p - 4):p].rstrip(" \t　")
+    if any(before.endswith(x) for x in _STAMP_BEFORE_NG):
+        return None
+    if any(sh.startswith(x, close + 1) for x in _STAMP_AFTER_NG):
+        return None
+    return w
+
+
+def _cut_ok(clean: str, sh: str, pc: _Piece, j: int, not_date_res) -> bool:
+    """この位置で切っていいか（行頭の日時の途中では切らない・前に文字が無いところでは切らない）。"""
+    line_head = clean.rfind("\n", pc.start, j)
+    line_s = max(pc.start, line_head + 1)
+    line_e = clean.find("\n", line_s)
+    line_e = pc.end if line_e < 0 else min(line_e, pc.end)
+    # 行頭の日時の途中では切らない（「2026年　9月　25日」のように日付の中に全角空白がある書き方）
+    if j < _parse_head(clean, sh, line_s, line_e, True, not_date_res).pos:
+        return False
+    return bool(sh[line_s:j].strip())
+
+
 def _split_inline(clean: str, sh: str, pc: _Piece, not_date_res) -> list[_Piece]:
-    """「／」「→」直後の日付、全角空白の後の「10:15：」で分ける。"""
-    # 区切りの候補（直前が「/」「→」か全角空白）がなければ1文字ずつ調べない
+    """「／」「→」直後の日付、全角空白の後の「10:15：」、文章の中の「(2026/03/05 09:00)」で分ける。"""
+    # 区切りの候補（直前が「/」「→」か全角空白、または括弧つきの日時）がなければ1文字ずつ調べない
     last = pc.end - 1
     if ("/" not in sh[pc.start:last] and "→" not in sh[pc.start:last]
-            and "　" not in clean[pc.start:last]):
+            and "　" not in clean[pc.start:last]
+            and not any(b in sh[pc.start:last] for b in _HEAD_BRACKETS)):
         return [pc]
     cuts = []
+    stamps = []
     for i in range(pc.start + 1, pc.end):
         ch, prev = sh[i], sh[i - 1]
         j = None
@@ -1611,16 +1695,18 @@ def _split_inline(clean: str, sh: str, pc: _Piece, not_date_res) -> list[_Piece]
             w = parse_when_at(sh, i, line_start=False, not_date_res=not_date_res, end=pc.end)
             if w is not None and (w.has_date or (w.time and w.end < pc.end and sh[w.end] == ":")):
                 j = i
-        if j is not None and j > pc.start and (not cuts or j > cuts[-1]):
-            line_head = clean.rfind("\n", pc.start, j)
-            line_s = max(pc.start, line_head + 1)
-            line_e = clean.find("\n", line_s)
-            line_e = pc.end if line_e < 0 else min(line_e, pc.end)
-            # 行頭の日時の途中では切らない（「2026年　9月　25日」のように日付の中に全角空白がある書き方）
-            if j < _parse_head(clean, sh, line_s, line_e, True, not_date_res).pos:
-                continue
-            if sh[line_s:j].strip():
-                cuts.append(j)
+        elif ch in _HEAD_BRACKETS and _inline_stamp(sh, i, pc.end, pc.start, not_date_res) is not None:
+            # 印が2つ以上そろってから切る（1つだけなら言及の可能性が高い）ので、ここでは数えるだけ
+            stamps.append(i)
+        if j is not None and j > pc.start and (not cuts or j > cuts[-1]) \
+                and _cut_ok(clean, sh, pc, j, not_date_res):
+            cuts.append(j)
+    if stamps:
+        head = _parse_head(clean, sh, pc.start, pc.end, pc.line_start, not_date_res).when
+        dated = 1 if (head is not None and head.has_date) else 0
+        if len(stamps) + dated >= 2:
+            cuts = sorted({j for j in cuts + stamps
+                           if j > pc.start and _cut_ok(clean, sh, pc, j, not_date_res)})
     if not cuts:
         return [pc]
     out, s = [], pc.start
