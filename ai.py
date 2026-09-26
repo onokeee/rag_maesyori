@@ -214,9 +214,11 @@ def dedupe(items) -> list[str]:
 
 ERA_BASE = {"令和": 2018, "R": 2018, "平成": 1988, "H": 1988, "昭和": 1925, "S": 1925}
 
+# 区切りは前後で同じものだけ（\5 の後方参照）。混ざったものを受けていたころは「R1.2-3」「H8.5-2」
+# のような型番が元号の日付になり、ありえない年（2019年・1996年）が付いた（2026-09-26 の総ざらいで実測）
 _ERA_RE = re.compile(
     r"(?<![A-Za-z])(令和|平成|昭和|[RHS])\s*(\d{1,2}|元)\s*"
-    r"(?:年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?|[./\-]\s*(\d{1,2})\s*[./\-]\s*(\d{1,2}))(?![\d.])"
+    r"(?:年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?|([./\-])\s*(\d{1,2})\s*\5\s*(\d{1,2}))(?![\d.])"
 )
 _YMD_RE = re.compile(
     r"(\d{4})\s*(?:年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?|([/.\-])\s*(\d{1,2})\s*\4\s*(\d{1,2}))(?![\d.])"
@@ -226,7 +228,11 @@ _MD_KANJI_RE = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 _MD_SLASH_RE = re.compile(r"(\d{1,2})/(\d{1,2})(?![\d/.%])")
 _MMDD_RE = re.compile(r"(0[1-9]|1[0-2])([0-3]\d)(?=[ \t]|$)")
 _MDOT_RE = re.compile(r"(\d{1,2})\.(\d{1,2})(?=[ \t]|$)")
-_WEEKDAY_RE = re.compile(r"\s*\(\s*[月火水木金土日](?:曜日?)?\s*\)")
+# 曜日は丸括弧のほかに [金]【金】と、括弧なしの「9/25 金 10:30」も飛ばす。
+# 丸括弧だけ見ていたころは、囲みを変えただけで後ろの時刻が日時欄に入らなかった。
+# 括弧なしは後ろが空白・コロン・行末のときだけ（「9/25 木村」の「木」や「9/25 日勤」を食わないため）
+_WEEKDAY_RE = re.compile(r"\s*(?:[(\[【]\s*[月火水木金土日](?:曜日?)?\s*[)\]】]"
+                         r"|[月火水木金土日](?:曜日?)?(?=[ \t:：]|$))")
 _RANGE_RE = re.compile(r"\s*[〜~]\s*(?:(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})|(\d{1,2})/(\d{1,2})|(\d{1,2})\s*月\s*(\d{1,2})\s*日)(?![\d/.])")
 # 秒・ミリ秒・時差（システム出力の「10:30:00」「10:30:00.123」「10:30:00+09:00」「…Z」）を読み飛ばす。
 # 残すと本文の先頭が「00 …」になり、記入者も拾えなかった（2026-09-26 の本番の指摘）。
@@ -238,11 +244,15 @@ _SECONDS = (r"(?::\d{2}(?:\.\d{1,9})?(?:Z|[+\-]\d{2}:?\d{2}(?![:\d]))?"
             r"|Z|\+\d{2}:?\d{2}(?![:\d]))?")
 # AM/PM は大文字・小文字のどちらでも、時刻の前でも後ろでも受ける（「PM1:30」「1:30pm」）。
 # 後置は最後の (?P<post>…) で拾う（先頭の群番号を変えないように末尾に置く）
+# AM/PM は点つき（P.M.）も受ける。後置は、後ろに英数字が続くときは午後の印にしない
+# （「10:29 PM2の点検」の PM を午後と取って 22:29 にし、本文の「PM」も消していた）
+_AMPM = r"(?i:[AP]\.?M\.?)"
 _TIME_RE = re.compile(
-    r"(?:((?i:AM|PM)|午前|午後)\s*)?"
+    r"(?:(" + _AMPM + r"|午前|午後)\s*)?"
     r"(?:(\d{1,2}):(\d{2})" + _SECONDS + r"(?!\d)|(\d{1,2})時(?!間)(?:(半)|(\d{1,2})分)?(?:\d{1,2}秒)?)"
-    r"(?:\s*[〜~\-]\s*(?:\d{1,2}:\d{2}" + _SECONDS + r"(?!\d)|\d{1,2}時(?!間)(?:半|\d{1,2}分)?(?:\d{1,2}秒)?))?"
-    r"(?:\s*(?P<post>(?i:AM|PM)))?"
+    r"(?:\s*[〜~\-]\s*(?P<to>\d{1,2}:\d{2}" + _SECONDS + r"(?!\d)"
+    r"|\d{1,2}時(?!間)(?:半|\d{1,2}分)?(?:\d{1,2}秒)?))?"
+    r"(?:\s*(?P<post>" + _AMPM + r")(?![A-Za-z0-9]))?"
 )
 _SHIFT_RE = re.compile(
     r"(夜勤|日勤|[123一二三]直|午前中|午前|午後|朝一|昼過ぎ|夕方|深夜|定時後|朝|昼|夜)(?=[\s:)\]】、。,]|$)"
@@ -284,37 +294,56 @@ def _valid(y: int, m: int, d: int) -> bool:
         return False
 
 
+# 数字だけで書いた日付（「1/2」「0121」「1.22」）の後ろにこれが続くときは、出来事の日付にしない。
+# 数量・比率・工程・単位を日付と読むと、本文の先頭が消えて（「個を交換した」）ありえない日付が付き、
+# 年の推定まで巻き込んで後ろの段落が1年ずれていた（2026-09-26 の総ざらいで実測）。
+# 助詞は、後ろが漢字・カタカナのときだけ見る（「9/25 でき次第」「9/25 ではなく」を日付のままにするため）。
+# 「に」は入れない（「9/25に受付」という書き方が多いため）
+_NOT_EVENT_AFTER = re.compile(
+    r"(?:の|まで|から|より|ほど|くらい|ぐらい|程度|分の)"
+    r"|[でがはもをとへ](?=[^\u3041-\u3096\s])"
+    r"|(?:個|台|本|枚|件|名|人|点|回転|回|山|工程|号|番|円|割|倍|インチ|箇所|か所|ヶ所)"
+    r"(?=[\u3041-\u3096、。，,)\]】\s]|$)"
+    r"|(?:%|℃|Ω|kPa|MPa|Pa|kg|mm|cm|km|mL|kW|kHz|Hz|rpm|ppm|dB|inch|Nm|pH)(?![A-Za-z0-9])"
+)
+# 1文字の単位は、数字にくっついているときだけ（「12/24V」）。空白を挟むと人や場所の頭文字と区別できない
+# （「9/25 A社に連絡」を日付のままにするため）
+_UNIT_LETTER = re.compile(r"[VAWLtgm](?![A-Za-z0-9])")
+
+
 def _match_date(sh: str, p: int, line_start: bool):
-    """(year|None, month, day, full, end) を返す。"""
+    """(year|None, month, day, full, end, weak) を返す。weak は数字だけで書いた日付（1/2・0121・1.22）。"""
     m = _ERA_RE.match(sh, p)
     if m:
         n = 1 if m[2] == "元" else int(m[2])
-        mo, d = (m[3], m[4]) if m[3] else (m[5], m[6])
+        mo, d = (m[3], m[4]) if m[3] else (m[6], m[7])
         y = ERA_BASE[m[1]] + n
         if _valid(y, int(mo), int(d)):
-            return y, int(mo), int(d), True, m.end()
+            return y, int(mo), int(d), True, m.end(), False
     m = _YMD_RE.match(sh, p)
     if m:
         mo, d = (m[2], m[3]) if m[2] else (m[5], m[6])
         if 1900 < int(m[1]) < 2200 and _valid(int(m[1]), int(mo), int(d)):
-            return int(m[1]), int(mo), int(d), True, m.end()
+            return int(m[1]), int(mo), int(d), True, m.end(), False
     m = _YY_RE.match(sh, p)
     if m and _valid(2000 + int(m[1]), int(m[2]), int(m[3])):
-        return 2000 + int(m[1]), int(m[2]), int(m[3]), True, m.end()
-    for rx in (_MD_KANJI_RE, _MD_SLASH_RE):
-        m = rx.match(sh, p)
-        if m and _valid(2024, int(m[1]), int(m[2])):
-            return None, int(m[1]), int(m[2]), False, m.end()
+        return 2000 + int(m[1]), int(m[2]), int(m[3]), True, m.end(), False
+    m = _MD_KANJI_RE.match(sh, p)
+    if m and _valid(2024, int(m[1]), int(m[2])):
+        return None, int(m[1]), int(m[2]), False, m.end(), False
+    m = _MD_SLASH_RE.match(sh, p)
+    if m and _valid(2024, int(m[1]), int(m[2])):
+        return None, int(m[1]), int(m[2]), False, m.end(), True
     if line_start:
         for rx in (_MMDD_RE, _MDOT_RE):
             m = rx.match(sh, p)
             if m and _valid(2024, int(m[1]), int(m[2])):
-                return None, int(m[1]), int(m[2]), False, m.end()
+                return None, int(m[1]), int(m[2]), False, m.end(), True
     return None
 
 
 def _format_time(m: re.Match) -> str | None:
-    ampm = (m[1] or m.groupdict().get("post") or "").upper()
+    ampm = (m[1] or m.groupdict().get("post") or "").upper().replace(".", "")
     if m[2] is not None:
         h, mi = int(m[2]), int(m[3])
     else:
@@ -345,10 +374,11 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
     p = pos
     w = HeadWhen(start=pos, end=pos)
     found = False
+    weak = False
     if not (not_date_res and any(r.match(view, p, p + USER_PATTERN_WINDOW) for r in not_date_res)):
         got = _match_date(view, p, line_start)
         if got:
-            w.year, w.month, w.day, w.full, p = got
+            w.year, w.month, w.day, w.full, p, weak = got
             found = True
             if p < end and view[p] == "日" and p + 1 < end and view[p + 1].isdigit():
                 # 「2026年9月25日10時30分」。日付の正規表現は末尾の「日」を諦めて止まるので、ここで飛ばす
@@ -369,6 +399,10 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
             if t is None:
                 break
             w.time = t
+            # 「10:00〜11:00」の終わりの時刻。読まないと md から消えてしまう（正規表現が食うので本文にも残らない）
+            if m.group("to"):
+                m2 = _TIME_RE.match(m.group("to"))
+                w.time_to = _format_time(m2) if m2 else None
             p = m.end()
             found = True
             continue
@@ -393,6 +427,11 @@ def parse_when_at(sh: str, pos: int, *, line_start: bool = True, not_date_res=()
         break
     if not found:
         return None
+    if weak and w.time is None and w.shift is None and w.to is None:
+        # 数字だけの日付の後ろが単位・数え方・助詞なら、数量や型番なので日付にしない
+        q = _skip_ws(view, p)
+        if _NOT_EVENT_AFTER.match(view, q) or (q == p and _UNIT_LETTER.match(view, p)):
+            return None
     if w.to is None:
         # 「9/25 22:00〜9/26 6:00」のように、時刻のあとに範囲の終わり（日付＋時刻）が来る書き方。
         # ここで読まないと「〜9/26 6:00」が本文の先頭に残る
@@ -445,24 +484,41 @@ def _mk(y: int, m: int, d: int) -> date | None:
         return None
 
 
-def _pick_year(m: int, d: int, prev: date | None, base: date | None, tol: int) -> tuple[date | None, bool]:
-    """時間の流れに沿って年を選ぶ。戻り値: (日付, 前後の逆行があったか)"""
+def _near_base(m: int, d: int, base: date) -> date | None:
+    """発生日にいちばん近い年の日付（前後1年まで見る）。"""
+    cands = [c for c in (_mk(base.year + k, m, d) for k in (-1, 0, 1)) if c]
+    return min(cands, key=lambda c: abs((c - base).days)) if cands else None
+
+
+def _pick_year(m: int, d: int, prev: date | None, base: date | None, tol: int) -> tuple[date | None, bool, bool]:
+    """時間の流れに沿って年を選ぶ。戻り値: (日付, 前後の逆行があったか, 流れから外れた日付か)
+
+    3つ目が True の日付は「別の時期の記録の転記」とみて、次の段落の年をこの日付から数えない。
+    数えていたころは、1つの戻り（「6/20 以前の記録を転記」）でそれ以降の段落が全部1年後になり、
+    8日で終わった記録が「1年後に復旧」と読めた（2026-09-26 の総ざらいで実測）。
+    """
     if prev:
         c = _mk(prev.year, m, d)
-        if c and c >= prev:
-            return c, False
-        if c and (prev - c).days <= tol:
-            return c, True
-        for y in (prev.year + 1, prev.year + 2, prev.year + 4):
-            c = _mk(y, m, d)
-            if c:
-                return c, False
-        return None, False
+        if c is None:
+            # 直前の年には無い日付（非閏年の 2/29 など）。勝手に別の年へ飛ばさない。
+            # 飛ばしていたころは 2/29 が最大2年後の閏年になり、後ろの段落も一緒にずれていた
+            return None, False, False
+        if c >= prev:
+            return c, False, False
+        if (prev - c).days <= tol:
+            return c, True, False
+        if base:
+            pick = _near_base(m, d, base)
+            if pick is not None:
+                # 発生日に近い年で前に進むなら年をまたいだだけ。戻るなら別の時期の記録とみる
+                return (pick, False, False) if pick >= prev else (pick, True, True)
+        c1 = _mk(prev.year + 1, m, d)
+        return (c1, False, False) if c1 else (None, False, False)
     if base:
-        cands = [c for c in (_mk(base.year + k, m, d) for k in (-1, 0, 1)) if c]
-        if cands:
-            return min(cands, key=lambda c: abs((c - base).days)), False
-    return None, False
+        pick = _near_base(m, d, base)
+        if pick is not None:
+            return pick, False, False
+    return None, False, False
 
 
 def _step(a: HeadWhen, b: HeadWhen) -> int:
@@ -494,6 +550,11 @@ def detect_order(heads: list[HeadWhen | None]) -> tuple[str, bool]:
     return ("desc" if bwd > fwd else "asc"), (fwd > 0 and bwd > 0)
 
 
+def _is_base_day(h: HeadWhen, base: date) -> bool:
+    """この日時表現が発生日と同じ日を指しているか（年が書いてあるときは年も見る）。"""
+    return (h.month, h.day) == (base.month, base.day) and (not h.full or h.year == base.year)
+
+
 def first_full_date(heads: list[HeadWhen | None]) -> date | None:
     for h in heads:
         if h is not None and h.full:
@@ -522,6 +583,20 @@ def _relative_range(h: HeadWhen, ref: date) -> tuple[date, date | None, bool]:
     return ref, None, True
 
 
+def _inherited(text: str, time: str | None, shift: str | None, last: WhenInfo) -> WhenInfo:
+    """日付の書かれていない段落に直前の記録の日付を継がせる。夜をまたぐ時刻だけは翌日とみる。"""
+    if (time and last.time and last.date and time < last.time
+            and last.time >= "18:00" and time <= "08:00"):
+        # 夜勤の書き方（「23:10 部品を交換」→「1:25 温度が安定」）。同じ日付のままだと md が
+        # 「23:10 のあとに 01:25」というありえない並びになる（2026-09-26 の総ざらいで実測）
+        d = (date.fromisoformat(last.date) + timedelta(days=1)).isoformat()
+        return WhenInfo(text, d, time, None, shift, True,
+                        f"日付の記載がなく、直前の記録（{last.date} {last.time}）より早い時刻なので"
+                        f"日をまたいだ翌日（{d}）と推定した", "inherited_next_day")
+    return WhenInfo(text, last.date, time, last.date_to, shift, last.estimated,
+                    "日付の記載がなく、直前の記録の日付を使った", "inherited")
+
+
 def resolve_whens(
     heads: list[HeadWhen | None],
     texts: list[str],
@@ -541,6 +616,18 @@ def resolve_whens(
     warnings: list[str] = []
     detected, mixed = detect_order(active)
     order = order_option if order_option in ("asc", "desc") else detected
+    if order_option not in ("asc", "desc") and base_date is not None:
+        # 発生日と同じ日付で始まる（終わる）セルは、その向きが記入順。
+        # 年の無い日付だけで向きを数えると、半年以上あとの日付が「近いほうへ戻った」と読まれ、
+        # 「4/10 受付／12/20 完了」が新しい順と判定されて完了が前年に回っていた（2026-09-26 に実測）
+        _dated = [h for h in active if h is not None and h.has_date]
+        if _dated:
+            _first = _is_base_day(_dated[0], base_date)
+            _last = _is_base_day(_dated[-1], base_date)
+            if _first and not _last:
+                order, mixed = "asc", False
+            elif _last and not _first:
+                order, mixed = "desc", False
     if mixed and order_option not in ("asc", "desc"):
         warnings.append("記入順が一部前後している（古い順と新しい順が混在）")
     base = base_date or first_full_date(active)
@@ -558,14 +645,16 @@ def resolve_whens(
         text = texts[i]
         if h.has_date:
             if h.full:
-                d, anomaly, how = date(h.year, h.month, h.day), False, "explicit"
+                d, anomaly, outlier, how = date(h.year, h.month, h.day), False, False, "explicit"
             else:
-                d, anomaly = _pick_year(h.month, h.day, prev, base, tolerance_days)
+                d, anomaly, outlier = _pick_year(h.month, h.day, prev, base, tolerance_days)
                 how = "year_inferred"
             if d is None:
                 year_unknown = True
+                why = ("直前の記録の年には無い日付（うるう日など）" if prev
+                       else "発生日が空で、セル内に年を含む日付がない")
                 resolved[i] = WhenInfo(text, None, h.time, None, h.shift, False,
-                                       f"原文「{text}」の年を決められない（発生日が空で、セル内に年を含む日付がない）", "year_unknown")
+                                       f"原文「{text}」の年を決められない（{why}）", "year_unknown")
                 continue
             if anomaly:
                 warnings.append(f"記入順が一部前後している（「{text}」）")
@@ -577,7 +666,8 @@ def resolve_whens(
                     d_to = _mk(y_to + 1, h.to[1], h.to[2])
             resolved[i] = WhenInfo(text, d.isoformat(), h.time, d_to.isoformat() if d_to else None,
                                    h.shift, False, "", how, h.time_to)
-            prev = d
+            if not outlier:
+                prev = d
         elif h.relative:
             if h.relative in UNRESOLVABLE:
                 resolved[i] = WhenInfo(text, None, h.time, None, h.shift, True,
@@ -607,8 +697,7 @@ def resolve_whens(
             shift = h.shift if h else None
             text = texts[i] if h else ""
             if last is not None:
-                info = WhenInfo(text, last.date, time, last.date_to, shift, last.estimated,
-                                "日付の記載がなく、直前の記録の日付を使った", "inherited")
+                info = _inherited(text, time, shift, last)
             elif base is not None:
                 info = WhenInfo(text, base.isoformat(), time, None, shift, True,
                                 f"日付の記載がなく、発生日（{base.isoformat()}）を仮に使った", "base")
@@ -618,7 +707,7 @@ def resolve_whens(
             last = info
         out.append(info)
     if year_unknown:
-        warnings.append("年を決められない日付がある（発生日が空で、セル内に年を含む日付がない）")
+        warnings.append("年を決められない日付がある（原文のまま残した）")
     if any(h is not None and h.relative in UNRESOLVABLE for h in active):
         warnings.append("「昨日」「本日」など基準の日が分からない表現は日付にしていない")
     return out, order, warnings
@@ -1259,8 +1348,12 @@ def format_when(when: WhenInfo | None) -> str:
         return f"日付不明（原文「{when.text}」）" if when.text else "日付不明"
     s = when.date
     if when.time and when.time_to:
-        # 終わりの時刻まで書かれた範囲（「9/25 22:00〜9/26 6:00」）は、日付と時刻を組にして出す
-        s = f"{s} {when.time}〜{when.date_to or when.date} {when.time_to}"
+        # 終わりの時刻まで書かれた範囲（「9/25 22:00〜9/26 6:00」）は、日付と時刻を組にして出す。
+        # 同じ日の中（「10:00〜11:00」）は日付を繰り返さない
+        if when.date_to and when.date_to != when.date:
+            s = f"{s} {when.time}〜{when.date_to} {when.time_to}"
+        else:
+            s = f"{s} {when.time}〜{when.time_to}"
     else:
         if when.date_to and when.date_to != when.date:
             s += f"〜{when.date_to}"
@@ -1297,16 +1390,33 @@ def _one_line(text: str) -> str:
     return re.sub(r"\s*\n\s*", " ", text or "").strip()
 
 
+_INHERITED = ("inherited", "inherited_next_day", "base", "none")
+
+
 def _own_date(seg: Segment) -> bool:
     """この記録が自分で日付を書いているか（継いだ・発生日で仮に置いた・無いものは除く）。"""
-    return seg.when is not None and seg.when.how not in ("inherited", "base", "none")
+    return seg.when is not None and seg.when.how not in _INHERITED
+
+
+def _own_when(seg: Segment) -> bool:
+    """塊の先頭になるか（自分で日付を書いている、または日付は継いでも自分で時刻を書いている）。
+
+    時刻を見ないでいたころは、日付を1行目だけ書いて時刻だけを並べたセル（「9/3 17:00／13:00／9:00」）が
+    書いた順のまま出ていた。日付を各行に書いたセルとで出方が変わっていた（2026-09-26 の総ざらいで実測）。
+    """
+    w = seg.when
+    if w is None:
+        return False
+    if w.how not in _INHERITED:
+        return True
+    return w.date is not None and w.time is not None and w.how != "base"
 
 
 def _blocks(parse: LogParse) -> list[list[Segment]]:
-    """日付を自分で持つ記録と、それに続く日付の無い記録を1つの塊にする。"""
+    """日付か時刻を自分で持つ記録と、それに続く日時の無い記録を1つの塊にする。"""
     blocks: list[list[Segment]] = []
     for seg in parse.segments:
-        if _own_date(seg) or not blocks:
+        if _own_when(seg) or not blocks:
             blocks.append([seg])
         else:
             blocks[-1].append(seg)
@@ -1319,7 +1429,10 @@ def _block_keys(blocks: list[list[Segment]]) -> list[tuple[str, str]]:
     for block in blocks:
         w = block[0].when
         if w is not None and w.date:
-            prev = (w.date, w.time or "")
+            # 時刻が書かれていない塊は、同じ日付の直前の塊と同じ時刻とみなす。
+            # 時刻の有無で前後を入れ替えないため（「9/3 9:00 異常」→「9/3 交換して復旧」の順を保つ）
+            time = w.time or (prev[1] if prev[0] == w.date else "")
+            prev = (w.date, time)
         # 日付にできなかった塊（「昨日」など）は直前と同じ位置に留める（勝手に動かさない）
         keys.append(prev)
     return keys
@@ -1371,6 +1484,10 @@ def render_timeline(parse: LogParse, entity_label: str, types: dict[str, list[st
         if glossary:
             body = apply_glossary(body, glossary)
         body = _one_line(body)
+        if seg.label:
+            # 【現象】【原因】のような見出し語。同じセルに日付の行があると「見出し型」にならないので、
+            # ここで本文の先頭に残さないと md から消えていた（2026-09-26 の総ざらいで実測）
+            body = f"［{seg.label}］{body}"
         head = format_when(seg.when)
         seg_types = [t for t in types.get(seg.id, []) if t]
         head += f"［{'・'.join(seg_types)}］" if seg_types else " "
@@ -1394,7 +1511,7 @@ def review_notes(parse: LogParse) -> list[str]:
         notes.append("日付が前後して書かれていたので、日付の順に並べ替えた（番号は並べ替えたあとの順）")
     for n, seg in enumerate(ordered, start=1):
         w = seg.when
-        if w is not None and w.note and (w.estimated or w.how in ("unresolved", "base")):
+        if w is not None and w.note and (w.estimated or w.how in ("unresolved", "base", "year_unknown")):
             if w.how != "inherited":
                 notes.append(f"{n}の日付は{w.note}。")
         a = seg.author
@@ -1490,6 +1607,25 @@ def _parse_head(clean: str, sh: str, start: int, end: int, line_start: bool, not
     return head
 
 
+def _bracket_when(sh: str, p: int, end: int, not_date_res, limit: int = 32):
+    """括弧で囲んだ日時を読む。戻り値: (日時, 中身の開始, 閉じ括弧の位置)。読めなければ (None, 0, -1)。
+
+    中に「(金)」のような括弧が入っていてもよいように、閉じ括弧の候補を手前から順に試す。
+    いちばん手前の「)」だけを見ていたころは「(2026/09/25(金) 10:30)」の日時がまるごと読めず、
+    行頭の目印が消えて別の日の記録が1件にまとめられていた（2026-09-26 の総ざらいで実測）。
+    """
+    close_ch = _HEAD_BRACKETS[sh[p]]
+    stop = min(end, p + limit)
+    close = sh.find(close_ch, p + 1, stop)
+    while close > 0:
+        inner_s = _skip_ws_until(sh, p + 1, close)
+        w = parse_when_at(sh, inner_s, line_start=True, not_date_res=not_date_res, end=close)
+        if w is not None and _skip_ws_until(sh, w.end, close) == close:
+            return w, inner_s, close
+        close = sh.find(close_ch, close + 1, stop)
+    return None, 0, -1
+
+
 def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_date_res) -> _Head:
     p = _skip_ws_until(sh, start, end)
     head = _Head(pos=p)
@@ -1501,14 +1637,14 @@ def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_
         head.marks.append("checklist")
         p = _skip_ws_until(sh, m.end(), end)
     if p < end and sh[p] in _HEAD_BRACKETS:
+        w, inner_s, close = _bracket_when(sh, p, end, not_date_res)
+        if w is not None:
+            head.when, head.when_text = w, clean[inner_s:w.end].strip()
+            head.pos = _skip_ws_until(sh, close + 1, end)
+            return head
         close = sh.find(_HEAD_BRACKETS[sh[p]], p + 1, min(end, p + 32))
         if close > 0:
             inner_s = _skip_ws_until(sh, p + 1, close)
-            w = parse_when_at(sh, inner_s, line_start=True, not_date_res=not_date_res, end=close)
-            if w is not None and _skip_ws_until(sh, w.end, close) == close:
-                head.when, head.when_text = w, clean[inner_s:w.end].strip()
-                head.pos = _skip_ws_until(sh, close + 1, end)
-                return head
             inner = sh[inner_s:close].strip()
             # 見出し（ラベル）として扱うのは 【】 [] だけ。丸括弧は「(月)」「(休日)」「(推定)」のような
             # 但し書きにも使うので、中が日時のときだけ目印にする
@@ -1523,6 +1659,26 @@ def _read_head(clean: str, sh: str, start: int, end: int, line_start: bool, not_
         p = w.end
     head.pos = p
     return head
+
+
+def _tail_date(clean: str, sh: str, s: int, e: int, not_date_res):
+    """行末に書いた日時（「受付した　9/1」）。戻り値: (日時, 開始位置)。無ければ (None, -1)。
+
+    本文の後ろに空白を置いて日時を書く書き方。日時のうしろに本文が無いことで見分ける。
+    行頭ではないので「1225」「10.2」のような数字だけの書き方は日付にしない（parse_when_at の決まり）。
+    """
+    end = e
+    while end > s and sh[end - 1] in " \t":
+        end -= 1
+    limit = max(s + 1, end - 40)
+    p = end - 1
+    while p >= limit:
+        if sh[p].isdigit() and sh[p - 1] in " \t":
+            w = parse_when_at(sh, p, line_start=False, not_date_res=not_date_res, end=end)
+            if w is not None and w.has_date and _skip_ws_until(sh, w.end, end) == end and sh[s:p].strip():
+                return w, p
+        p -= 1
+    return None, -1
 
 
 def _line_anchor(clean: str, sh: str, s: int, e: int, options: SplitOptions, not_date_res, extra_res) -> str | None:
@@ -1585,6 +1741,10 @@ def _lines(text: str) -> list[tuple[int, int]]:
 
 def _split_pieces(clean: str, sh: str, options: SplitOptions, not_date_res, header_mode: bool) -> list[_Piece]:
     extra_res = _compile_all(options.extra_anchors)
+    # 行末に日付を書くセルか（「受付した　9/1」）。1行だけなら書き方とは言えないので2行以上で見る
+    tail_mode = not header_mode and sum(
+        1 for s, e in _lines(clean)
+        if sh[s:e].strip() and _tail_date(clean, sh, s, e, not_date_res)[0] is not None) >= 2
     pieces: list[_Piece] = []
     cur: _Piece | None = None
     in_email = False
@@ -1608,6 +1768,8 @@ def _split_pieces(clean: str, sh: str, options: SplitOptions, not_date_res, head
             anchor = "label" if head.label else None
         else:
             anchor = _line_anchor(clean, sh, s, e, options, not_date_res, extra_res)
+            if anchor is None and tail_mode and _tail_date(clean, sh, s, e, not_date_res)[0] is not None:
+                anchor = "tail_date"
         new = cur is None or (anchor not in (None, "note")) or (blank and anchor != "note")
         if anchor == "time" and options.time_only_lines == "join" and cur is not None and not blank:
             new = False
@@ -1618,6 +1780,8 @@ def _split_pieces(clean: str, sh: str, options: SplitOptions, not_date_res, head
             cur.end = e
         if anchor == "note" and "note" not in cur.marks:
             cur.marks.append("note")
+        if anchor == "tail_date" and "tail_date" not in cur.marks:
+            cur.marks.append("tail_date")
         blank = False
     if header_mode:
         for pc in pieces:
@@ -1644,14 +1808,8 @@ def _inline_stamp(sh: str, p: int, end: int, floor: int, not_date_res):
 
     「(4/8)」「(月)」「(推定)」のような但し書きを出来事の日時にしないための条件。
     """
-    close = sh.find(_HEAD_BRACKETS[sh[p]], p + 1, min(end, p + 32))
-    if close < 0:
-        return None
-    inner_s = _skip_ws_until(sh, p + 1, close)
-    w = parse_when_at(sh, inner_s, line_start=True, not_date_res=not_date_res, end=close)
+    w, _inner_s, close = _bracket_when(sh, p, end, not_date_res)
     if w is None or not w.has_date or not (w.full or w.time):
-        return None
-    if _skip_ws_until(sh, w.end, close) != close:
         return None
     before = sh[max(floor, p - 4):p].rstrip(" \t　")
     if any(before.endswith(x) for x in _STAMP_BEFORE_NG):
@@ -1694,7 +1852,10 @@ def _split_inline(clean: str, sh: str, pc: _Piece, not_date_res) -> list[_Piece]
         elif clean[i - 1] == "\u3000" and ch.isdigit():
             w = parse_when_at(sh, i, line_start=False, not_date_res=not_date_res, end=pc.end)
             if w is not None and (w.has_date or (w.time and w.end < pc.end and sh[w.end] == ":")):
-                j = i
+                line_e = clean.find("\n", i)
+                line_e = pc.end if line_e < 0 else min(line_e, pc.end)
+                # 行末の日時（「受付した　9/1」）はこの行の日付。ここで切ると次の行の記録に付いてしまう
+                j = None if _skip_ws_until(sh, w.end, line_e) >= line_e else i
         elif ch in _HEAD_BRACKETS and _inline_stamp(sh, i, pc.end, pc.start, not_date_res) is not None:
             # 印が2つ以上そろってから切る（1つだけなら言及の可能性が高い）ので、ここでは数えるだけ
             stamps.append(i)
@@ -1805,6 +1966,11 @@ def parse_log(text, base_date: date | None = None, people: PeopleIndex | None = 
                 w = parse_when_at(sh, dspan[0], line_start=False, not_date_res=not_date_res, end=dspan[1])
                 if w is not None and w.has_date:
                     head_when, when_text = w, clean[dspan[0]:dspan[1]]
+            if head_when is None and "tail_date" in marks:
+                tw, t_s = _tail_date(clean, sh, body_s, body_e, not_date_res)
+                if tw is not None:
+                    head_when, when_text = tw, clean[t_s:tw.end].strip()
+                    body_e = t_s
         body = clean[body_s:body_e].strip(" \t　:：、")
         body = body.rstrip(" \t　／/→\n").strip()
         raw = clean[s:e]
