@@ -248,7 +248,7 @@
   </label>
 
   {% call ui_card("ファイルの分け方", "選んだ列の値ごとに Markdown を分けます。選ばないと1つのファイルにまとめます。") %}
-    <ul class="list-plain" data-group-list>
+    <ul class="list-plain">
       {% for g in group_rows %}
       <li><label><input type="checkbox" data-group-col data-index="{{ g.index }}"
              {{ 'checked' if g.checked }}> {{ g.label }}</label></li>
@@ -288,7 +288,7 @@
       {% for r in rows %}
         <tr data-col data-index="{{ r.index }}" data-header="{{ r.header }}" class="{{ '' if r.use else 'is-unused' }}">
           <td class="center"><input type="checkbox" data-field="use" {{ 'checked' if r.use }} aria-label="{{ r.header }} を使う"></td>
-          <td><strong>{{ r.header }}</strong>{% if r.note %}<br><span class="muted small" data-col-note>{{ r.note }}</span>{% endif %}</td>
+          <td><strong>{{ r.header }}</strong>{% if r.note %}<br><span class="muted small">{{ r.note }}</span>{% endif %}</td>
           <td><select data-field="role" aria-label="役割">{% for v, label in r.roles %}<option value="{{ v }}" {{ 'selected' if v == r.role }}>{{ label }}</option>{% endfor %}</select></td>
           <td class="examples">{{ r.examples | join('\n') }}</td>
         </tr>
@@ -317,8 +317,7 @@
      data-pause-url="{{ url_for('tables.ai_control', import_id=imp.id, action='pause') }}"
      data-resume-url="{{ url_for('tables.ai_control', import_id=imp.id, action='resume') }}"
      data-cancel-url="{{ url_for('tables.ai_control', import_id=imp.id, action='cancel') }}"
-     data-trial-keys='{{ trial_keys | tojson }}'
-     data-external="{{ '1' if external else '0' }}">
+     data-trial-keys='{{ trial_keys | tojson }}'>
 
   <p class="hint">④で「経過の記録」にした列「{{ log_display }}」を、ルールで日付ごとに分けて時系列にします
     （ここまでは AI なしで Markdown に出ます）。AI整形をすると、そのうえに原文と照合できた「対応の要点」と
@@ -408,7 +407,7 @@
   {#- AI接続の設定そのものはここには無い。ヘッダー右上の「AI接続」（base.html の #aiDialog）に移した
       （利用者の指示 2026-09-21）。ここでは状態と行き先だけ書く。 -#}
   <div class="sub-block">
-    <p class="hint" data-ai-where>
+    <p class="hint">
       {%- if ai_ready %}AI接続: <strong>{{ ai_state.state_label }}</strong>{% if ai_state.checked_text %}（最終確認 {{ ai_state.checked_text }}）{% endif %}。
       {%- else %}AI接続は未設定です（APIキーか接続先が入っていません）。{% endif %}
       設定と接続の確認は、画面右上の［AI接続］で行います（AIを使わなくても Markdown は作れます）。</p>
