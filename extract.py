@@ -3103,7 +3103,8 @@ class ImportSource:
 COLUMN_TYPES = ("code", "string", "text", "date", "datetime", "time", "number", "enum", "status")
 COLUMN_ROLES = ("key", "date", "entity", "entity_label", "category", "measure", "text", "log", "person", "attribute")
 MD_MODES = ("body", "attribute", "omit")
-GROUP_BY = ("month", "entity_month")
+# 記録ファイルのくくり方に使う列の上限（これ以上はファイル名も見出しも長くなりすぎる）
+MAX_GROUP_COLUMNS = 3
 ROW_POLICIES = ("exclude_with_warning", "include")
 CONTINUATION_POLICIES = ("merge_into_previous", "keep")
 CUSTOM_OUTPUT_TYPES = ("text", "choice")
@@ -3144,7 +3145,8 @@ def _default_checks() -> dict:
 
 
 def _default_markdown() -> dict:
-    return {"file_prefix": "", "group_by": "month", "records": True, "title_columns": []}
+    # group_by_columns: 記録ファイルをくくる列のキー（画面で選ぶ）。日付の列は月ごと。空なら1ファイル
+    return {"file_prefix": "", "group_by_columns": [], "records": True, "title_columns": []}
 
 
 @dataclass
@@ -3353,6 +3355,11 @@ def spec_from_dict(d: dict) -> TableSpec:
     spec.period = _merged(_default_period(), data.get("period"))
     spec.checks = _merged(_default_checks(), data.get("checks"))
     spec.markdown = _merged(_default_markdown(), data.get("markdown"), RETIRED_KEYS["markdown"])
+    if (data.get("markdown") or {}).get("group_by_columns") is None:
+        # 指定が無ければ「日付の列ごと（＝月ごと）」。前の版で保存した設定も同じ出方になる
+        has_date = any(c.key == spec.date_key for c in spec.columns)
+        spec.markdown["group_by_columns"] = [spec.date_key] if (spec.date_key and has_date) else []
+    spec.markdown["group_by_columns"] = [str(k) for k in spec.markdown["group_by_columns"]]
     log = data.get("log_stage")
     spec.log_stage = LogStageSpec(**_pick(LogStageSpec, log)) if isinstance(log, dict) and log.get("column") else None
     if spec.log_stage is not None:
@@ -3451,10 +3458,16 @@ def validate_spec(spec: TableSpec) -> list[str]:
             break
 
     md = spec.markdown or {}
-    if md.get("group_by") not in GROUP_BY:
-        errors.append("記録ファイルのまとめ方は month / entity_month から選んでください")
-    elif md.get("group_by") == "entity_month" and not spec.first_role("entity"):
-        errors.append("対象×月でまとめるには、役割「対象（設備・製品・顧客など）」の列が必要です")
+    keys = {c.key for c in spec.columns}
+    chosen = list(md.get("group_by_columns") or [])
+    if len(chosen) > MAX_GROUP_COLUMNS:
+        errors.append(f"ファイルの分け方に選べる列は{MAX_GROUP_COLUMNS}つまでです")
+    for key in chosen:
+        col = spec.column(key)
+        if key not in keys or col is None:
+            errors.append(f"ファイルの分け方に選んだ列（{key}）が出す列にありません")
+        elif col.role == "log":
+            errors.append(f"経過の記録の列「{col.display}」はファイルの分け方に使えません")
     for key in _as_list(md.get("title_columns")):
         base = str(key).split(":")[0]
         if base not in all_keys:
@@ -3711,8 +3724,11 @@ def spec_from_suggestions(name: str, layout, suggestions, options: dict | None =
         spec.log_stage = LogStageSpec(column=log_col.key, context_columns=[
             c.key for c in (spec.first_role("entity_label"), entity, spec.columns_with_role("text")[0]
                             if spec.columns_with_role("text") else None) if c is not None])
-    if options.get("group_by") in GROUP_BY:
-        spec.markdown["group_by"] = options["group_by"]
+    chosen = options.get("group_by_columns")
+    if chosen is None:
+        # 既定は「日付の列ごと（＝月ごと）」。日付の列が無ければ分けない（1ファイル）
+        chosen = [date_col.key] if date_col else []
+    spec.markdown["group_by_columns"] = [str(k) for k in chosen if any(c.key == str(k) for c in columns)]
     return spec
 
 
@@ -5953,35 +5969,68 @@ def render_all(spec: TableSpec, records: list[dict], ai_results: dict | None) ->
     return _record_files(spec, ordered, ai_results or {}, names)
 
 
+def group_columns(spec: TableSpec) -> list[ColumnSpec]:
+    """記録ファイルをくくる列。並びは表の左からの順で、日付の列だけ最後に回す。
+
+    日付を最後にするのは、ファイル名を「表の名前_対象_2026-08.md」の読み順にそろえるため。
+    """
+    chosen = set((spec.markdown or {}).get("group_by_columns") or [])
+    cols = [c for c in spec.columns if c.key in chosen]
+    return [c for c in cols if not _is_month_column(spec, c)] + [c for c in cols if _is_month_column(spec, c)]
+
+
+def _is_month_column(spec: TableSpec, col: ColumnSpec) -> bool:
+    """日付の列か（くくるときは日付そのものではなく月ごとにまとめる）。"""
+    return col.type in _DATE_TYPES or col.key == spec.date_key
+
+
+def group_value(rec: dict, spec: TableSpec, col: ColumnSpec) -> str:
+    """その記録がどのまとまりに入るかを表す値（日付の列なら YYYY-MM）。"""
+    values = rec.get("values") or {}
+    raw = str(values.get(col.key) or "")
+    if _is_month_column(spec, col):
+        return raw[:7] if is_month(raw) else ""
+    if col.role == "entity":
+        # 対象の列は、番号と名前が1つのセルに入っていれば番号だけを使い、
+        # 「調査中」「不明」のような但し書きは対象として扱わない（entity_value と同じ決まり）
+        return entity_value(values, spec)[0]
+    return _clip_title_text(_table_one_line(raw), TITLE_ENTITY_CHARS)
+
+
+def _group_name_part(spec: TableSpec, col: ColumnSpec, value: str) -> str:
+    """ファイル名に使う、そのまとまりの名前（値が空のときの書き方もここで決める）。"""
+    if value:
+        return value
+    return "日付なし" if _is_month_column(spec, col) else f"{col.display}なし"
+
+
 def _record_files(spec: TableSpec, ordered: list[dict], ai_results: dict, names: _Names) -> list[MdFile]:
-    """記録ファイル（月ごと、または対象×月ごとに1ファイル）。大きくなりすぎる分だけ件数で分ける。"""
-    md = spec.markdown or {}
+    """記録ファイル（画面で選んだ列ごとに1ファイル。選んでいなければ1ファイル）。
+
+    大きくなりすぎる分だけ件数で分ける。
+    """
     prefix = spec.file_prefix
-    by_entity = md.get("group_by") == "entity_month"
-    entity, _label = entity_columns(spec)
+    cols = group_columns(spec)
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for rec in ordered:
-        values = rec.get("values", {}) or {}
-        d = str(values.get(spec.date_key) or "")
-        month = d[:7] if is_month(d) else ""
-        eid = entity_value(values, spec)[0] if (by_entity and entity is not None) else ""
-        groups[(eid, month) if by_entity else ("", month)].append(rec)
+        groups[tuple(group_value(rec, spec, c) for c in cols)].append(rec)
     people = people_index_for(spec, ordered) if spec.log_stage else None
     files: list[MdFile] = []
-    for (eid, month) in sorted(groups, key=lambda g: (g[0], g[1] == "", g[1])):
-        recs = groups[(eid, month)]
+    for key in sorted(groups, key=lambda g: tuple((v == "", v) for v in g)):
+        recs = groups[key]
+        pairs = list(zip(cols, key))
         suffixes = _title_suffixes(recs, spec)
         built = [(r, record_blocks(r, spec, ai_results, people, suffixes.get(id(r), ""))) for r in recs]
         chunks = _split_by_size(built)
         total = len(chunks)
-        base = [prefix] + ([eid or "対象不明"] if by_entity else []) + [month or "日付なし"]
+        base = [prefix] + [_group_name_part(spec, c, v) for c, v in pairs]
         # 前後のファイル名を先頭に書くので、先に全部の名前を決める
         made = [names.make(base + ([f"{i}of{total}"] if total > 1 else [])) for i in range(1, total + 1)]
         offset = 0
         for i, chunk in enumerate(chunks):
             part = _PartInfo(index=i + 1, total=total, whole=len(recs), offset=offset,
                              prev=made[i - 1] if i else "", next=made[i + 1] if i + 1 < total else "")
-            blocks: list[list[str]] = [_record_file_header(spec, [r for r, _b in chunk], month, eid, part)]
+            blocks: list[list[str]] = [_record_file_header(spec, [r for r, _b in chunk], pairs, part)]
             for _r, record in chunk:
                 blocks += record
             files.append(MdFile(made[i], join_file(blocks), "records"))
@@ -6045,29 +6094,38 @@ def _title_suffixes(recs: list[dict], spec: TableSpec) -> dict[int, str]:
     return out
 
 
-def _record_file_header(spec: TableSpec, group: list[dict], month: str, eid: str,
-                        part: "_PartInfo | None" = None) -> list[str]:
+def _record_file_header(spec: TableSpec, group: list[dict], pairs: list, part: "_PartInfo | None" = None) -> list[str]:
+    """ファイルの先頭。どの列のどの値でくくったファイルなのかを必ず書く（切られても分かるように）。"""
     part = part or _PartInfo()
     name = spec.name
-    scope_month = month_label(month) if month else "日付なし"
-    entity_disp = ""
-    if eid:
-        entity_disp = _clip_title_text(entity_display(group[0].get("values", {}), spec)[2] or eid,
-                                       TITLE_ENTITY_CHARS)
+    month_col = next((c for c, _v in pairs if _is_month_column(spec, c)), None)
+    month = next((v for c, v in pairs if c is month_col), "") if month_col is not None else ""
+    labels = [(c, v) for c, v in pairs if not _is_month_column(spec, c)]
     title = f"# {name}"
-    if entity_disp:
-        title += f" {entity_disp}"
-    title += f" {scope_month}の記録" if month else " 日付なしの記録"
+    for _c, v in labels:
+        if v:
+            title += f" {v}"
+    title += f" {month_label(month)}の記録" if month else ("" if not month_col else " 日付なしの記録")
+    if not month_col and not any(v for _c, v in labels):
+        title += "の記録"
     if part.total > 1:
         title += f"（{part.index}/{part.total}）"
     body = [f"- データ種別: {name}（1行＝1件）の記録"]
-    if entity_disp:
-        body += md_bullet(_entity_label_name(spec), entity_disp)
+    for c, v in labels:
+        if c.role == "entity" and v:
+            # 対象の列は、番号だけでなく名前も書く（「設備: 2号機（ETC-302）」）
+            disp = _clip_title_text(entity_display(group[0].get("values", {}), spec)[2] or v, TITLE_ENTITY_CHARS)
+            body += md_bullet(_entity_label_name(spec), disp)
+        else:
+            body += md_bullet(c.display, v or f"（{c.display}なし）")
     if month:
         body.append(f"- 対象期間: {month_first_day(month)}〜{month_last_day(month)}")
-    scope = f"{eid}の{scope_month}" if eid else scope_month
+    scope_month = (month_label(month) if month else "日付なし") if month_col is not None else ""
+    named = "・".join(v for _c, v in labels if v)
+    scope = f"{named}の{scope_month}" if (named and scope_month) else (named or scope_month or "全件")
     if part.total == 1:
-        body.append(f"- このファイルの記録: {len(group):,}件（{scope}の全件）")
+        body.append(f"- このファイルの記録: {len(group):,}件（{scope}の全件）" if scope != "全件"
+                    else f"- このファイルの記録: {len(group):,}件（全件）")
         return _Block(title, body)
     # 件数で分けたとき: どのファイルも同じ表の一部だと分かるように、位置・範囲・前後を書く
     first, last = part.offset + 1, part.offset + len(group)

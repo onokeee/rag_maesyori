@@ -268,12 +268,24 @@
     ［変更する］で開いても、開かずに保存しても、送る中身（＝できる Markdown）は変わらない。
     表の列は「使う・見出し・役割・値の例」の4つだけ（「知らせ」の列は 2026-09-21 にやめた。ほとんどの行で
     空のうえ、表の上の行と同じことを書いていた）。はじめから使わない設定にしている理由だけ、見出しの下に小さく出す。
-    必要な変数: rows（選べる役割 r.roles・使わない理由 r.note を含む）, name, save_url, summary, todo -#}
+    必要な変数: rows（選べる役割 r.roles・使わない理由 r.note を含む）, name, save_url, summary, todo,
+    group_rows（ファイルの分け方に選べる列）, max_group -#}
 <div data-columns-editor data-save-url="{{ save_url }}">
   <label class="stack-label">表の名前
     <input type="text" class="input" data-setting="name" value="{{ name }}" maxlength="80" required>
     <small>Markdown のファイル名と、記録ファイルの見出しに使います。</small>
   </label>
+
+  {% call ui_card("ファイルの分け方", "選んだ列の値ごとに Markdown を分けます。選ばないと1つのファイルにまとめます。") %}
+    <ul class="list-plain" data-group-list>
+      {% for g in group_rows %}
+      <li><label><input type="checkbox" data-group-col data-index="{{ g.index }}"
+             {{ 'checked' if g.checked }}> {{ g.label }}</label></li>
+      {% endfor %}
+    </ul>
+    <p class="hint">日付の列を選ぶと<strong>月ごと</strong>にまとめます。選べるのは{{ max_group }}つまでです。
+      値の種類が多い列（管理Noなど）を選ぶとファイルがその数だけできます（できた数は次の「内容の確認」で分かります）。</p>
+  {% endcall %}
 
   {% call ui_card("列の対応づけ", "この段で決めるのは「出す列」と「役割」だけです。ほかは見出しと値から決めます。"
                                   if summary else
@@ -456,6 +468,11 @@
     <div><dt>警告</dt><dd>{{ counts.warning }}件</dd></div>
     <div><dt>Markdownファイル</dt><dd>{{ files|length }}件</dd></div>
   </dl>
+  {% if group_note %}<p class="hint">{{ group_note }}</p>{% endif %}
+  {% if many_files %}
+  <p class="warn"><strong>Markdown が {{ files|length }}件できます。</strong>
+    多すぎると LightRAG に入れるのが大変です。「列の対応づけ」に戻って、分け方の列を減らすか、値の種類が少ない列に変えられます。</p>
+  {% endif %}
   {% if stats.excluded %}
   <p><strong>除外した行と理由:</strong>
     {% for reason, n in stats.excluded.items() %}{{ reason }} {{ n }}行{% if not loop.last %}／{% endif %}{% endfor %}</p>
@@ -1005,8 +1022,18 @@
     <h3 class="sub-title">同じ日付の中の並び順と、日付なしファイルの中の並び</h3>
     <li>並び順の細かいところ。<strong>同じ日付の記録は「時刻の列 → 元の表の行番号」の順</strong>です（記録キーの文字くらべにすると「行10・行100・行11」の順になり、元の Excel と突き合わせられないため）。<code>_日付なし.md</code> の中は、<strong>日付の列に原文が残った記録が先（その文字の順）、日付が空の記録が後（元の行順）</strong>になります。</li>
 
-    <h3 class="sub-title">ファイルの分け方は月ごとだけ</h3>
-    <li><strong>ファイルの分け方は「月ごと」の1通りだけ</strong>で、画面に選ぶところはありません。同じ月の記録は、対象が違っても1つの <code>.md</code> に入ります（対象ごとに分ける仕組みは中にありますが、どの画面からも指定できません）。<p class="hint">1つの <code>.md</code> が大きくなっても、LightRAG は1ファイルを丸ごと読んでから切るので、切られ方は変わりません。</p></li>
+    <h3 class="sub-title">ファイルの分け方は列で選ぶ</h3>
+    <li><strong>「列の対応づけ」の段で、くくる列を選びます</strong>（3つまで）。選んだ列の値ごとに <code>.md</code> を分けます。
+      <ul class="list-plain">
+      <li><strong>日付の列</strong>を選ぶと<strong>月ごと</strong>（<code>表の名前_2026-08.md</code>）。既定はこれです</li>
+      <li>ほかの列は<strong>値ごと</strong>（<code>表の名前_あかね商事.md</code>）。値が空の記録は <code>表の名前_取引先なし.md</code> に入ります</li>
+      <li>2つ以上選ぶと組み合わせごと（<code>表の名前_あかね商事_2026-08.md</code>）。<strong>日付は名前のいちばん後ろ</strong>に付きます</li>
+      <li><strong>1つも選ばなければ1つのファイル</strong>にまとめます（<code>表の名前.md</code>）</li>
+      <li>「経過の記録」の列は選べません（値が長文で、ファイル名にならないため）</li>
+      </ul>
+      <p class="hint">値の種類が多い列（管理Noなど）を選ぶと、その数だけファイルができます。できた数は「内容の確認」に出て、
+      {{ '200' }}件以上になると注意を出します（止めはしません）。1つの <code>.md</code> が大きくなりすぎるときは、
+      いままでどおり件数で「1of3」のように分けます。</p></li>
   </div>
 
   <div class="card" id="g21">

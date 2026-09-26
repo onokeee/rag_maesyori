@@ -2648,6 +2648,8 @@ def purge_session(session_id, *, include_busy: bool = False) -> int:
 ####################################################################################################
 
 from extract import (
+    group_columns,
+    MAX_GROUP_COLUMNS,
     count_levels,
     has_blocking,
     suggest_columns,
@@ -3442,6 +3444,13 @@ def _build_spec(payload: dict, guess, suggestions):
     name = str(payload.get("name") or "").strip()
     header_rows = list(getattr(guess, "header_rows", None) or [1])
     spec = spec_from_suggestions(name, {"table_kind": "list", "header_rows": header_rows}, used)
+    if payload.get("group_by") is not None:
+        # ファイルの分け方。画面は列の位置（index）で送る。列のキーはここで決まるので、
+        # 作った spec の列から引く（画面の段階ではキーがまだ無い列がある）
+        order = [u["index"] for u in used]
+        chosen = [_int(x, -1) for x in _as_list_payload(payload.get("group_by"))]
+        spec.markdown["group_by_columns"] = [spec.columns[order.index(i)].key for i in chosen
+                                             if i in order and order.index(i) < len(spec.columns)]
     errors = validate_spec(spec)
     if date_errors:
         # 「型を日付にしてください」は画面に直す場所が無いので、こちらの言い方に置き換える
@@ -3450,6 +3459,38 @@ def _build_spec(payload: dict, guess, suggestions):
         # 黙って最初の列だけを経過の記録にしない（2列目は日付ごとに分けられず1行につながれて出てしまう）
         errors.insert(0, "経過の記録の列は1つだけにしてください")
     return spec, errors
+
+
+# 記録ファイルがこの数以上になったら、確認の画面で知らせる（止めはしない）
+MANY_FILES_WARN = 200
+
+
+def _as_list_payload(value) -> list:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _group_rows(rows: list[dict], suggestions, spec) -> list[dict]:
+    """「ファイルの分け方」に出すチェックの一覧（出す列だけ。経過の記録は除く）。"""
+    chosen = set((spec.markdown or {}).get("group_by_columns") or []) if spec is not None else set()
+    fresh = spec is None
+    out = []
+    for row, sugg in zip(rows, suggestions):
+        if not row["use"] or row["role"] == "log":
+            continue
+        is_date = sugg.type in DATE_TYPES or row["role"] == "date"
+        out.append({"index": sugg.index, "label": sugg.header + ("（月ごと）" if is_date else ""),
+                    "checked": (is_date if fresh else sugg.key in chosen)})
+    return out
+
+
+def _group_note(spec) -> str:
+    """確認の画面に出す「いまの分け方」の一言。"""
+    if spec is None:
+        return ""
+    cols = group_columns(spec)
+    if not cols:
+        return "分け方: 1つのファイルにまとめています"
+    return "分け方: " + "・".join(c.display + ("（月ごと）" if c.key == spec.date_key else "") for c in cols) + " ごと"
 
 
 def _panel_columns(imp: dict):
@@ -3478,11 +3519,12 @@ def _panel_columns(imp: dict):
                 row["role"] = _screen_role(col.role)
     for row in rows:
         row["roles"] = _roles_for(row)
+    group_rows = _group_rows(rows, suggestions, spec)
     # 決めることが無ければ表をたたんで要約1行にする（表は隠すだけで残すので、保存で送る中身は同じ）
     pairs = list(zip(rows, suggestions))
     todo = _columns_todo(pairs)
-    html = render_part("base.html", "part_columns", rows=rows, todo=todo,
-        summary="" if todo else _columns_summary(pairs),
+    html = render_part("base.html", "part_columns", rows=rows, todo=todo, group_rows=group_rows,
+        max_group=MAX_GROUP_COLUMNS, summary="" if todo else _columns_summary(pairs),
         name=spec.name if spec is not None else _default_table_name(imp),
         save_url=url_for("tables.save_columns", import_id=import_id))
     return _panel(html, note=f"{sum(1 for r in rows if r['use'])}／{len(rows)}列")
@@ -3932,7 +3974,8 @@ def _panel_preview(imp: dict, page: int = 1):
     html = render_part("base.html", "part_preview", imp=imp, spec=spec, stats=stats, issues=shown[:ISSUES_SHOWN],
         issue_total=len(issues), counts=count_levels(issues), blocking=blocking, files=files, data_rows=data_rows,
         page=page, total_pages=total_pages, columns=[(c.key, _display_with_unit(c)) for c in spec.columns],
-        confirmed=imp["status"] == "confirmed", delete_note=TABLES_DELETE_ON_DOWNLOAD_NOTE)
+        confirmed=imp["status"] == "confirmed", delete_note=TABLES_DELETE_ON_DOWNLOAD_NOTE,
+        many_files=len(files) >= MANY_FILES_WARN, group_note=_group_note(spec))
     return _panel(html, note=f"{stats.get('records') or 0}件・{len(files)}ファイル", blocking=blocking,
                   confirmed=imp["status"] == "confirmed")
 

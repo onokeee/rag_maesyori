@@ -1240,10 +1240,13 @@ window.ragAiHeader = (() => {
       use: tr.querySelector("[data-field=use]").checked,
       role: tr.querySelector("[data-field=role]").value,
     }));
+    // ファイルの分け方（チェックした列の位置。1つも無ければ「分けない」として空で送る）
+    const group_by = [...editor.querySelectorAll("[data-group-col]")]
+      .filter((box) => box.checked).map((box) => Number(box.dataset.index));
     button.disabled = true;
     errors.replaceChildren();
     try {
-      const res = await rf(editor.dataset.saveUrl, { json: { name, columns }, quiet: true });
+      const res = await rf(editor.dataset.saveUrl, { json: { name, columns, group_by }, quiet: true });
       setNote("columns", name);
       sections.done("columns", name);
       afterAction(res);
