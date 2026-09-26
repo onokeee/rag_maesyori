@@ -177,8 +177,6 @@ hr { border: 0; border-top: 1px solid var(--border); margin: var(--sp-4) 0; }
 .btn-row.end { justify-content: flex-end; }
 .btn-row form { margin: 0; }
 .link-like { color: var(--primary); text-decoration: underline; cursor: pointer; }
-/* 見出しの横に置く小さなフォーム */
-form.inline { display: inline; margin: 0 0 0 .8rem; font-weight: 400; font-size: .85rem; }
 
 /* ===== 入力 ===== */
 .input, .field input[type=text], .field input[type=search], .field input[type=date], .field select, .field textarea {
@@ -379,7 +377,6 @@ fieldset.plain > legend { font-size: .95rem; font-weight: 700; color: var(--text
   box-shadow: var(--shadow-lg);
 }
 .toast-err { background: var(--danger-soft); border-color: var(--danger-line); color: #8e2a1f; }
-.toast-info { background: var(--primary-soft); border-color: var(--primary-line); color: #1d4a8a; }
 
 /* 進捗 */
 .progress-box { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-3) var(--sp-4); background: var(--surface-2); }

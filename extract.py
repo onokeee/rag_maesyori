@@ -43,7 +43,7 @@ from openpyxl.comments.comment_sheet import CommentSheet
 from openpyxl.packaging.relationship import get_dependents, get_rels_path, RelationshipList
 from openpyxl.styles.numbers import BUILTIN_FORMATS, BUILTIN_FORMATS_MAX_SIZE
 from openpyxl.utils import column_index_from_string, get_column_letter, range_boundaries
-from openpyxl.utils.cell import column_index_from_string, coordinate_to_tuple
+from openpyxl.utils.cell import coordinate_to_tuple
 from openpyxl.utils.datetime import CALENDAR_MAC_1904, from_excel, MAC_EPOCH, WINDOWS_EPOCH
 from openpyxl.worksheet._reader import INLINE_STRING, WorkSheetParser, WorksheetReader
 from openpyxl.worksheet.table import Table as XlTable
@@ -6322,10 +6322,13 @@ def _write_md_dir(target: Path, files: list[MdFile]) -> None:
     limit = path_limit()
     if limit is not None and files:
         longest = max(files, key=lambda f: len(f.name)).name
-        if len(os.path.abspath(tmp)) + 1 + len(longest) > limit:
-            # Windows のパスの長さの上限（260文字）を超えると、書けずに分かりにくいエラーで止まる
+        room = limit - len(os.path.abspath(tmp)) - 1
+        if len(longest) > room:
+            # Windows のパスの長さの上限（259文字）を超えると、書けずに分かりにくいエラーで止まる。
+            # 「最長 N文字」だけ書いていたころは、その N が許される上限のように読めた
             raise PipelineError(
-                f"Markdownのファイル名が長すぎて、サーバーのデータの置き場所に書けません（最長 {len(longest)}文字）。"
+                f"Markdownのファイル名が長すぎて、サーバーのデータの置き場所に書けません"
+                f"（いちばん長い名前が{len(longest)}文字、この置き場所に入るのは{max(0, room)}文字まで）。"
                 "「表の名前」を短くするか、アプリを浅いフォルダに置いてください")
     shutil.rmtree(tmp, ignore_errors=True)
     # 親（imports/<id>/）は作り直さない。消された取り込みのフォルダを復活させないため（design.md 3.3）
